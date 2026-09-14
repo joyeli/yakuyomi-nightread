@@ -721,10 +721,17 @@ def sticker_plan(g, img_bgr, lab, stats, gutter_ids, panel_ids, frameless, regio
     return accept, audit, promoted
 
 
-def thick_ink_aura(g, r=PB_AURA_R, thick=PB_AURA_THICK, min_area=PB_AURA_MIN_AREA):
+def thick_ink_aura(g, r=PB_AURA_R, thick=PB_AURA_THICK, min_area=PB_AURA_MIN_AREA, seg=None):
     """厚墨灰暈遮罩：髮團/臉部深色特徵這類「厚」墨塊（距離變換最大值 ≥ thick、面積 ≥ min_area）
-    周圍 r px。字框/氣泡輪廓/格線是細筆畫、不算厚墨。偽泡與貼紙核心填色共用＝臉旁的白不准填。"""
+    周圍 r px。字框/氣泡輪廓/格線是細筆畫、不算厚墨。偽泡與貼紙核心填色共用＝臉旁的白不准填。
+
+    ⚠️ [seg]＝文字筆畫遮罩，**必須傳**（能拿到時）：粗體字的筆畫本身就厚（距離變換 ≥6px），
+    不扣掉會被當成髮團 → 在每個字周圍挖出 r px 的洞、洞停在場景灰 ⇒ 深底氣泡裡出現貼著字的
+    灰直條/矩形（使用者 2026-09-14 回報「文字之間出現灰底」的真凶）。字不是人物，扣掉才對。
+    """
     ink = (g < WHITE_TH).astype(np.uint8)
+    if seg is not None:
+        ink[seg] = 0                                   # 文字筆畫不算「墨團」
     dt = cv2.distanceTransform(ink, cv2.DIST_L2, 3)
     n_i, lb_i, st_i, _ = cv2.connectedComponentsWithStats(ink, 8)
     thick_ids = np.zeros(n_i, bool)
@@ -769,7 +776,7 @@ def broad_core_fill(comp, seeds, neck_r=CORE_NECK_R, recover_r=CORE_RECOVER_R):
     return geodesic_grow(filled, comp, recover_r, step=3)
 
 
-def paint_sticker(out, g, lab, stats, accept, bubble, core_ids=(), frame=None):
+def paint_sticker(out, g, lab, stats, accept, bubble, core_ids=(), frame=None, seg=None):
     """修法4 合成：W 填深、前景描白邊（dilate(F, r) ∩ W）、W 內孤立小噪點吞掉、
     eaten 聚團區域級保護（不填黑、原樣留 D2）。
 
@@ -813,7 +820,8 @@ def paint_sticker(out, g, lab, stats, accept, bubble, core_ids=(), frame=None):
                 fr8 = (~fr).astype(np.uint8)
                 euc = cv2.distanceTransform(fr8, cv2.DIST_L2, 3)
                 fill = fill & (geo <= GEO_RATIO_MAX * euc + GEO_SLACK)
-                fill = fill & ~thick_ink_aura(sub)         # 臉旁（髮團/深色特徵周圍）的白不填
+                sub_seg = seg[y0:y1, x0:x1] if seg is not None else None
+                fill = fill & ~thick_ink_aura(sub, seg=sub_seg)   # 臉旁（髮團/深色特徵周圍）的白不填
             if not fill.any():
                 continue
         else:
@@ -986,7 +994,7 @@ def paint_bubbles(out, g, bubble, seg, text_pad=2):
     return out
 
 
-def build_pseudo_bubbles(g, regions, bubble):
+def build_pseudo_bubbles(g, regions, bubble, seg=None):
     """偽泡（demo02 型救回）：氣泡遮罩蓋率 < PB_COV_MAX 的 text region（開口氣泡＝泡內白
     流出去與留白/背景連通而被氣泡遮罩拒收；或字直接寫在背景/留白上），從「字底下的白」
     出發在輕切頸後的白域內測地生長（距離上限＝bbox 尺度）→ 得到泡狀填色遮罩，交
@@ -998,7 +1006,7 @@ def build_pseudo_bubbles(g, regions, bubble):
     w_cut = geodesic_grow(w_cut > 0, white, PB_NECK_R, step=3)   # 回收切掉的邊緣
     # 厚墨灰暈：髮團/臉部深色特徵這類「厚」墨塊周圍 PB_AURA_R 內的白不准偽泡長進去；
     # 字框/氣泡輪廓是細筆畫（距離變換最大值 < PB_AURA_THICK）、不算厚墨 ⇒ 開口泡仍可填到框邊。
-    w_cut &= ~thick_ink_aura(g)
+    w_cut &= ~thick_ink_aura(g, seg=seg)
     pb = np.zeros((H, W_), bool)
     for r_ in regions:
         x0, y0, x1, y1 = r_["bbox"]
@@ -1111,11 +1119,11 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
             out = paint_gutter(out, g, keep, frame=frame if frame is not None else np.zeros_like(gutter, np.uint8), bubble=bubble)
     if sticker and EXP_STICKER:                         # 修法4：純白背景填黑＋前景白描邊
         out = paint_sticker(out, g, lab, stats, sticker, bubble,
-                            core_ids=core_ids, frame=frame)
+                            core_ids=core_ids, frame=frame, seg=seg)
     if EXP_BUBBLE:
         out = paint_bubbles(out, g, bubble, seg)
     if regions is not None and EXP_PSEUDO:              # 偽泡：開口泡/字壓背景/字壓留白救回
-        pb = build_pseudo_bubbles(g, regions, bubble)
+        pb = build_pseudo_bubbles(g, regions, bubble, seg=seg)
         if pb.any():
             out = paint_bubbles(out, g, pb, seg)
         skip = bubble | pb | gutter
