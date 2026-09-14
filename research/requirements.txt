@@ -1,0 +1,3 @@
+# 與 yakuyomi-engine/parity/requirements.txt 相同環境（torch + DBNet ckpt 由 engine parity 載入）
+opencv-python-headless>=4.9
+numpy>=1.26
