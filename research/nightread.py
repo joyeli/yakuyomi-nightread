@@ -192,10 +192,15 @@ SAFE_STICKER = os.environ.get("NIGHTREAD_SAFE_STICKER", "1") == "1"   # panel �
 # 守護框證明紅線在無語意下不可達（局部幾何/灰階特徵全失效）⇒ 有遮罩時「所有填色機制一律避開」。
 # CHAR_DILATE：遮罩外擴，補模型邊界誤差（YOLO-seg 的 proto 是輸入 1/4 解析度）。
 CHARMASK_DIR = os.environ.get("NIGHTREAD_CHARMASK", "")
-CHAR_DILATE = int(os.environ.get("NIGHTREAD_CHAR_DILATE", "6"))
+CHAR_DILATE = int(os.environ.get("NIGHTREAD_CHAR_DILATE", "20"))   # 定案：20（6→20 多救 11 框、只付 1pt）
 # 人物上的氣泡誰優先：bubble＝泡贏（字壓臉時仍深底亮字，臉被吃）；char＝人物贏（泡讓開、
 # 字留在場景調上＝該處不變暗但臉保住）。守護框上差 27 框，觀感上差「字壓臉的可讀性」。
-CHAR_OVER_BUBBLE = os.environ.get("NIGHTREAD_CHAR_OVER_BUBBLE", "0") == "1"
+CHAR_OVER_BUBBLE = os.environ.get("NIGHTREAD_CHAR_OVER_BUBBLE", "1") == "1"  # 定案：人物優先
+# 字貼身暗襯（人物優先時保住 onArt 字的可讀性）：人物區還原時，留一條貼著文字筆畫的窄帶
+# **不**還原 ⇒ 該帶維持「填深＋亮字」。動機：寫在畫面上的字靠原作白描邊與畫面分離，但 lin8 把
+# 白描邊壓成 140、畫面也在 90–140 ⇒ 描邊失效、字埋進畫面（demo01 上兩格實例）。窄帶面積小，
+# 且該處原本就被字本身遮住 ⇒ 不損人物細節。0＝關（整塊還原）。
+TEXT_BACKING_R = int(os.environ.get("NIGHTREAD_TEXT_BACKING", "5"))
 SAFE_GUTTER_FAT = float(os.environ.get("NIGHTREAD_GUTTER_FAT", "0"))   # >0：留白元件最大內切半徑超過此 px ＝「肥留白」
                                                                         # （含出血人物的臉/外套），整顆不填。真格間薄帶 ≤30。
 BUBBLE_MAX_OVERRIDE = float(os.environ.get("NIGHTREAD_BUBBLE_MAX", "0"))  # >0 覆蓋 BUBBLE_COMP_MAX_FRAC
@@ -1169,6 +1174,12 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
             restore &= ~bubble
             if regions is not None and EXP_PSEUDO and pb.any():
                 restore &= ~pb
+        elif TEXT_BACKING_R > 0:
+            # 人物優先，但字貼身暗襯保留（見 TEXT_BACKING_R）
+            text_on_char = (bubble | pb) & charmask & seg
+            if text_on_char.any():
+                kb = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (TEXT_BACKING_R * 2 + 1,) * 2)
+                restore &= ~(cv2.dilate(text_on_char.astype(np.uint8), kb) > 0)
         out[restore] = scene_keep[restore]
     return np.clip(out, 0, 255).astype(np.uint8)
 
