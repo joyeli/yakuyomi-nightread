@@ -6,3 +6,4 @@ build/
 local.properties
 .idea/
 *.iml
+research/out/models/

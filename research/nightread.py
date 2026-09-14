@@ -188,6 +188,14 @@ SAFE_GUTTER = os.environ.get("NIGHTREAD_SAFE_GUTTER", "1") == "1"   # 留白只�
 SAFE_GUTTER_DEPTH = float(os.environ.get("NIGHTREAD_GUTTER_DEPTH", "0.12"))
 SAFE_BUBBLE_RATIO = float(os.environ.get("NIGHTREAD_BUBBLE_RATIO", "3.0"))  # 泡元件面積 ≤ 字 bbox × 此；0=關
 SAFE_STICKER = os.environ.get("NIGHTREAD_SAFE_STICKER", "1") == "1"   # panel 貼紙也一律核心填色+厚墨灰暈（不整顆填）
+# 人物前景遮罩（語意禁填區）：NIGHTREAD_CHARMASK=<dir> 指向 charmask.py 產的 <page>_char.png。
+# 守護框證明紅線在無語意下不可達（局部幾何/灰階特徵全失效）⇒ 有遮罩時「所有填色機制一律避開」。
+# CHAR_DILATE：遮罩外擴，補模型邊界誤差（YOLO-seg 的 proto 是輸入 1/4 解析度）。
+CHARMASK_DIR = os.environ.get("NIGHTREAD_CHARMASK", "")
+CHAR_DILATE = int(os.environ.get("NIGHTREAD_CHAR_DILATE", "6"))
+# 人物上的氣泡誰優先：bubble＝泡贏（字壓臉時仍深底亮字，臉被吃）；char＝人物贏（泡讓開、
+# 字留在場景調上＝該處不變暗但臉保住）。守護框上差 27 框，觀感上差「字壓臉的可讀性」。
+CHAR_OVER_BUBBLE = os.environ.get("NIGHTREAD_CHAR_OVER_BUBBLE", "0") == "1"
 SAFE_GUTTER_FAT = float(os.environ.get("NIGHTREAD_GUTTER_FAT", "0"))   # >0：留白元件最大內切半徑超過此 px ＝「肥留白」
                                                                         # （含出血人物的臉/外套），整顆不填。真格間薄帶 ≤30。
 BUBBLE_MAX_OVERRIDE = float(os.environ.get("NIGHTREAD_BUBBLE_MAX", "0"))  # >0 覆蓋 BUBBLE_COMP_MAX_FRAC
@@ -310,6 +318,24 @@ def detect(img_bgr):
 
 
 # ── 遮罩：白元件分類（修法2/3）＋氣泡（修法1）───────────────────────
+
+def load_charmask(page_path, shape):
+    """讀 charmask.py 產的人物遮罩（255=人物），外擴 CHAR_DILATE 後回傳 bool；無遮罩回 None。"""
+    if not CHARMASK_DIR:
+        return None
+    name = os.path.splitext(os.path.basename(page_path))[0]
+    fp = os.path.join(CHARMASK_DIR, f"{name}_char.png")
+    m = cv2.imread(fp, cv2.IMREAD_GRAYSCALE)
+    if m is None:
+        return None
+    if m.shape != shape:
+        m = cv2.resize(m, (shape[1], shape[0]), interpolation=cv2.INTER_NEAREST)
+    keep = m > 127
+    if CHAR_DILATE > 0:
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (CHAR_DILATE * 2 + 1,) * 2)
+        keep = cv2.dilate(keep.astype(np.uint8), k) > 0
+    return keep
+
 
 def normalize_paper(g, img_bgr=None):
     """紙白正規化：亮部（≥PAPER_PEAK_LO）眾數當紙白峰；峰 < PAPER_NORM_MIN 且**峰值區近乎無彩**時
@@ -1070,9 +1096,10 @@ def harmonize_enclosed_whites(out, g, lab, stats, skip_mask):
 
 
 def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
-            core_ids=(), frame=None, regions=None):
+            core_ids=(), frame=None, regions=None, charmask=None):
     """整頁合成：D2 畫面 →（有框頁才）留白填深 → 修法4 貼紙式背景 → 氣泡重繪。"""
     out = scene_final(g, seg).astype(np.float32)
+    scene_keep = out.copy() if charmask is not None else None   # 人物區最終一律還原成場景調
     if not EXP_GUTTER:
         pass
     elif not frameless and not SAFE_GUTTER:             # 修法2：無框頁背景不填深
@@ -1122,6 +1149,7 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
                             core_ids=core_ids, frame=frame, seg=seg)
     if EXP_BUBBLE:
         out = paint_bubbles(out, g, bubble, seg)
+    pb = np.zeros_like(bubble)
     if regions is not None and EXP_PSEUDO:              # 偽泡：開口泡/字壓背景/字壓留白救回
         pb = build_pseudo_bubbles(g, regions, bubble, seg=seg)
         if pb.any():
@@ -1131,6 +1159,17 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
         skip = bubble | gutter
     if lab is not None and EXP_HARMONIZE:               # 批1.5：浮在黑裡的空白人頭一致化
         out = harmonize_enclosed_whites(out, g, lab, stats, skip)
+    if charmask is not None:
+        # 語意禁填：人物區（含描邊外擴）一律還原場景調。放最後＝不必逐機制改，任何新填色
+        # 機制自動受保護。**只扣氣泡/偽泡**（人物身上的對話框仍該深底亮字）——
+        # ⚠️ 不能扣 gutter：白衣被塗黑正是 gutter 幹的（出血人物與頁白同元件），
+        # 扣了等於把最大宗的違規排除在保護外（實測 55→52 框、几乎沒救到）。
+        restore = charmask.copy()
+        if not CHAR_OVER_BUBBLE:
+            restore &= ~bubble
+            if regions is not None and EXP_PSEUDO and pb.any():
+                restore &= ~pb
+        out[restore] = scene_keep[restore]
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
@@ -1200,8 +1239,9 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000):
     panel_scene = np.isin(lab, sorted(panel_show)) if panel_show else np.zeros((H, W), bool)
     sticker_mask = np.isin(lab, sorted(sticker)) if sticker else np.zeros((H, W), bool)
     lhm, lvm = frame_line_mask(g)
+    charmask = load_charmask(page_path, g.shape)
     final = compose(g, gutter, bubble, seg, frameless, lab, stats, sticker,
-                    core_ids=promoted, frame=(lhm | lvm), regions=regions)
+                    core_ids=promoted, frame=(lhm | lvm), regions=regions, charmask=charmask)
 
     pref = os.path.join(outdir, name)
     with open(f"{pref}_regions.json", "w", encoding="utf-8") as f:
