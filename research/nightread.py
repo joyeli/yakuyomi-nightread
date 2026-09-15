@@ -218,7 +218,10 @@ CHARMASK_DIR = os.environ.get("NIGHTREAD_CHARMASK", "")
 # 空＝偽泡一律輸給人物保護（舊行為）。
 CHARMASK_PRECISE_DIR = os.environ.get("NIGHTREAD_CHARMASK_PRECISE", "")
 BUBBLE_TRIM_CHAR = os.environ.get("NIGHTREAD_BUBBLE_TRIM_CHAR", "1") == "1"   # 泡遮罩不得跨進人物
-BUBBLE_SNAP = int(os.environ.get("NIGHTREAD_BUBBLE_SNAP", "0"))   # 泡貼墨收邊（縮泡框與黑底間的白環）
+BUBBLE_SNAP = int(os.environ.get("NIGHTREAD_BUBBLE_SNAP", "0"))
+BUBBLE_REST_FILL = os.environ.get("NIGHTREAD_BUBBLE_REST", "1") == "1"   # 核心填色的剩餘部分當背景填深
+BUBBLE_REST_STICKER = os.environ.get("NIGHTREAD_BUBBLE_REST_STICKER", "1") == "1"  # 同上推廣到貼紙擢升元件
+BUBBLE_REST_NEAR = int(os.environ.get("NIGHTREAD_BUBBLE_REST_NEAR", "20"))   # 剩餘填深只在泡外此距離內（0=不限）
 CHAR_DILATE = int(os.environ.get("NIGHTREAD_CHAR_DILATE", "0"))    # 定案 0：均勻外擴已被貼墨收邊取代
 # 外擴貼墨收邊：均勻外擴 20px 會在角色外圍留一圈等寬留白（使用者 2026-09-15：「越細越好」）。
 # 角色輪廓本來就是**畫出來的墨線** ⇒ 改成「在非墨區內測地生長」：遮罩不足處長到碰輪廓就停、
@@ -605,7 +608,7 @@ def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids, charmask=None):
     seg_u8 = seg.astype(np.uint8) * 255
     seg_dil = cv2.dilate(seg_u8, np.ones((9, 9), np.uint8))  # 筆畫外擴→碰得到氣泡白底
     bubble = np.zeros((H, W), bool)
-    merged, rejected = set(), set()
+    merged, rejected, cored = set(), set(), set()
     # 先數「每個白元件被幾個文字區命中」：相連的雙泡是**同一個白元件**（ch34_015 左下格 4.78% 頁），
     # 用單一字框當分母會讓比值假性超標（2.32/3.96 > 2.0）⇒ 兩顆泡都被拒收、內部留場景灰、
     # 只剩泡框被描亮成粗白環（使用者回報）。分母改成該元件**所有**命中字區的長邊²總和。
@@ -673,12 +676,13 @@ def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids, charmask=None):
                     continue
                 bubble[by:by + bh, bx:bx + bw] |= core
                 merged.add(int(i))
+                cored.add(int(i))
                 continue
             else:
                 bubble |= lab == i
             merged.add(int(i))
         bubble[y0:y1, x0:x1] |= seg[y0:y1, x0:x1]       # 區內筆畫本身一定算氣泡內容
-    return bubble, merged, rejected
+    return bubble, merged, rejected, cored
 
 
 # ── 修法4：純白背景填黑＋前景白描邊（貼紙式）────────────────────────
@@ -1195,7 +1199,9 @@ def paint_gutter(out, g, gutter, frame=None, bubble=None):
     return out
 
 
-TEXT_PAD = int(os.environ.get("NIGHTREAD_TEXT_PAD", "2"))   # 泡內文字描亮外擴（字間白底的嫌疑）
+TEXT_PAD = int(os.environ.get("NIGHTREAD_TEXT_PAD", "2"))   # 泡內文字描亮外擴
+TEXT_GAMMA = float(os.environ.get("NIGHTREAD_TEXT_GAMMA", "1.4"))   # 泡內字的墨度增益
+TEXT_KNEE = float(os.environ.get("NIGHTREAD_TEXT_KNEE", "0.35"))   # 低墨度壓黑的門檻
 
 
 def paint_bubbles(out, g, bubble, seg, text_pad=None):
@@ -1205,7 +1211,14 @@ def paint_bubbles(out, g, bubble, seg, text_pad=None):
         text_pad = TEXT_PAD
     kt = np.ones((text_pad * 2 + 1,) * 2, np.uint8)
     text = (cv2.dilate((seg & bubble).astype(np.uint8), kt) > 0) & bubble
-    out[text] = np.maximum(out[text], BG + ink_alpha(g, 1.4)[text] * (INK - BG))
+    # gamma 越大＝字邊緣過渡越陡：泡內除了亮字之外應該全黑，1.4 會讓抗鋸齒邊緣留一圈中灰
+    # （泡內 5.7% 像素落在 40–180，使用者感知為「文字間有白底」）。
+    a = ink_alpha(g, TEXT_GAMMA)
+    if TEXT_KNEE > 0:
+        # knee：把低墨度（字的抗鋸齒過渡）壓成 0＝純黑，字本體不受影響。gain 加大沒用——它是線性
+        # 放大、只會讓更多像素變亮（實測殘灰 6.9→5.4% 但亮區反升）。
+        a = np.clip((a - TEXT_KNEE) / (1.0 - TEXT_KNEE), 0.0, 1.0)
+    out[text] = np.maximum(out[text], BG + a[text] * (INK - BG))
     ko = np.ones((STROKE * 2 + 1,) * 2, np.uint8)
     band = (cv2.dilate(bubble.astype(np.uint8), ko) > 0) & ~bubble
     out[band] = np.maximum(out[band], BG + ink_alpha(g, 1.6)[band] * (INK - BG))
@@ -1289,7 +1302,7 @@ def harmonize_enclosed_whites(out, g, lab, stats, skip_mask):
 
 
 def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
-            core_ids=(), frame=None, regions=None, charmask=None, veto=None, precise=None):
+            core_ids=(), frame=None, regions=None, charmask=None, veto=None, precise=None, bubble_rest=None):
     """整頁合成：D2 畫面 →（有框頁才）留白填深 → 修法4 貼紙式背景 → 氣泡重繪。"""
     out = scene_final(g, seg).astype(np.float32)
     scene_keep = out.copy() if charmask is not None else None   # 人物區最終一律還原成場景調
@@ -1352,6 +1365,12 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
         skip = bubble | gutter
     if lab is not None and EXP_HARMONIZE:               # 批1.5：浮在黑裡的空白人頭一致化
         out = harmonize_enclosed_whites(out, g, lab, stats, skip)
+    if bubble_rest is not None and bubble_rest.any():
+        out[bubble_rest] = BG
+        kk = np.ones((STROKE * 2 + 1,) * 2, np.uint8)
+        band = (cv2.dilate(bubble_rest.astype(np.uint8), kk) > 0) & ~bubble_rest
+        a2 = ink_alpha(g, 1.6)
+        out[band] = np.maximum(out[band], BG + a2[band] * (INK - BG))
     if charmask is not None and CHAR_FILL:
         # ★ 未列管白元件補填（遮罩驅動）：使用者看到的「角色外圍白邊」經歸戶後，**一半是沒有任何
         # 機制認領的白元件**（封閉背景口袋：被格框與角色夾住，既不是留白也不是格內白也不進貼紙）
@@ -1454,7 +1473,7 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000):
         charmask = trim_charmask(charmask, g)
         if CHAR_SNAP > 0:
             charmask = snap_charmask(charmask, g)
-    bubble, merged, rejected = build_bubble_mask(
+    bubble, merged, rejected, cored = build_bubble_mask(
         g, regions, seg, lab, stats, gutter_ids | panel_ids, charmask=charmask)
     sticker, audit, promoted = sticker_plan(g, img, lab, stats, gutter_ids, panel_ids,
                                             frameless, regions)
@@ -1464,6 +1483,29 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000):
     panel_scene = np.isin(lab, sorted(panel_show)) if panel_show else np.zeros((H, W), bool)
     sticker_mask = np.isin(lab, sorted(sticker)) if sticker else np.zeros((H, W), bool)
     lhm, lvm = frame_line_mask(g)
+    rest_ids = set(cored) | (set(promoted) if BUBBLE_REST_STICKER else set())
+    if rest_ids and BUBBLE_REST_FILL:
+        # 泡元件的**剩餘部分**（元件 − 核心）＝泡框外的背景白。它與泡是同一個白元件，核心填色只填
+        # 了泡內部，剩下的既不是 gutter 也不是 panel（未列管）⇒ 沒有任何機制接手 ⇒ 維持場景灰 140，
+        # 看起來就是「泡泡外面那一圈」（使用者 2026-09-15 兩次回報；實測泡外 6px 起原 255→成品 140）。
+        # 判定有語意根據：這個元件已被判為「含氣泡的白區」，氣泡以外就是氣泡外的背景。
+        # 同理推廣到**貼紙擢升**的元件（promoted，走 paint_sticker 的核心填色）：ch34_015 左下格的
+        # 格內背景 comp3125（9.91% 頁）就是這樣，核心沒涵蓋泡框外那一圈 ⇒ 留場景灰。
+        # 核心填色原本是為了保護「被吃的前景白」（白鬍老人），那是**人物遮罩出現前**的粗略替代品；
+        # 有語意遮罩後扣掉 charmask 即可，剩餘一律填深。
+        # 扣人物遮罩（背景填色一律讓開人物）。
+        rest = np.isin(lab, sorted(rest_ids)) & ~bubble
+        if BUBBLE_REST_NEAR > 0 and bubble.any():
+            # ⚠️ 只填**泡框周圍**這一圈：貼紙的核心填色保護是為了留住「被吃的前景白」（白鬍老人的
+            # 鬍子/髮絲），全部取消會把它們吃掉（實測違規 28→52）。使用者抱怨的是泡外那一圈，
+            # 限制在泡附近即可兩全。
+            kn = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (BUBBLE_REST_NEAR * 2 + 1,) * 2)
+            rest &= cv2.dilate(bubble.astype(np.uint8), kn) > 0
+        if charmask is not None:
+            rest &= ~charmask
+        bubble_rest = rest
+    else:
+        bubble_rest = None
     bubble_guard = load_precise_mask(page_path, g.shape)
     if bubble_guard is None:
         bubble_guard = charmask
@@ -1491,7 +1533,7 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000):
     final = compose(g, gutter, bubble, seg, frameless, lab, stats, sticker,
                     core_ids=promoted, frame=(lhm | lvm), regions=regions, charmask=charmask,
                     veto=load_veto_mask(page_path, g.shape, charmask),
-                    precise=load_precise_mask(page_path, g.shape))
+                    precise=load_precise_mask(page_path, g.shape), bubble_rest=bubble_rest)
 
     pref = os.path.join(outdir, name)
     with open(f"{pref}_regions.json", "w", encoding="utf-8") as f:
