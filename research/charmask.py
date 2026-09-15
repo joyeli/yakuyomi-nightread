@@ -164,16 +164,16 @@ def run_cseg(pages, outdir, size=640, score=0.3, model="cartoonseg.onnx"):
 
 
 # ── combine（定案配方）────────────────────────────────────────────────
-def run_combine(pages, outdir, base=("cseg_tiled", "yoloseg"), gap="isnet", boxes_dir="char_yolodet", min_cov=0.15):
+def run_combine(pages, outdir, base=("cseg", "yoloseg"), gap="isnet", boxes_dir="char_yolodet", min_cov=0.15):
     """定案遮罩 = 精準遮罩（cseg ∪ yoloseg）∪（isnet ∩ 漏抓框）。
 
     isnet 是肥遮罩（彩色動畫訓練、會把整顆對話泡當人物 ⇒ 泡被人物保護還原成灰＝使用者回報的
     「白色泡泡」），但它漏的跟另外兩顆不同（ch34_006 那隻手：cseg 0% / yoloseg 0% / isnet 100%）。
     ⇒ 只在「manga109 偵測框內、精準遮罩覆蓋 < min_cov」的漏抓框裡採用 isnet。
-    base 的 cseg 用**切塊版**（cseg_tiled 2×2）：遮罩覆蓋隨物體變小而單調下降（原圖短邊 15–25px
-    只有 79%、120px 以上 96%），切塊提高有效解析度後整體覆蓋 85%→89%、小物<40px 74%→78%。
-    接管線實測：違規 31→27、亮區只動 0.1pt、白泡不變＝**純賺**。3×3+門檻0.15 覆蓋更高（小物 87%）
-    但遮罩肥到 47.6%（單次 35.8%）⇒ 違規 19 卻亮區 37.2→41.6%、白泡暴增 2.5 倍，不划算。
+    ⚠️ base 用**單次 cseg**，不是切塊版（`cseg_tiled` 保留但不採用）——切塊把遮罩覆蓋從 85% 拉到
+    89%、守護框違規 31→27，但拆開看那 4 框：2 框是門檻邊界的統計雜訊（15%→15%），另 2 框是遮罩
+    把「手下面那張桌上白紙」當人物而避開填色 ⇒ **畫面反而更亮**。全 11 頁只有 0.34% 像素有明顯差異。
+    覆蓋率提升是真的，但沒轉化成畫面品質，卻要付 5 倍推論成本（1.4s vs 0.28s/頁）⇒ 不採用。
     實測（A 模式）：三合一全聯集 違規 30 / 白泡 31 萬 px；本配方 違規 27 / 白泡 19 萬（無遮罩底線 21 萬）。
     需先跑：charmask.py cseg / yoloseg / isnet / yolodet --kinds body face（產 boxes.json）。"""
     import json
