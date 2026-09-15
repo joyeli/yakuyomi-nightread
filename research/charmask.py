@@ -22,6 +22,7 @@
   python3 charmask.py isnet              # 全 fixture 頁 → out/char_isnet/<page>_char.png
   python3 charmask.py yolodet --kinds body face
   python3 charmask.py yoloseg demo01     # 需 pip install ultralytics（AGPL-3.0，僅研究端）
+  python3 charmask.py combine            # 定案配方：cseg ∪ yoloseg ∪ (isnet ∩ 漏抓框) → out/char_combine
 """
 import argparse
 import glob
@@ -162,7 +163,32 @@ def run_cseg(pages, outdir, size=640, score=0.3, model="cartoonseg.onnx"):
         yield p, mask
 
 
-RUNNERS = {"isnet": run_isnet, "yolodet": run_yolodet, "yoloseg": run_yoloseg, "cseg": run_cseg}
+# ── combine（定案配方）────────────────────────────────────────────────
+def run_combine(pages, outdir, base=("cseg", "yoloseg"), gap="isnet", boxes_dir="char_yolodet", min_cov=0.15):
+    """定案遮罩 = 精準遮罩（cseg ∪ yoloseg）∪（isnet ∩ 漏抓框）。
+
+    isnet 是肥遮罩（彩色動畫訓練、會把整顆對話泡當人物 ⇒ 泡被人物保護還原成灰＝使用者回報的
+    「白色泡泡」），但它漏的跟另外兩顆不同（ch34_006 那隻手：cseg 0% / yoloseg 0% / isnet 100%）。
+    ⇒ 只在「manga109 偵測框內、精準遮罩覆蓋 < min_cov」的漏抓框裡採用 isnet。
+    實測（A 模式）：三合一全聯集 違規 30 / 白泡 31 萬 px；本配方 違規 31 / 白泡 22 萬（無遮罩底線 21 萬）。
+    需先跑：charmask.py cseg / yoloseg / isnet / yolodet --kinds body face（產 boxes.json）。"""
+    import json
+    with open(os.path.join(paths.OUT, boxes_dir, "boxes.json"), encoding="utf-8") as f:
+        boxes = json.load(f)
+    for p in pages:
+        name = os.path.splitext(os.path.basename(p))[0]
+        ms = [cv2.imread(os.path.join(paths.OUT, f"char_{b}", f"{name}_char.png"), 0) > 127 for b in base]
+        prec = np.logical_or.reduce(ms)
+        g = cv2.imread(os.path.join(paths.OUT, f"char_{gap}", f"{name}_char.png"), 0) > 127
+        veto = np.zeros_like(prec)
+        for x0, y0, x1, y1 in boxes.get(name, []):
+            if x1 > x0 and y1 > y0 and prec[y0:y1, x0:x1].mean() < min_cov:
+                veto[y0:y1, x0:x1] = True
+        yield p, ((prec | (g & veto)).astype(np.uint8) * 255)
+
+
+RUNNERS = {"isnet": run_isnet, "yolodet": run_yolodet, "yoloseg": run_yoloseg, "cseg": run_cseg,
+           "combine": run_combine}
 
 
 def main():

@@ -187,11 +187,22 @@ EXP_GUTTER = os.environ.get("NIGHTREAD_GUTTER", "1") == "1"        # 留白填�
 SAFE_GUTTER = os.environ.get("NIGHTREAD_SAFE_GUTTER", "1") == "1"   # 留白只填「真頁邊帶」（深入 ≤ 短邊×比例）
 SAFE_GUTTER_DEPTH = float(os.environ.get("NIGHTREAD_GUTTER_DEPTH", "0.12"))
 SAFE_BUBBLE_RATIO = float(os.environ.get("NIGHTREAD_BUBBLE_RATIO", "3.0"))  # 泡元件面積 ≤ 字 bbox × 此；0=關
+# 封閉泡救回（2026-09-15，使用者：「還是有白色泡泡」）：泡框有缺口/泡尾開口/泡壓出格框時，泡內白與
+# 頁邊留白或格內白**同一個元件** ⇒ 被 excluded_ids 整顆拒收 ⇒ 只剩偽泡貼身填字；人物遮罩又蓋到整顆
+# 泡（三合一的 isnet 很肥）⇒ 「人物優先」把偽泡內部還原成灰 ⇒ 白泡。無遮罩版是靠留白填色順手塗黑的。
+# 修法在語意層：**被墨線封住、裡面有字的白＝泡**，不管元件被歸成什麼——對 excluded 元件也跑文字種子
+# 核心填色（切頸把泡內白從留白切開），核心通過「面積 ≤ SAFE_BUBBLE_RATIO × 字框」＋「邊界墨線比 ≥
+# 此門檻」（真泡的核心邊界幾乎全是泡框；字壓臉的核心邊界一半以上是切頸截面＝白）才收為真泡。
+BUBBLE_ENCLOSE_MIN = float(os.environ.get("NIGHTREAD_BUBBLE_ENCLOSE", "0"))   # **預設關**：實測「邊界是墨線」臉也符合（髮際/下巴線），demo03 臉 0→94%、demo05 Q版臉 0→87%
 SAFE_STICKER = os.environ.get("NIGHTREAD_SAFE_STICKER", "1") == "1"   # panel 貼紙也一律核心填色+厚墨灰暈（不整顆填）
 # 人物前景遮罩（語意禁填區）：NIGHTREAD_CHARMASK=<dir> 指向 charmask.py 產的 <page>_char.png。
 # 守護框證明紅線在無語意下不可達（局部幾何/灰階特徵全失效）⇒ 有遮罩時「所有填色機制一律避開」。
 # CHAR_DILATE：遮罩外擴，補模型邊界誤差（YOLO-seg 的 proto 是輸入 1/4 解析度）。
 CHARMASK_DIR = os.environ.get("NIGHTREAD_CHARMASK", "")
+# 精準遮罩（cseg ∪ yoloseg，實例分割、不會把泡當人物）另給一份：偽泡只在**精準遮罩沒蓋到**的地方
+# 贏過人物保護——臉被精準遮罩蓋住時仍受保護；isnet 補漏抓框時順便蓋到的泡（肥遮罩）則能填深。
+# 空＝偽泡一律輸給人物保護（舊行為）。
+CHARMASK_PRECISE_DIR = os.environ.get("NIGHTREAD_CHARMASK_PRECISE", "")
 CHAR_DILATE = int(os.environ.get("NIGHTREAD_CHAR_DILATE", "0"))    # 定案 0：均勻外擴已被貼墨收邊取代
 # 外擴貼墨收邊：均勻外擴 20px 會在角色外圍留一圈等寬留白（使用者 2026-09-15：「越細越好」）。
 # 角色輪廓本來就是**畫出來的墨線** ⇒ 改成「在非墨區內測地生長」：遮罩不足處長到碰輪廓就停、
@@ -363,6 +374,18 @@ def load_veto_mask(page_path, shape, charmask):
     return veto if veto.any() else None
 
 
+def load_precise_mask(page_path, shape):
+    if not CHARMASK_PRECISE_DIR:
+        return None
+    fp = os.path.join(CHARMASK_PRECISE_DIR, f"{os.path.splitext(os.path.basename(page_path))[0]}_char.png")
+    m = cv2.imread(fp, cv2.IMREAD_GRAYSCALE)
+    if m is None:
+        return None
+    if m.shape != shape:
+        m = cv2.resize(m, (shape[1], shape[0]), interpolation=cv2.INTER_NEAREST)
+    return m > 127
+
+
 def load_charmask(page_path, shape):
     """讀 charmask.py 產的人物遮罩（255=人物），外擴 CHAR_DILATE 後回傳 bool；無遮罩回 None。"""
     if not CHARMASK_DIR:
@@ -507,6 +530,43 @@ def classify_white_components(g):
     return lab, stats, gutter_ids, panel_ids
 
 
+def _enclosed_bubble_core(g, lab, stats, i, text_bbox):
+    """對 excluded（留白/格內白）元件做「封閉泡」判定：從字框內的白出發切頸核心填色，核心要
+    (1) 面積 ≤ SAFE_BUBBLE_RATIO × 字框（泡跟字同尺度）(2) 邊界墨線比 ≥ BUBBLE_ENCLOSE_MIN
+    （真泡的核心被泡框圍住；字壓臉/背景的核心邊界大半是切頸截面＝白）。通過回傳 comp 窗內的
+    core 遮罩，否則 None。"""
+    if BUBBLE_ENCLOSE_MIN <= 0:
+        return None
+    x0, y0, x1, y1 = text_bbox
+    bx, by, bw, bh = stats[i, :4]
+    comp = lab[by:by + bh, bx:bx + bw] == i
+    seed = np.zeros_like(comp)
+    sx0, sy0 = max(0, x0 - bx), max(0, y0 - by)
+    sx1, sy1 = min(bw, x1 - bx), min(bh, y1 - by)
+    if sx1 <= sx0 or sy1 <= sy0:
+        return None
+    seed[sy0:sy1, sx0:sx1] = True
+    core = broad_core_fill(comp, seed & comp, neck_r=BUBBLE_NECK_R, recover_r=BUBBLE_NECK_R)
+    area = int(core.sum())
+    if area == 0:
+        return None
+    if SAFE_BUBBLE_RATIO > 0 and area > SAFE_BUBBLE_RATIO * max(1, (x1 - x0) * (y1 - y0)):
+        return None
+    # 邊界墨線比：core 外一圈（1px）裡，原圖非白的比例；貼圖緣的邊不算
+    gw = g[by:by + bh, bx:bx + bw]
+    ring = (cv2.dilate(core.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0) & ~core
+    H, W_ = g.shape
+    if by == 0: ring[0, :] = False
+    if bx == 0: ring[:, 0] = False
+    if by + bh >= H: ring[-1, :] = False
+    if bx + bw >= W_: ring[:, -1] = False
+    if ring.sum() < 20:
+        return None
+    if float((gw[ring] < WHITE_TH).mean()) < BUBBLE_ENCLOSE_MIN:
+        return None
+    return core
+
+
 def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids):
     """氣泡內部遮罩（修法1）：每文字區 bbox+BUBBLE_PAD 窗內，找「貼著（外擴後）
     文字筆畫」的白色連通元件，通過守門則整顆併入（不裁窗 ⇒ 無截斷方塊，
@@ -528,13 +588,20 @@ def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids):
         lab_c = lab[cy0:cy1, cx0:cx1]
         touch = np.unique(lab_c[(seg_dil[cy0:cy1, cx0:cx1] > 0) & (lab_c > 0)])
         for i in touch:
-            if i in merged or int(i) in rejected:
+            if (i in merged or int(i) in rejected) and i not in excluded_ids:
                 continue
             a = int(stats[i, cv2.CC_STAT_AREA])
             max_frac = BUBBLE_MAX_OVERRIDE if BUBBLE_MAX_OVERRIDE > 0 else BUBBLE_COMP_MAX_FRAC
-            if (a > max_frac * g.size or a > BUBBLE_LOCAL_K * win_area
-                    or i in excluded_ids):
+            if a > max_frac * g.size or a > BUBBLE_LOCAL_K * win_area:
                 rejected.add(int(i))
+                continue
+            if i in excluded_ids:
+                # 封閉泡救回（見 BUBBLE_ENCLOSE_MIN）：留白/格內白元件裡的「被泡框封住的字白」。
+                # ⚠️ 不進 merged/rejected：留白是一整塊元件、裡面可能有很多顆泡，每個字區各自判。
+                core = _enclosed_bubble_core(g, lab, stats, i, (x0, y0, x1, y1))
+                if core is not None:
+                    bx, by, bw, bh = stats[i, :4]
+                    bubble[by:by + bh, bx:bx + bw] |= core
                 continue
             # 安全策略：泡元件不得遠大於它的字（真泡字塞 30–50%＝比 2–3.5；「字壓在臉頰/手上」
             # 的元件是整片皮膚白、比 10+）。超過 → 不當泡，字交偽泡貼身袖套。
@@ -1166,7 +1233,7 @@ def harmonize_enclosed_whites(out, g, lab, stats, skip_mask):
 
 
 def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
-            core_ids=(), frame=None, regions=None, charmask=None, veto=None):
+            core_ids=(), frame=None, regions=None, charmask=None, veto=None, precise=None):
     """整頁合成：D2 畫面 →（有框頁才）留白填深 → 修法4 貼紙式背景 → 氣泡重繪。"""
     out = scene_final(g, seg).astype(np.float32)
     scene_keep = out.copy() if charmask is not None else None   # 人物區最終一律還原成場景調
@@ -1259,6 +1326,8 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
             if regions is not None and EXP_PSEUDO and pb.any():
                 restore &= ~pb
         elif TEXT_BACKING_R > 0:
+            if precise is not None and pb.any():
+                restore &= ~(pb & ~precise)      # 精準遮罩沒蓋到 ⇒ 偽泡贏（見 CHARMASK_PRECISE_DIR）
             # 人物優先，但字貼身暗襯保留（見 TEXT_BACKING_R）
             text_on_char = pb & charmask & seg
             if text_on_char.any():
@@ -1341,7 +1410,8 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000):
             charmask = snap_charmask(charmask, g)
     final = compose(g, gutter, bubble, seg, frameless, lab, stats, sticker,
                     core_ids=promoted, frame=(lhm | lvm), regions=regions, charmask=charmask,
-                    veto=load_veto_mask(page_path, g.shape, charmask))
+                    veto=load_veto_mask(page_path, g.shape, charmask),
+                    precise=load_precise_mask(page_path, g.shape))
 
     pref = os.path.join(outdir, name)
     with open(f"{pref}_regions.json", "w", encoding="utf-8") as f:
