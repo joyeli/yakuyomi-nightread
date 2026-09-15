@@ -193,6 +193,10 @@ SAFE_STICKER = os.environ.get("NIGHTREAD_SAFE_STICKER", "1") == "1"   # panel �
 # CHAR_DILATE：遮罩外擴，補模型邊界誤差（YOLO-seg 的 proto 是輸入 1/4 解析度）。
 CHARMASK_DIR = os.environ.get("NIGHTREAD_CHARMASK", "")
 CHAR_DILATE = int(os.environ.get("NIGHTREAD_CHAR_DILATE", "20"))   # 定案：20（6→20 多救 11 框、只付 1pt）
+# 外擴貼墨收邊：均勻外擴 20px 會在角色外圍留一圈等寬留白（使用者 2026-09-15：「越細越好」）。
+# 角色輪廓本來就是**畫出來的墨線** ⇒ 改成「在非墨區內測地生長」：遮罩不足處長到碰輪廓就停、
+# 輪廓外的背景長不進去 ⇒ 邊界貼合角色而非等寬光暈。0＝關（用均勻 dilate）。
+CHAR_SNAP = int(os.environ.get("NIGHTREAD_CHAR_SNAP", "12"))  # **定案 12**：比均勻外擴 8px 少 6 框違規、還更暗
 # 人物上的氣泡誰優先：bubble＝泡贏（字壓臉時仍深底亮字，臉被吃）；char＝人物贏（泡讓開、
 # 字留在場景調上＝該處不變暗但臉保住）。守護框上差 27 框，觀感上差「字壓臉的可讀性」。
 CHAR_OVER_BUBBLE = os.environ.get("NIGHTREAD_CHAR_OVER_BUBBLE", "1") == "1"  # 定案：人物優先
@@ -215,7 +219,9 @@ FRAMELESS_MARGIN_DEPTH = 0.12
 # 留白填深的人物灰暈（ch34_010 左下案＝出血式無框特寫：外套白與頁白連續且輪廓開放，
 # 像素層無界 → 唯一安全解＝gutter 填色避開大型人物墨結構周圍，人物旁留灰暈）：
 AURA_MIN_INK_AREA = 2500        # 「大型人物墨」門檻（px）；格線/氣泡輪廓先排除不算
-AURA_R = 30                     # 灰暈半徑：距人物墨此距離內的留白不填
+# ⚠️ 灰暈是**人物遮罩出現之前**的粗略替代品（用「離大墨團多遠」猜人物位置）。有語意遮罩時它
+# 多餘且會在角色外圍留一圈厚留白 ⇒ 有 CHARMASK 時應設 0（見 docs/DECISIONS.md 的邊界細緻化）。
+AURA_R = int(os.environ.get("NIGHTREAD_AURA_R", "0"))    # **定案 0**：有語意遮罩後灰暈多餘（關掉只多 1 框、省 0.6pt）
 AURA_FRAME_EXEMPT = 45          # 距格線此範圍內的留白豁免灰暈（正常格間留白照填；hard 模式用）
 AURA_BORDER_EXEMPT = 60         # 距頁邊此範圍內的留白豁免灰暈（hard 模式用）
 # ★ 拍板 hard（2026-09-05 使用者 A/B 目檢）：邊界 crisp、黑就是黑。glow 保留備查（見下），
@@ -336,10 +342,22 @@ def load_charmask(page_path, shape):
     if m.shape != shape:
         m = cv2.resize(m, (shape[1], shape[0]), interpolation=cv2.INTER_NEAREST)
     keep = m > 127
+    if CHAR_SNAP > 0:
+        return keep          # 貼墨收邊需要灰階，交由 load_charmask_snap 在 run_page 完成
     if CHAR_DILATE > 0:
         k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (CHAR_DILATE * 2 + 1,) * 2)
         keep = cv2.dilate(keep.astype(np.uint8), k) > 0
     return keep
+
+
+def snap_charmask(keep, g, r=None):
+    """貼墨收邊：在「非墨」區內從遮罩測地生長 r 步。遮罩不足處沿角色內部白長到輪廓線就停，
+    輪廓外的背景進不來 ⇒ 邊界貼合角色，不再是等寬光暈。再 dilate 1 把輪廓線本身納入。"""
+    r = CHAR_SNAP if r is None else r
+    allowed = (g >= WHITE_TH) | keep            # 非墨（含網點視為墨、不穿透）
+    grown = geodesic_grow(keep, allowed, r, step=4)
+    k = np.ones((3, 3), np.uint8)
+    return (cv2.dilate(grown.astype(np.uint8), k, iterations=2) > 0)
 
 
 def normalize_paper(g, img_bgr=None):
@@ -1251,6 +1269,8 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000):
     sticker_mask = np.isin(lab, sorted(sticker)) if sticker else np.zeros((H, W), bool)
     lhm, lvm = frame_line_mask(g)
     charmask = load_charmask(page_path, g.shape)
+    if charmask is not None and CHAR_SNAP > 0:
+        charmask = snap_charmask(charmask, g)
     final = compose(g, gutter, bubble, seg, frameless, lab, stats, sticker,
                     core_ids=promoted, frame=(lhm | lvm), regions=regions, charmask=charmask)
 
