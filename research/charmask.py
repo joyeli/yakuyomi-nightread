@@ -164,13 +164,17 @@ def run_cseg(pages, outdir, size=640, score=0.3, model="cartoonseg.onnx"):
 
 
 # ── combine（定案配方）────────────────────────────────────────────────
-def run_combine(pages, outdir, base=("cseg", "yoloseg"), gap="isnet", boxes_dir="char_yolodet", min_cov=0.15):
+def run_combine(pages, outdir, base=("cseg_tiled", "yoloseg"), gap="isnet", boxes_dir="char_yolodet", min_cov=0.15):
     """定案遮罩 = 精準遮罩（cseg ∪ yoloseg）∪（isnet ∩ 漏抓框）。
 
     isnet 是肥遮罩（彩色動畫訓練、會把整顆對話泡當人物 ⇒ 泡被人物保護還原成灰＝使用者回報的
     「白色泡泡」），但它漏的跟另外兩顆不同（ch34_006 那隻手：cseg 0% / yoloseg 0% / isnet 100%）。
     ⇒ 只在「manga109 偵測框內、精準遮罩覆蓋 < min_cov」的漏抓框裡採用 isnet。
-    實測（A 模式）：三合一全聯集 違規 30 / 白泡 31 萬 px；本配方 違規 31 / 白泡 22 萬（無遮罩底線 21 萬）。
+    base 的 cseg 用**切塊版**（cseg_tiled 2×2）：遮罩覆蓋隨物體變小而單調下降（原圖短邊 15–25px
+    只有 79%、120px 以上 96%），切塊提高有效解析度後整體覆蓋 85%→89%、小物<40px 74%→78%。
+    接管線實測：違規 31→27、亮區只動 0.1pt、白泡不變＝**純賺**。3×3+門檻0.15 覆蓋更高（小物 87%）
+    但遮罩肥到 47.6%（單次 35.8%）⇒ 違規 19 卻亮區 37.2→41.6%、白泡暴增 2.5 倍，不划算。
+    實測（A 模式）：三合一全聯集 違規 30 / 白泡 31 萬 px；本配方 違規 27 / 白泡 19 萬（無遮罩底線 21 萬）。
     需先跑：charmask.py cseg / yoloseg / isnet / yolodet --kinds body face（產 boxes.json）。"""
     import json
     with open(os.path.join(paths.OUT, boxes_dir, "boxes.json"), encoding="utf-8") as f:
@@ -189,7 +193,51 @@ def run_combine(pages, outdir, base=("cseg", "yoloseg"), gap="isnet", boxes_dir=
         yield p, ((prec | (g & veto)).astype(np.uint8) * 255)
 
 
-RUNNERS = {"isnet": run_isnet, "yolodet": run_yolodet, "yoloseg": run_yoloseg, "cseg": run_cseg,
+def _cseg_one(sess, img, size=640, score=0.3):
+    """對單張影像跑一次 cseg，回傳原尺寸的 bool 遮罩。"""
+    h, w = img.shape[:2]
+    s = size / max(h, w)
+    nh, nw = max(1, int(round(h * s))), max(1, int(round(w * s)))
+    canvas = np.full((size, size, 3), 114, np.uint8)
+    canvas[:nh, :nw] = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_AREA)
+    x = ((canvas.astype(np.float32) - CSEG_MEAN) / CSEG_STD).transpose(2, 0, 1)[None]
+    dets, labels, masks = sess.run(None, {"input": x})
+    dets, masks = dets[0], masks[0]
+    out = np.zeros((h, w), bool)
+    for m in masks[dets[:, 4] > score]:
+        mm = (m[:nh, :nw] > 0.5).astype(np.uint8)
+        out |= cv2.resize(mm, (w, h), interpolation=cv2.INTER_NEAREST) > 0
+    return out
+
+
+def run_cseg_tiled(pages, outdir, size=640, score=0.3, grid=2, overlap=0.25,
+                   model="cartoonseg.onnx"):
+    """切塊推論：頁面切 grid×grid（含重疊）各跑一次 cseg，再與全頁一次的結果聯集。
+
+    動機（2026-09-16 量測）：遮罩覆蓋隨物體尺寸單調下降——原圖短邊 15–25px 的前景只有 79%
+    覆蓋、120px 以上有 96%。cseg 輸入是 640，遠景小人物縮完只剩 7–11px，模型抓不到。
+    直接加大輸入無效（1024 反而掉到 89.6% 臉覆蓋，訓練解析度就是 640），切塊才真正提高
+    **有效解析度**：2×2 讓每塊的物體放大約 2 倍。全頁那次保留，負責大實例與跨塊的人物。
+    """
+    import onnxruntime as ort
+    sess = ort.InferenceSession(os.path.join(MODEL_DIR, model), providers=["CPUExecutionProvider"])
+    for p in pages:
+        img = cv2.imread(p)
+        h, w = img.shape[:2]
+        mask = _cseg_one(sess, img, size, score)          # 全頁一次（大實例）
+        th, tw = int(h / grid * (1 + overlap)), int(w / grid * (1 + overlap))
+        for gy in range(grid):
+            for gx in range(grid):
+                y0 = min(h - th, max(0, int(gy * h / grid - th * overlap / 2)))
+                x0 = min(w - tw, max(0, int(gx * w / grid - tw * overlap / 2)))
+                sub = img[y0:y0 + th, x0:x0 + tw]
+                if sub.size == 0:
+                    continue
+                mask[y0:y0 + th, x0:x0 + tw] |= _cseg_one(sess, sub, size, score)
+        yield p, (mask.astype(np.uint8) * 255)
+
+
+RUNNERS = {"isnet": run_isnet, "cseg_tiled": run_cseg_tiled, "yolodet": run_yolodet, "yoloseg": run_yoloseg, "cseg": run_cseg,
            "combine": run_combine}
 
 
@@ -199,11 +247,15 @@ def main():
     ap.add_argument("pages", nargs="*", default=DEFAULT_PAGES)
     ap.add_argument("-o", "--outdir")
     ap.add_argument("--kinds", nargs="*", default=["body", "face"], help="yolodet 用")
+    ap.add_argument("--grid", type=int, default=2, help="cseg_tiled 切塊數")
+    ap.add_argument("--score", type=float, default=0.3, help="cseg_tiled 分數門檻")
     a = ap.parse_args()
     outdir = a.outdir or os.path.join(paths.OUT, f"char_{a.model}")
     os.makedirs(outdir, exist_ok=True)
     pages = [resolve(t) for t in a.pages]
     kw = {"kinds": tuple(a.kinds)} if a.model == "yolodet" else {}
+    if a.model == "cseg_tiled":
+        kw = {"grid": a.grid, "score": a.score}
     for p, mask in RUNNERS[a.model](pages, outdir, **kw):
         name = os.path.splitext(os.path.basename(p))[0]
         cv2.imwrite(os.path.join(outdir, f"{name}_char.png"), mask)
