@@ -134,7 +134,7 @@ STICKER_CHROMA_MAX = 6.0        # 元件平均彩度（max−min 通道）上限
 STICKER_EATEN_R = 5             # 「疑似被吃前景白」判定：細白（dist ≤ R）…
 STICKER_EATEN_DENS = 0.35       # …且局部墨密度（blur 15×15，墨＝<WHITE_TH）≥ 此
                                 # ＝密集筆畫縫隙白（白鬍/髮絲 vs 花窗速寫都長這樣）
-STICKER_EATEN_MAX = 0.06        # eaten 佔 W 比例軟上限：超標＝可能有白色前景物連進
+STICKER_EATEN_MAX = float(os.environ.get("NIGHTREAD_EATEN_MAX", "0.06"))        # eaten 佔 W 比例軟上限：超標＝可能有白色前景物連進
                                 # 背景（ch34_006 白鬍老人格 0.073）…
 STICKER_TEXT_BG_MIN = 0.10      # …除非文字確實壓在這片白上（textOn）≥ 此＝作者把它
                                 # 當背景寫字的語意證據（demo06 教堂 0.167 / 金髮女孩格
@@ -221,6 +221,11 @@ BUBBLE_TRIM_CHAR = os.environ.get("NIGHTREAD_BUBBLE_TRIM_CHAR", "1") == "1"   # 
 BUBBLE_SNAP = int(os.environ.get("NIGHTREAD_BUBBLE_SNAP", "0"))
 BUBBLE_REST_FILL = os.environ.get("NIGHTREAD_BUBBLE_REST", "1") == "1"   # 核心填色的剩餘部分當背景填深
 BUBBLE_REST_STICKER = os.environ.get("NIGHTREAD_BUBBLE_REST_STICKER", "1") == "1"  # 同上推廣到貼紙擢升元件
+REST_VETO = os.environ.get("NIGHTREAD_REST_VETO", "0") == "1"   # 剩餘填色也吃遮罩漏抓 veto
+REST_MIN_AREA = float(os.environ.get("NIGHTREAD_REST_MIN_AREA", "0.0001"))  # 剩餘塊最小頁佔比
+REST_MIN_RADIUS = float(os.environ.get("NIGHTREAD_REST_MIN_R", "0"))   # 剩餘塊最小內切半徑（>0 啟用）
+REST_CHAR_TOUCH = float(os.environ.get("NIGHTREAD_REST_CHAR_TOUCH", "0"))   # 剩餘塊貼人物比例上限（>0 啟用語意判準）
+REST_TOUCH_R = int(os.environ.get("NIGHTREAD_REST_TOUCH_R", "6"))
 BUBBLE_REST_NEAR = int(os.environ.get("NIGHTREAD_BUBBLE_REST_NEAR", "20"))   # 剩餘填深只在泡外此距離內（0=不限）
 CHAR_DILATE = int(os.environ.get("NIGHTREAD_CHAR_DILATE", "0"))    # 定案 0：均勻外擴已被貼墨收邊取代
 # 外擴貼墨收邊：均勻外擴 20px 會在角色外圍留一圈等寬留白（使用者 2026-09-15：「越細越好」）。
@@ -513,6 +518,10 @@ def _hole_ink_ratio(comp_u8, g):
     return ink / max(int(comp_u8.sum()), 1)
 
 
+INNER_PANEL_MIN_FRAC = float(os.environ.get("NIGHTREAD_INNER_PANEL", "0"))
+INNER_PANEL_AS_PANEL = os.environ.get("NIGHTREAD_INNER_AS_PANEL", "0") == "1"   # 封閉格內白納入 panel 的頁佔比門檻（0=關）
+
+
 def classify_white_components(g):
     """整頁白（>=WHITE_TH）連通元件一次算完，供留白與氣泡共用。
 
@@ -535,6 +544,15 @@ def classify_white_components(g):
         x, y, cw, ch = (stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP],
                         stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT])
         if not (x <= 2 or y <= 2 or x + cw >= W - 2 or y + ch >= H - 2):
+            # ★ 結構性漏洞（2026-09-16，使用者指 ch34_014 右下格泡外一圈紅）：整套分類建立在
+            # 「留白/格溝從頁邊延伸進來」的假設上，於是**被格框完全封閉的格內背景白**連候選都進
+            # 不了 ⇒ 未列管 ⇒ 沒有任何機制處理 ⇒ 整格背景維持場景灰。ch34_014 那格就是
+            # comp1370（4.24% 頁）+ comp1355（2.85% 頁）兩塊未列管白。
+            # 補法：夠大的封閉白也算格內白（panel）。它本來就是「格內的背景」，只是不貼頁邊。
+            if INNER_PANEL_MIN_FRAC > 0 and a >= INNER_PANEL_MIN_FRAC * g.size:
+                # 歸 gutter（填深）不是 panel：panel 的語意是「當畫面壓暗、不填」，
+                # 而被格框封閉的大片背景白本來就該填深。
+                (panel_ids if INNER_PANEL_AS_PANEL else gutter_ids).add(i)
             continue                                    # 不貼頁邊 ⇒ 非留白候選
         comp = (lab == i)
         core = comp & (dist > CORE_R)                   # 厚芯：比格溝半寬還厚的部分
@@ -1495,7 +1513,37 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000):
         # 有語意遮罩後扣掉 charmask 即可，剩餘一律填深。
         # 扣人物遮罩（背景填色一律讓開人物）。
         rest = np.isin(lab, sorted(rest_ids)) & ~bubble
-        if BUBBLE_REST_NEAR > 0 and bubble.any():
+        if REST_MIN_RADIUS > 0:
+            # 分「背景楔形」與「人物附屬白」靠**粗細**，不是靠貼不貼人物（實測貼不貼分不開：
+            # 鬍鬚縫隙跟頭上楔形一樣都在遮罩外、被輪廓線隔開，違規全跳到 52）。
+            # 背景楔形＝寬（最大內切半徑大）；鬍鬚/髮絲縫隙＝細。只填夠寬的塊。
+            nn_, lb_, st_, _ = cv2.connectedComponentsWithStats(rest.astype(np.uint8), 8)
+            dist = cv2.distanceTransform(rest.astype(np.uint8), cv2.DIST_L2, 5)
+            keep = np.zeros_like(rest)
+            for j in range(1, nn_):
+                if st_[j, cv2.CC_STAT_AREA] < REST_MIN_AREA * g.size:
+                    continue
+                blob = lb_ == j
+                if float(dist[blob].max()) >= REST_MIN_RADIUS:
+                    keep |= blob
+            rest = keep
+        elif REST_CHAR_TOUCH > 0 and charmask is not None:
+            # 距離限制（BUBBLE_REST_NEAR）太粗：救得到泡外那圈，救不到離泡遠的背景楔形
+            # （ch34_006 老人頭髮上方那塊「不知所謂的白」＝核心填色把窄楔形切掉、沒人補）。
+            # 改用語意判準：剩餘塊**貼著人物**＝人物的附屬白（鬍子/髮絲，貼紙保護的對象）⇒ 不填；
+            # **不貼人物**＝被輪廓線隔開的背景 ⇒ 填。兩者的差別正是「鬍子」與「頭上的背景」。
+            kt = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (REST_TOUCH_R * 2 + 1,) * 2)
+            near_char = cv2.dilate(charmask.astype(np.uint8), kt) > 0
+            nn_, lb_, st_, _ = cv2.connectedComponentsWithStats(rest.astype(np.uint8), 8)
+            keep = np.zeros_like(rest)
+            for j in range(1, nn_):
+                if st_[j, cv2.CC_STAT_AREA] < 200:
+                    continue
+                blob = lb_ == j
+                if float(near_char[blob].mean()) <= REST_CHAR_TOUCH:
+                    keep |= blob
+            rest = keep
+        elif BUBBLE_REST_NEAR > 0 and bubble.any():
             # ⚠️ 只填**泡框周圍**這一圈：貼紙的核心填色保護是為了留住「被吃的前景白」（白鬍老人的
             # 鬍子/髮絲），全部取消會把它們吃掉（實測違規 28→52）。使用者抱怨的是泡外那一圈，
             # 限制在泡附近即可兩全。
@@ -1503,6 +1551,12 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000):
             rest &= cv2.dilate(bubble.astype(np.uint8), kn) > 0
         if charmask is not None:
             rest &= ~charmask
+        if REST_VETO:
+            # 遮罩漏抓 veto（同 load_veto_mask）：偵測器說框裡有人、分割遮罩卻沒抓到 ⇒ 該框禁填。
+            # 沒有它，開放剩餘填色會吃掉遠景小人物的手（demo02 一頁就 9 框，全是「手」）。
+            vt = load_veto_mask(page_path, g.shape, charmask)
+            if vt is not None:
+                rest &= ~vt
         bubble_rest = rest
     else:
         bubble_rest = None
