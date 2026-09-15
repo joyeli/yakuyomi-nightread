@@ -93,7 +93,7 @@ BUBBLE_CORE_MIN_FRAC = float(os.environ.get("NIGHTREAD_BUBBLE_CORE_MIN", "0.003"
 # ↑ ≥ 此頁面佔比的泡元件走「文字種子核心填色」；小於的整顆填。**0＝一律核心填色**：整顆填會在
 # 「泡白與髮白連通」時把髮吃掉（demo04 第2格垂髮 0→75%），而核心填色對緊實小泡＝開運算切不掉
 # 任何東西、結果等於整顆填 ⇒ 沒有下行風險。大頁（demo04 3000px 高）用固定頁佔比門檻本來就偏鬆。
-BUBBLE_NECK_R = 8               # 泡的切頸半徑：泡框缺口漏進背景（ch34_011 圓泡右側漏出）、字寫在背景上
+BUBBLE_NECK_R = int(os.environ.get("NIGHTREAD_BUBBLE_NECK", "8"))   # 泡的切頸半徑：泡框缺口漏進背景（ch34_011 圓泡右側漏出）、字寫在背景上
                                 # 的白連進臉的下巴縫（demo01 主角）都是窄頸；真泡內部寬闊、行間白 ≥13px 不受影響。
                                 # ★形狀門（實心度）已實測不可用：真泡的白被字切成凹形、填洞後 demo01 臉塊 0.72
                                 # 落在真泡分佈正中；「貼厚墨」也不可用（粗體字筆畫本身就 ≥6px）。幾何切頸是唯一解。
@@ -206,6 +206,7 @@ SAFE_BUBBLE_RATIO = float(os.environ.get("NIGHTREAD_BUBBLE_RATIO", "2.0"))  # �
 # 修法在語意層：**被墨線封住、裡面有字的白＝泡**，不管元件被歸成什麼——對 excluded 元件也跑文字種子
 # 核心填色（切頸把泡內白從留白切開），核心通過「面積 ≤ SAFE_BUBBLE_RATIO × 字框」＋「邊界墨線比 ≥
 # 此門檻」（真泡的核心邊界幾乎全是泡框；字壓臉的核心邊界一半以上是切頸截面＝白）才收為真泡。
+BUBBLE_ENCLOSE_CHAR_MAX = float(os.environ.get("NIGHTREAD_BUBBLE_ENCLOSE_CHAR", "0.5"))
 BUBBLE_ENCLOSE_MIN = float(os.environ.get("NIGHTREAD_BUBBLE_ENCLOSE", "0"))   # **預設關**：實測「邊界是墨線」臉也符合（髮際/下巴線），demo03 臉 0→94%、demo05 Q版臉 0→87%
 SAFE_STICKER = os.environ.get("NIGHTREAD_SAFE_STICKER", "1") == "1"   # panel 貼紙也一律核心填色+厚墨灰暈（不整顆填）
 # 人物前景遮罩（語意禁填區）：NIGHTREAD_CHARMASK=<dir> 指向 charmask.py 產的 <page>_char.png。
@@ -549,7 +550,7 @@ def classify_white_components(g):
     return lab, stats, gutter_ids, panel_ids
 
 
-def _enclosed_bubble_core(g, lab, stats, i, text_bbox):
+def _enclosed_bubble_core(g, lab, stats, i, text_bbox, charmask=None):
     """對 excluded（留白/格內白）元件做「封閉泡」判定：從字框內的白出發切頸核心填色，核心要
     (1) 面積 ≤ SAFE_BUBBLE_RATIO × 字框（泡跟字同尺度）(2) 邊界墨線比 ≥ BUBBLE_ENCLOSE_MIN
     （真泡的核心被泡框圍住；字壓臉/背景的核心邊界大半是切頸截面＝白）。通過回傳 comp 窗內的
@@ -583,10 +584,16 @@ def _enclosed_bubble_core(g, lab, stats, i, text_bbox):
         return None
     if float((gw[ring] < WHITE_TH).mean()) < BUBBLE_ENCLOSE_MIN:
         return None
+    if charmask is not None:
+        # ★ 語意判準：「被墨線封住」臉也符合（髮際線/下巴線）——單靠幾何會把臉當泡填黑
+        # （實測 demo03 臉 0→94%、demo05 Q版臉 0→87%）。核心大半是人物 ⇒ 不是泡。
+        sub_cm = charmask[by:by + bh, bx:bx + bw]
+        if float(sub_cm[core].mean()) > BUBBLE_ENCLOSE_CHAR_MAX:
+            return None
     return core
 
 
-def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids):
+def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids, charmask=None):
     """氣泡內部遮罩（修法1）：每文字區 bbox+BUBBLE_PAD 窗內，找「貼著（外擴後）
     文字筆畫」的白色連通元件，通過守門則整顆併入（不裁窗 ⇒ 無截斷方塊，
     原型 regrow 補救移除）。守門（不併＝該區只保留筆畫，安全降級）：
@@ -599,6 +606,17 @@ def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids):
     seg_dil = cv2.dilate(seg_u8, np.ones((9, 9), np.uint8))  # 筆畫外擴→碰得到氣泡白底
     bubble = np.zeros((H, W), bool)
     merged, rejected = set(), set()
+    # 先數「每個白元件被幾個文字區命中」：相連的雙泡是**同一個白元件**（ch34_015 左下格 4.78% 頁），
+    # 用單一字框當分母會讓比值假性超標（2.32/3.96 > 2.0）⇒ 兩顆泡都被拒收、內部留場景灰、
+    # 只剩泡框被描亮成粗白環（使用者回報）。分母改成該元件**所有**命中字區的長邊²總和。
+    comp_den = {}
+    for r in regions:
+        x0, y0, x1, y1 = r["bbox"]
+        cx0, cy0 = max(0, x0 - BUBBLE_PAD), max(0, y0 - BUBBLE_PAD)
+        cx1, cy1 = min(W, x1 + BUBBLE_PAD), min(H, y1 + BUBBLE_PAD)
+        lab_c = lab[cy0:cy1, cx0:cx1]
+        for i in np.unique(lab_c[(seg_dil[cy0:cy1, cx0:cx1] > 0) & (lab_c > 0)]):
+            comp_den[int(i)] = comp_den.get(int(i), 0) + max(1, max(x1 - x0, y1 - y0) ** 2)
     for r in regions:
         x0, y0, x1, y1 = r["bbox"]
         cx0, cy0 = max(0, x0 - BUBBLE_PAD), max(0, y0 - BUBBLE_PAD)
@@ -617,7 +635,7 @@ def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids):
             if i in excluded_ids:
                 # 封閉泡救回（見 BUBBLE_ENCLOSE_MIN）：留白/格內白元件裡的「被泡框封住的字白」。
                 # ⚠️ 不進 merged/rejected：留白是一整塊元件、裡面可能有很多顆泡，每個字區各自判。
-                core = _enclosed_bubble_core(g, lab, stats, i, (x0, y0, x1, y1))
+                core = _enclosed_bubble_core(g, lab, stats, i, (x0, y0, x1, y1), charmask)
                 if core is not None:
                     bx, by, bw, bh = stats[i, :4]
                     bubble[by:by + bh, bx:bx + bw] |= core
@@ -627,7 +645,12 @@ def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids):
             # ⚠️ 分母用**字框長邊平方**不是字框面積：單行直排的字框只有一行寬（ch34_006「その通り
             # じゃ」23×167），面積 3841 而泡 38337 ⇒ 比值 9.98 假性爆表、整顆泡被拒收成白底。
             # 長邊² 對方形字框等於面積（保護不變）、只對細長字框放寬，正是要的。
-            if SAFE_BUBBLE_RATIO > 0 and a > SAFE_BUBBLE_RATIO * max(1, max(x1 - x0, y1 - y0) ** 2):
+            ratio_den = SAFE_BUBBLE_RATIO * comp_den.get(int(i), max(1, max(x1 - x0, y1 - y0) ** 2))
+            # ⚠️ 大元件的比值要等 core fill 算完、用**實際要填的核心**面積判，不能用整個元件：
+            # 相連的雙泡是**同一個白元件**（ch34_015 左下格 4.78% 頁），比值 2.32/3.96 假性超標 ⇒
+            # 兩顆泡都被拒收、內部留場景灰、只剩泡框被描亮成粗白環（使用者回報）。核心填色本來就
+            # 會在頸部把兩泡切開，填的只是字所在那顆。
+            if SAFE_BUBBLE_RATIO > 0 and a < BUBBLE_CORE_MIN_FRAC * g.size and a > ratio_den:
                 rejected.add(int(i))
                 continue
             if a >= BUBBLE_CORE_MIN_FRAC * g.size:
@@ -645,7 +668,12 @@ def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids):
                 if not core.any():
                     rejected.add(int(i))
                     continue
+                if SAFE_BUBBLE_RATIO > 0 and int(core.sum()) > ratio_den:
+                    rejected.add(int(i))
+                    continue
                 bubble[by:by + bh, bx:bx + bw] |= core
+                merged.add(int(i))
+                continue
             else:
                 bubble |= lab == i
             merged.add(int(i))
@@ -1421,8 +1449,13 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000):
     lines, regions, seg = detect(img)
     frameless, hk, vk = page_is_frameless(g)
     lab, stats, gutter_ids, panel_ids = classify_white_components(g)
+    charmask = load_charmask(page_path, g.shape)
+    if charmask is not None:
+        charmask = trim_charmask(charmask, g)
+        if CHAR_SNAP > 0:
+            charmask = snap_charmask(charmask, g)
     bubble, merged, rejected = build_bubble_mask(
-        g, regions, seg, lab, stats, gutter_ids | panel_ids)
+        g, regions, seg, lab, stats, gutter_ids | panel_ids, charmask=charmask)
     sticker, audit, promoted = sticker_plan(g, img, lab, stats, gutter_ids, panel_ids,
                                             frameless, regions)
     gutter_show = gutter_ids - sticker if frameless else gutter_ids
@@ -1431,11 +1464,6 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000):
     panel_scene = np.isin(lab, sorted(panel_show)) if panel_show else np.zeros((H, W), bool)
     sticker_mask = np.isin(lab, sorted(sticker)) if sticker else np.zeros((H, W), bool)
     lhm, lvm = frame_line_mask(g)
-    charmask = load_charmask(page_path, g.shape)
-    if charmask is not None:
-        charmask = trim_charmask(charmask, g)   # 先往內修掉多包的背景
-        if CHAR_SNAP > 0:
-            charmask = snap_charmask(charmask, g)
     bubble_guard = load_precise_mask(page_path, g.shape)
     if bubble_guard is None:
         bubble_guard = charmask
