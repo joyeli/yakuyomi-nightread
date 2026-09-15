@@ -196,6 +196,11 @@ CHAR_DILATE = int(os.environ.get("NIGHTREAD_CHAR_DILATE", "20"))   # 定案：20
 # 外擴貼墨收邊：均勻外擴 20px 會在角色外圍留一圈等寬留白（使用者 2026-09-15：「越細越好」）。
 # 角色輪廓本來就是**畫出來的墨線** ⇒ 改成「在非墨區內測地生長」：遮罩不足處長到碰輪廓就停、
 # 輪廓外的背景長不進去 ⇒ 邊界貼合角色而非等寬光暈。0＝關（用均勻 dilate）。
+# 貼墨修邊（向內）：遮罩在 640 解析度產生再放大 ⇒ 邊界階梯狀、越過髮絲伸進背景（實測外緣離
+# 最近墨線中位 4.2px、43% >5px、最多 18px）——這才是「角色外圍白色留邊」的真正來源，收邊半徑
+# 只佔 1–3%。作法＝從遮罩外側在非墨區內往內生長，能到達的都是多包的背景（角色輪廓的墨線擋住
+# 生長），從遮罩扣掉。輪廓有缺口處會漏進去，故限半徑。0＝關。
+CHAR_TRIM = int(os.environ.get("NIGHTREAD_CHAR_TRIM", "16"))  # **定案 16**：外緣離墨線中位 1.0→0.0px
 CHAR_SNAP = int(os.environ.get("NIGHTREAD_CHAR_SNAP", "2"))   # **定案 2**（使用者：收最小）：邊界貼合輪廓；
                                                               # 代價＝遮罩不足處補不滿，違規 12→22（多出的 10 框多落在 16-38%＝剛越過 15% 門檻）
 # 人物上的氣泡誰優先：bubble＝泡贏（字壓臉時仍深底亮字，臉被吃）；char＝人物贏（泡讓開、
@@ -349,6 +354,18 @@ def load_charmask(page_path, shape):
         k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (CHAR_DILATE * 2 + 1,) * 2)
         keep = cv2.dilate(keep.astype(np.uint8), k) > 0
     return keep
+
+
+def trim_charmask(keep, g, r=None):
+    """貼墨修邊：從遮罩外側在非墨區內往內測地生長 r 步，可達處＝遮罩多包的背景 → 扣掉。
+    角色輪廓的墨線擋住生長 ⇒ 邊界收到輪廓上。輪廓有缺口會漏，故限半徑。"""
+    r = CHAR_TRIM if r is None else r
+    if r <= 0:
+        return keep
+    allowed = (g >= WHITE_TH)                   # 非墨才可穿透
+    outside = (~keep) & allowed
+    leak = geodesic_grow(outside, allowed, r, step=4) & keep
+    return keep & ~leak
 
 
 def snap_charmask(keep, g, r=None):
@@ -1270,8 +1287,10 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000):
     sticker_mask = np.isin(lab, sorted(sticker)) if sticker else np.zeros((H, W), bool)
     lhm, lvm = frame_line_mask(g)
     charmask = load_charmask(page_path, g.shape)
-    if charmask is not None and CHAR_SNAP > 0:
-        charmask = snap_charmask(charmask, g)
+    if charmask is not None:
+        charmask = trim_charmask(charmask, g)   # 先往內修掉多包的背景
+        if CHAR_SNAP > 0:
+            charmask = snap_charmask(charmask, g)
     final = compose(g, gutter, bubble, seg, frameless, lab, stats, sticker,
                     core_ids=promoted, frame=(lhm | lvm), regions=regions, charmask=charmask)
 
