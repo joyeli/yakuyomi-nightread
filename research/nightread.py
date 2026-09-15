@@ -192,7 +192,7 @@ SAFE_STICKER = os.environ.get("NIGHTREAD_SAFE_STICKER", "1") == "1"   # panel �
 # 守護框證明紅線在無語意下不可達（局部幾何/灰階特徵全失效）⇒ 有遮罩時「所有填色機制一律避開」。
 # CHAR_DILATE：遮罩外擴，補模型邊界誤差（YOLO-seg 的 proto 是輸入 1/4 解析度）。
 CHARMASK_DIR = os.environ.get("NIGHTREAD_CHARMASK", "")
-CHAR_DILATE = int(os.environ.get("NIGHTREAD_CHAR_DILATE", "20"))   # 定案：20（6→20 多救 11 框、只付 1pt）
+CHAR_DILATE = int(os.environ.get("NIGHTREAD_CHAR_DILATE", "0"))    # 定案 0：均勻外擴已被貼墨收邊取代
 # 外擴貼墨收邊：均勻外擴 20px 會在角色外圍留一圈等寬留白（使用者 2026-09-15：「越細越好」）。
 # 角色輪廓本來就是**畫出來的墨線** ⇒ 改成「在非墨區內測地生長」：遮罩不足處長到碰輪廓就停、
 # 輪廓外的背景長不進去 ⇒ 邊界貼合角色而非等寬光暈。0＝關（用均勻 dilate）。
@@ -200,8 +200,9 @@ CHAR_DILATE = int(os.environ.get("NIGHTREAD_CHAR_DILATE", "20"))   # 定案：20
 # 最近墨線中位 4.2px、43% >5px、最多 18px）——這才是「角色外圍白色留邊」的真正來源，收邊半徑
 # 只佔 1–3%。作法＝從遮罩外側在非墨區內往內生長，能到達的都是多包的背景（角色輪廓的墨線擋住
 # 生長），從遮罩扣掉。輪廓有缺口處會漏進去，故限半徑。0＝關。
-CHAR_TRIM = int(os.environ.get("NIGHTREAD_CHAR_TRIM", "16"))  # **定案 16**：外緣離墨線中位 1.0→0.0px
-CHAR_SNAP = int(os.environ.get("NIGHTREAD_CHAR_SNAP", "2"))   # **定案 2**（使用者：收最小）：邊界貼合輪廓；
+CHAR_TRIM = int(os.environ.get("NIGHTREAD_CHAR_TRIM", "0"))   # **定案 0**：收邊縮到 1/1 後修邊反而變差（見下表）
+CHAR_SNAP_PAD = int(os.environ.get("NIGHTREAD_CHAR_SNAP_PAD", "1"))   # **定案 1**：這是邊緣厚度的主因，非修邊
+CHAR_SNAP = int(os.environ.get("NIGHTREAD_CHAR_SNAP", "1"))   # **定案 1**（使用者：再小）：邊緣離墨線 1.00px；
                                                               # 代價＝遮罩不足處補不滿，違規 12→22（多出的 10 框多落在 16-38%＝剛越過 15% 門檻）
 # 人物上的氣泡誰優先：bubble＝泡贏（字壓臉時仍深底亮字，臉被吃）；char＝人物贏（泡讓開、
 # 字留在場景調上＝該處不變暗但臉保住）。守護框上差 27 框，觀感上差「字壓臉的可讀性」。
@@ -374,8 +375,10 @@ def snap_charmask(keep, g, r=None):
     r = CHAR_SNAP if r is None else r
     allowed = (g >= WHITE_TH) | keep            # 非墨（含網點視為墨、不穿透）
     grown = geodesic_grow(keep, allowed, r, step=4)
+    if CHAR_SNAP_PAD <= 0:
+        return grown
     k = np.ones((3, 3), np.uint8)
-    return (cv2.dilate(grown.astype(np.uint8), k, iterations=2) > 0)
+    return (cv2.dilate(grown.astype(np.uint8), k, iterations=CHAR_SNAP_PAD) > 0)
 
 
 def normalize_paper(g, img_bgr=None):
