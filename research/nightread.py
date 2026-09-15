@@ -196,7 +196,8 @@ CHAR_DILATE = int(os.environ.get("NIGHTREAD_CHAR_DILATE", "20"))   # 定案：20
 # 外擴貼墨收邊：均勻外擴 20px 會在角色外圍留一圈等寬留白（使用者 2026-09-15：「越細越好」）。
 # 角色輪廓本來就是**畫出來的墨線** ⇒ 改成「在非墨區內測地生長」：遮罩不足處長到碰輪廓就停、
 # 輪廓外的背景長不進去 ⇒ 邊界貼合角色而非等寬光暈。0＝關（用均勻 dilate）。
-CHAR_SNAP = int(os.environ.get("NIGHTREAD_CHAR_SNAP", "12"))  # **定案 12**：比均勻外擴 8px 少 6 框違規、還更暗
+CHAR_SNAP = int(os.environ.get("NIGHTREAD_CHAR_SNAP", "2"))   # **定案 2**（使用者：收最小）：邊界貼合輪廓；
+                                                              # 代價＝遮罩不足處補不滿，違規 12→22（多出的 10 框多落在 16-38%＝剛越過 15% 門檻）
 # 人物上的氣泡誰優先：bubble＝泡贏（字壓臉時仍深底亮字，臉被吃）；char＝人物贏（泡讓開、
 # 字留在場景調上＝該處不變暗但臉保住）。守護框上差 27 框，觀感上差「字壓臉的可讀性」。
 CHAR_OVER_BUBBLE = os.environ.get("NIGHTREAD_CHAR_OVER_BUBBLE", "1") == "1"  # 定案：人物優先
