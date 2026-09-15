@@ -184,6 +184,8 @@ def run_combine(pages, outdir, base=("cseg", "yoloseg"), gap="isnet", boxes_dir=
         for x0, y0, x1, y1 in boxes.get(name, []):
             if x1 > x0 and y1 > y0 and prec[y0:y1, x0:x1].mean() < min_cov:
                 veto[y0:y1, x0:x1] = True
+        # 精準遮罩另存一份：nightread 用它修剪泡遮罩（combine 含 isnet、會把整顆泡當人物）
+        cv2.imwrite(os.path.join(outdir, f"{name}_precise.png"), prec.astype(np.uint8) * 255)
         yield p, ((prec | (g & veto)).astype(np.uint8) * 255)
 
 

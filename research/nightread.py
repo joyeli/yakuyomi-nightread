@@ -72,7 +72,9 @@ OUT_DEFAULT = os.path.join(paths.OUT, "nightread")
 # 顏色/位準
 BG = 16                # 深底（留白/氣泡底）
 INK = 240              # 亮字
-STROKE = 3             # 描邊半徑（格框/氣泡輪廓描亮 band）
+# 描邊半徑（格框/氣泡輪廓描亮 band）。氣泡填黑後原作的黑泡框在黑底上看不見 ⇒ 描亮它；但半徑 3
+# ＋泡框本身 2–3px ⇒ 泡外一圈約 6px 白環（使用者 2026-09-15：「泡泡框跟黑底中間的白色區塊太大」）。
+STROKE = int(os.environ.get("NIGHTREAD_STROKE", "1"))   # **定案 1**：3 ⇒ 泡外約 6px 白環
 # 畫面 D2 曲線
 DIM_FLOOR, DIM_CEIL = 30, 140   # 壓暗值域（紙白 255 → 140）
 ROLLOFF_G = 0.55                # 高光滾降 y = floor+(ceil-floor)*x^g（g<1 凹）
@@ -87,7 +89,10 @@ GUTTER_MIN_AREA_FRAC = 0.0006   # 留白元件最小面積（整頁佔比）
 # 修法1：氣泡白元件上限
 BUBBLE_COMP_MAX_FRAC = 0.07     # 元件整頁佔比上限（6–8% 帶，取中偏上）
 BUBBLE_LOCAL_K = 4.0            # 元件面積 ≤ K × 文字搜尋窗面積（局部性）
-BUBBLE_CORE_MIN_FRAC = 0.003    # ≥ 此頁面佔比的泡元件走「文字種子核心填色」（小緊泡整顆填、不切）
+BUBBLE_CORE_MIN_FRAC = float(os.environ.get("NIGHTREAD_BUBBLE_CORE_MIN", "0.003"))
+# ↑ ≥ 此頁面佔比的泡元件走「文字種子核心填色」；小於的整顆填。**0＝一律核心填色**：整顆填會在
+# 「泡白與髮白連通」時把髮吃掉（demo04 第2格垂髮 0→75%），而核心填色對緊實小泡＝開運算切不掉
+# 任何東西、結果等於整顆填 ⇒ 沒有下行風險。大頁（demo04 3000px 高）用固定頁佔比門檻本來就偏鬆。
 BUBBLE_NECK_R = 8               # 泡的切頸半徑：泡框缺口漏進背景（ch34_011 圓泡右側漏出）、字寫在背景上
                                 # 的白連進臉的下巴縫（demo01 主角）都是窄頸；真泡內部寬闊、行間白 ≥13px 不受影響。
                                 # ★形狀門（實心度）已實測不可用：真泡的白被字切成凹形、填洞後 demo01 臉塊 0.72
@@ -107,8 +112,12 @@ DEEP_INK_RATIO = 0.02           #        且小洞內墨/元件面積 ≥ 此 �
 HOLE_MAX_FRAC = 0.01            # 「小洞」上限（整頁佔比；大洞＝整格，不算包線稿）
 INK_DARK_TH = 128               # 洞內「墨」灰階上限
 # 修法4：純白背景填黑＋前景白描邊（貼紙式）
-STROKE_OBJ_FRAC = 0.0035        # 描邊半徑（× min(W,H)，clamp 下二行）
-STROKE_OBJ_MIN, STROKE_OBJ_MAX = 4, 7
+# 前景描白邊半徑（× min(W,H)，clamp 下二行）。**這就是「泡框/人物外圍那圈白」的真正寬度**
+# ——使用者兩次回報（人物留邊、泡框與黑底之間）都是它：填黑區外圍 dilate(fill, r) 的亮帶。
+# 遮罩邊界調再細都沒用，描邊半徑才是旋鈕。
+STROKE_OBJ_FRAC = float(os.environ.get("NIGHTREAD_STROKE_OBJ_FRAC", "0.0035"))
+STROKE_OBJ_MIN = int(os.environ.get("NIGHTREAD_STROKE_OBJ_MIN", "4"))
+STROKE_OBJ_MAX = int(os.environ.get("NIGHTREAD_STROKE_OBJ_MAX", "7"))
 STROKE_OBJ_V = 220              # 描邊亮度（略低於 INK＝與氣泡字位準區分）
 STICKER_MIN_FRAC = 0.01         # frameless 背景白元件最小整頁佔比（大面積才算背景）
 FIG_NOISE_AREA = 40             # F 小噪點面積門檻（px）：不描邊、整顆併入背景填深
@@ -146,7 +155,11 @@ FAINT_G = 160
 # 偽泡（開口氣泡/字壓背景救回）：
 PB_COV_MAX = 0.85               # 氣泡遮罩蓋率低於此的 text region 才啟動偽泡
 PB_NECK_R = 10                  # 偽泡切頸（擋下巴縫/泡尾缺口；泡內行間白不受影響）
-PB_GROW_FRAC = 0.60             # 生長距離上限＝**min**(text bbox 邊) × 此值
+# 生長距離上限＝min(text bbox 邊) × 此值。⚠️ 用 min 邊對「橫排標題字/效果字」（寬而矮）會過小
+# ⇒ 只在字周圍長出一圈，字與字之間仍是白的（使用者 2026-09-15：「泡泡底雖是黑的，但文字間又白底」，
+# 實例＝demo04「つづく」「ぼ」「先生」名牌）。PB_GROW_REF=max 改用長邊。
+PB_GROW_FRAC = float(os.environ.get("NIGHTREAD_PB_GROW", "0.60"))
+PB_GROW_REF = os.environ.get("NIGHTREAD_PB_GROW_REF", "max")   # **定案 max**：白泡 21.5→20.2 萬 px
                                 # ⚠️ 用長邊時：直排長字串（60×500）可長 175px，穿過下巴縫流進臉白——
                                 #   demo01 主角下半臉、demo05 小臉、ch34_011 學生臉全被塗黑（2026-09-08
                                 #   審查員抓到，我三輪目檢都漏）。改短邊：直排字只長 36px＝貼身袖套；
@@ -186,7 +199,7 @@ EXP_GUTTER = os.environ.get("NIGHTREAD_GUTTER", "1") == "1"        # 留白填�
 # 守護框驅動的結構性安全策略（2026-09-08 晚；v0 全關仍 61 框違規＝基礎機制在吃出血人物/字壓臉）：
 SAFE_GUTTER = os.environ.get("NIGHTREAD_SAFE_GUTTER", "1") == "1"   # 留白只填「真頁邊帶」（深入 ≤ 短邊×比例）
 SAFE_GUTTER_DEPTH = float(os.environ.get("NIGHTREAD_GUTTER_DEPTH", "0.12"))
-SAFE_BUBBLE_RATIO = float(os.environ.get("NIGHTREAD_BUBBLE_RATIO", "3.0"))  # 泡元件面積 ≤ 字 bbox × 此；0=關
+SAFE_BUBBLE_RATIO = float(os.environ.get("NIGHTREAD_BUBBLE_RATIO", "2.0"))  # 泡元件面積 ≤ 字 bbox × 此；0=關
 # 封閉泡救回（2026-09-15，使用者：「還是有白色泡泡」）：泡框有缺口/泡尾開口/泡壓出格框時，泡內白與
 # 頁邊留白或格內白**同一個元件** ⇒ 被 excluded_ids 整顆拒收 ⇒ 只剩偽泡貼身填字；人物遮罩又蓋到整顆
 # 泡（三合一的 isnet 很肥）⇒ 「人物優先」把偽泡內部還原成灰 ⇒ 白泡。無遮罩版是靠留白填色順手塗黑的。
@@ -203,6 +216,8 @@ CHARMASK_DIR = os.environ.get("NIGHTREAD_CHARMASK", "")
 # 贏過人物保護——臉被精準遮罩蓋住時仍受保護；isnet 補漏抓框時順便蓋到的泡（肥遮罩）則能填深。
 # 空＝偽泡一律輸給人物保護（舊行為）。
 CHARMASK_PRECISE_DIR = os.environ.get("NIGHTREAD_CHARMASK_PRECISE", "")
+BUBBLE_TRIM_CHAR = os.environ.get("NIGHTREAD_BUBBLE_TRIM_CHAR", "1") == "1"   # 泡遮罩不得跨進人物
+BUBBLE_SNAP = int(os.environ.get("NIGHTREAD_BUBBLE_SNAP", "0"))   # 泡貼墨收邊（縮泡框與黑底間的白環）
 CHAR_DILATE = int(os.environ.get("NIGHTREAD_CHAR_DILATE", "0"))    # 定案 0：均勻外擴已被貼墨收邊取代
 # 外擴貼墨收邊：均勻外擴 20px 會在角色外圍留一圈等寬留白（使用者 2026-09-15：「越細越好」）。
 # 角色輪廓本來就是**畫出來的墨線** ⇒ 改成「在非墨區內測地生長」：遮罩不足處長到碰輪廓就停、
@@ -375,9 +390,13 @@ def load_veto_mask(page_path, shape, charmask):
 
 
 def load_precise_mask(page_path, shape):
-    if not CHARMASK_PRECISE_DIR:
+    name = os.path.splitext(os.path.basename(page_path))[0]
+    if CHARMASK_PRECISE_DIR:
+        fp = os.path.join(CHARMASK_PRECISE_DIR, f"{name}_char.png")
+    elif CHARMASK_DIR:
+        fp = os.path.join(CHARMASK_DIR, f"{name}_precise.png")   # combine 模式的副產物
+    else:
         return None
-    fp = os.path.join(CHARMASK_PRECISE_DIR, f"{os.path.splitext(os.path.basename(page_path))[0]}_char.png")
     m = cv2.imread(fp, cv2.IMREAD_GRAYSCALE)
     if m is None:
         return None
@@ -605,7 +624,10 @@ def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids):
                 continue
             # 安全策略：泡元件不得遠大於它的字（真泡字塞 30–50%＝比 2–3.5；「字壓在臉頰/手上」
             # 的元件是整片皮膚白、比 10+）。超過 → 不當泡，字交偽泡貼身袖套。
-            if SAFE_BUBBLE_RATIO > 0 and a > SAFE_BUBBLE_RATIO * max(1, (x1 - x0) * (y1 - y0)):
+            # ⚠️ 分母用**字框長邊平方**不是字框面積：單行直排的字框只有一行寬（ch34_006「その通り
+            # じゃ」23×167），面積 3841 而泡 38337 ⇒ 比值 9.98 假性爆表、整顆泡被拒收成白底。
+            # 長邊² 對方形字框等於面積（保護不變）、只對細長字框放寬，正是要的。
+            if SAFE_BUBBLE_RATIO > 0 and a > SAFE_BUBBLE_RATIO * max(1, max(x1 - x0, y1 - y0) ** 2):
                 rejected.add(int(i))
                 continue
             if a >= BUBBLE_CORE_MIN_FRAC * g.size:
@@ -1145,9 +1167,14 @@ def paint_gutter(out, g, gutter, frame=None, bubble=None):
     return out
 
 
-def paint_bubbles(out, g, bubble, seg, text_pad=2):
+TEXT_PAD = int(os.environ.get("NIGHTREAD_TEXT_PAD", "2"))   # 泡內文字描亮外擴（字間白底的嫌疑）
+
+
+def paint_bubbles(out, g, bubble, seg, text_pad=None):
     """氣泡重繪：內部填深、文字畫亮（墨度 alpha）、輪廓描亮。"""
     out[bubble] = BG
+    if text_pad is None:
+        text_pad = TEXT_PAD
     kt = np.ones((text_pad * 2 + 1,) * 2, np.uint8)
     text = (cv2.dilate((seg & bubble).astype(np.uint8), kt) > 0) & bubble
     out[text] = np.maximum(out[text], BG + ink_alpha(g, 1.4)[text] * (INK - BG))
@@ -1180,7 +1207,8 @@ def build_pseudo_bubbles(g, regions, bubble, seg=None):
         win = bubble[y0:y1, x0:x1]
         if win.size == 0 or win.mean() >= PB_COV_MAX:
             continue
-        cap = int(PB_GROW_FRAC * min(x1 - x0, y1 - y0))
+        ref = max(x1 - x0, y1 - y0) if PB_GROW_REF == "max" else min(x1 - x0, y1 - y0)
+        cap = int(PB_GROW_FRAC * ref)
         pad = cap + PB_NECK_R + 2
         wx0, wy0 = max(0, x0 - pad), max(0, y0 - pad)
         wx1, wy1 = min(W_, x1 + pad), min(H, y1 + pad)
@@ -1408,6 +1436,30 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000):
         charmask = trim_charmask(charmask, g)   # 先往內修掉多包的背景
         if CHAR_SNAP > 0:
             charmask = snap_charmask(charmask, g)
+    bubble_guard = load_precise_mask(page_path, g.shape)
+    if bubble_guard is None:
+        bubble_guard = charmask
+    if bubble_guard is not None and BUBBLE_TRIM_CHAR:
+        # 泡遮罩不得跨進人物：氣泡是**畫在人物之上**的圖層 ⇒ 泡內部不可能是人物；反過來，泡的白
+        # 元件常與人物白（髮/衣）連通（泡框有缺口、髮壓在泡邊），整顆填就把髮吃掉
+        # （demo04 第2格垂髮 0→75%）。
+        # ⚠️ 用**精準遮罩**（cseg∪yoloseg）扣、不用 combine：combine 含 isnet（會把整顆泡當人物）
+        # ⇒ 泡被挖成白泡。精準遮罩是實例分割、不會把泡判成人物。
+        # ⚠️ 只扣「從泡邊緣伸進來的人物」：遮罩誤蓋到泡中央時，粗暴地扣會把泡挖出洞＝白泡
+        # （實測白泡 21.9→29.4 萬 px）。判準＝被扣掉的連通塊有沒有碰到泡的外緣：碰到＝髮/衣從外面
+        # 連進來（扣），完全被泡包住＝遮罩誤判泡內部（還原）。
+        removed = bubble & bubble_guard
+        if removed.any():
+            outside = ~bubble
+            nrm, lbrm = cv2.connectedComponents(removed.astype(np.uint8), 8)
+            touch = np.unique(lbrm[(cv2.dilate(outside.astype(np.uint8),
+                                               np.ones((3, 3), np.uint8)) > 0) & removed])
+            touch = touch[touch > 0]
+            bubble = bubble & ~np.isin(lbrm, touch)
+        if BUBBLE_SNAP > 0:
+            # 泡的貼墨收邊（同人物那套）：泡遮罩停在泡框墨線之前會留白環（使用者：泡框跟黑底
+            # 中間的白色區塊太大）。在非墨區內從泡往外測地生長到碰泡框就停。
+            bubble = snap_charmask(bubble, g, BUBBLE_SNAP)
     final = compose(g, gutter, bubble, seg, frameless, lab, stats, sticker,
                     core_ids=promoted, frame=(lhm | lvm), regions=regions, charmask=charmask,
                     veto=load_veto_mask(page_path, g.shape, charmask),
