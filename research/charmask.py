@@ -40,6 +40,7 @@ DEFAULT_PAGES = ["demo01", "demo02", "demo03", "demo04", "demo05", "demo06",
 
 # deepghs/manga109_yolo 的類別順序（labels.json）
 M109_CLASSES = ["text", "face", "body", "frame"]
+BOXES = {}   # yolodet 副產物：逐頁 bbox 清單（供 nightread 的「遮罩漏抓偵測」veto 用）
 
 
 def resolve(tok):
@@ -104,6 +105,8 @@ def run_yolodet(pages, outdir, kinds=("body", "face"), conf=0.25, size=1024):
             x0 = int((cx - bw / 2) / nw * w); x1 = int((cx + bw / 2) / nw * w)
             y0 = int((cy - bh / 2) / nh * h); y1 = int((cy + bh / 2) / nh * h)
             cv2.rectangle(mask, (max(0, x0), max(0, y0)), (min(w - 1, x1), min(h - 1, y1)), 255, -1)
+            BOXES.setdefault(os.path.splitext(os.path.basename(p))[0], []).append(
+                [max(0, x0), max(0, y0), min(w - 1, x1), min(h - 1, y1)])
         yield p, mask
 
 
@@ -177,6 +180,10 @@ def main():
         name = os.path.splitext(os.path.basename(p))[0]
         cv2.imwrite(os.path.join(outdir, f"{name}_char.png"), mask)
         print(f"{name:10s} 前景 {mask.mean() / 255 * 100:5.1f}%")
+    if BOXES:
+        import json
+        with open(os.path.join(outdir, "boxes.json"), "w", encoding="utf-8") as f:
+            json.dump(BOXES, f)
     print(f"→ {outdir}")
 
 

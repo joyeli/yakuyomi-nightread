@@ -140,7 +140,7 @@ PROMOTED_TEXTON_MAX = 0.30      # 強貼框仍拒的文字覆蓋上限：真有�
                                 # 填黑會把字變描邊糊 → 留灰（demo06 教堂 textOn 0.167 是可接受上界的參照）
 # 批1（2026-08-26 使用者拍板「先大片白、複雜區塊第二批」）：
 CORE_NECK_R = 12                # 寬域核心：開運算半徑（切斷臉/白衣連進背景的線稿缺口窄頸）
-CORE_RECOVER_R = 9              # 核心確定後往墨線邊回收的測地半徑（貼線稿、免留白圈）
+CORE_RECOVER_R = int(os.environ.get("NIGHTREAD_CORE_RECOVER", "9"))               # 核心確定後往墨線邊回收的測地半徑（貼線稿、免留白圈）
 FAINT_OF_F_MAX = 0.62           # F 像素中淡色(>FAINT_G)佔比上限：群眾/建築淡速寫背景 → 推遲批2
 FAINT_G = 160
 # 偽泡（開口氣泡/字壓背景救回）：
@@ -151,7 +151,7 @@ PB_GROW_FRAC = 0.60             # 生長距離上限＝**min**(text bbox 邊) ×
                                 #   demo01 主角下半臉、demo05 小臉、ch34_011 學生臉全被塗黑（2026-09-08
                                 #   審查員抓到，我三輪目檢都漏）。改短邊：直排字只長 36px＝貼身袖套；
                                 #   demo02 橫向大字框（600×150）長 90px 仍蓋到框邊。
-PB_AURA_R = 12                  # 偽泡的人物灰暈：距「厚墨塊」此距離內不填（髮團/臉部深色特徵是厚的，
+PB_AURA_R = int(os.environ.get("NIGHTREAD_PB_AURA_R", "12"))  # 偽泡/貼紙的人物灰暈：距「厚墨塊」此距離內不填
 PB_AURA_THICK = 6               #   字框/氣泡輪廓是細筆畫≤4px、不算）——第二道保險
 PB_AURA_MIN_AREA = 800
 # 批1.5（2026-08-26 使用者兩案）：
@@ -200,6 +200,15 @@ CHAR_DILATE = int(os.environ.get("NIGHTREAD_CHAR_DILATE", "0"))    # 定案 0：
 # 最近墨線中位 4.2px、43% >5px、最多 18px）——這才是「角色外圍白色留邊」的真正來源，收邊半徑
 # 只佔 1–3%。作法＝從遮罩外側在非墨區內往內生長，能到達的都是多包的背景（角色輪廓的墨線擋住
 # 生長），從遮罩扣掉。輪廓有缺口處會漏進去，故限半徑。0＝關。
+# 「遮罩漏抓偵測」veto：用**另一個來源**（manga109 偵測器的 body/face bbox，黑白漫畫訓練、召回高
+# 但框太粗不能當遮罩）當第二意見。框內 charmask 覆蓋率 < 門檻 ⇒ 該框裡有人但分割遮罩沒抓到 ⇒
+# **此框內禁止填色**。B 模式把 ch34_006 整隻手塗黑，該處 body 框的遮罩覆蓋率 0%（正常頁 29-55%）
+# ⇒ 分得開。框太粗在這裡無害——它只否決填色、不決定填什麼。
+CHAR_BOXES_DIR = os.environ.get("NIGHTREAD_CHAR_BOXES", "")
+CHAR_BOX_MIN_COV = float(os.environ.get("NIGHTREAD_CHAR_BOX_COV", "0.15"))
+CHAR_FILL = os.environ.get("NIGHTREAD_CHAR_FILL", "0") == "1"   # 未列管白元件補填（見 compose）
+CHAR_FILL_MIN_AREA = float(os.environ.get("NIGHTREAD_CHAR_FILL_MIN", "0.002"))   # 元件整頁佔比下限
+CHAR_FILL_MAX_OVERLAP = float(os.environ.get("NIGHTREAD_CHAR_FILL_OVL", "0.30")) # 與人物遮罩重疊上限
 CHAR_TRIM = int(os.environ.get("NIGHTREAD_CHAR_TRIM", "0"))   # **定案 0**：收邊縮到 1/1 後修邊反而變差（見下表）
 CHAR_SNAP_PAD = int(os.environ.get("NIGHTREAD_CHAR_SNAP_PAD", "1"))   # **定案 1**：這是邊緣厚度的主因，非修邊
 CHAR_SNAP = int(os.environ.get("NIGHTREAD_CHAR_SNAP", "1"))   # **定案 1**（使用者：再小）：邊緣離墨線 1.00px；
@@ -336,6 +345,23 @@ def detect(img_bgr):
 
 
 # ── 遮罩：白元件分類（修法2/3）＋氣泡（修法1）───────────────────────
+
+def load_veto_mask(page_path, shape, charmask):
+    """遮罩漏抓偵測：讀 charmask.py --kinds body face 產的 boxes.json，回傳「禁止填色」遮罩
+    ＝所有「框內 charmask 覆蓋率 < CHAR_BOX_MIN_COV」的框的聯集。無資料回 None。"""
+    if not CHAR_BOXES_DIR or charmask is None:
+        return None
+    fp = os.path.join(CHAR_BOXES_DIR, "boxes.json")
+    if not os.path.exists(fp):
+        return None
+    with open(fp, encoding="utf-8") as f:
+        boxes = json.load(f)
+    veto = np.zeros(shape, bool)
+    for x0, y0, x1, y1 in boxes.get(os.path.splitext(os.path.basename(page_path))[0], []):
+        if x1 > x0 and y1 > y0 and charmask[y0:y1, x0:x1].mean() < CHAR_BOX_MIN_COV:
+            veto[y0:y1, x0:x1] = True
+    return veto if veto.any() else None
+
 
 def load_charmask(page_path, shape):
     """讀 charmask.py 產的人物遮罩（255=人物），外擴 CHAR_DILATE 後回傳 bool；無遮罩回 None。"""
@@ -1140,7 +1166,7 @@ def harmonize_enclosed_whites(out, g, lab, stats, skip_mask):
 
 
 def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
-            core_ids=(), frame=None, regions=None, charmask=None):
+            core_ids=(), frame=None, regions=None, charmask=None, veto=None):
     """整頁合成：D2 畫面 →（有框頁才）留白填深 → 修法4 貼紙式背景 → 氣泡重繪。"""
     out = scene_final(g, seg).astype(np.float32)
     scene_keep = out.copy() if charmask is not None else None   # 人物區最終一律還原成場景調
@@ -1203,19 +1229,38 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
         skip = bubble | gutter
     if lab is not None and EXP_HARMONIZE:               # 批1.5：浮在黑裡的空白人頭一致化
         out = harmonize_enclosed_whites(out, g, lab, stats, skip)
+    if charmask is not None and CHAR_FILL:
+        # ★ 未列管白元件補填（遮罩驅動）：使用者看到的「角色外圍白邊」經歸戶後，**一半是沒有任何
+        # 機制認領的白元件**（封閉背景口袋：被格框與角色夾住，既不是留白也不是格內白也不進貼紙）
+        # ——那是舊幾何分類法的結構性漏洞。有語意遮罩後可以判定：**沒被認領、又不是人物 ⇒ 背景**。
+        # ⚠️ 只補「整塊未列管」的元件，**不碰邊界行為**。全面「遮罩外的白一律填」已實測否決：
+        # 外觀正是想要的（白邊全消、亮區 40.5→27.5%）但違規 24→147 且**分散在 11 頁**
+        # ＝遮罩夠準到「保護」、不夠準到「驅動填色」。**veto 就是為此而生**（見 load_veto_mask）。
+        bg = (g >= WHITE_TH) & ~charmask & ~bubble & ~pb
+        if veto is not None:
+            bg &= ~veto                      # 另一個模型說「這框裡有人、但遮罩沒抓到」⇒ 不填
+        if bg.any():
+            out[bg] = BG
+            kk = np.ones((STROKE * 2 + 1,) * 2, np.uint8)
+            band = (cv2.dilate(bg.astype(np.uint8), kk) > 0) & ~bg
+            a2 = ink_alpha(g, 1.6)
+            out[band] = np.maximum(out[band], BG + a2[band] * (INK - BG))
     if charmask is not None:
         # 語意禁填：人物區（含描邊外擴）一律還原場景調。放最後＝不必逐機制改，任何新填色
         # 機制自動受保護。**只扣氣泡/偽泡**（人物身上的對話框仍該深底亮字）——
         # ⚠️ 不能扣 gutter：白衣被塗黑正是 gutter 幹的（出血人物與頁白同元件），
         # 扣了等於把最大宗的違規排除在保護外（實測 55→52 框、几乎沒救到）。
         restore = charmask.copy()
+        # ★ 真氣泡永遠贏過人物保護：氣泡是**畫在畫面之上**的圖層，它遮住後面的人物——該處根本看不到
+        # 人物，把它還原成「人物的場景調」等於讓對話框變成淺色底（使用者 2026-09-15 回報）。
+        # CHAR_OVER_BUBBLE 只該管**偽泡**（字直接寫在畫面上、人物在字周圍仍看得見）。
+        restore &= ~bubble
         if not CHAR_OVER_BUBBLE:
-            restore &= ~bubble
             if regions is not None and EXP_PSEUDO and pb.any():
                 restore &= ~pb
         elif TEXT_BACKING_R > 0:
             # 人物優先，但字貼身暗襯保留（見 TEXT_BACKING_R）
-            text_on_char = (bubble | pb) & charmask & seg
+            text_on_char = pb & charmask & seg
             if text_on_char.any():
                 kb = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (TEXT_BACKING_R * 2 + 1,) * 2)
                 restore &= ~(cv2.dilate(text_on_char.astype(np.uint8), kb) > 0)
@@ -1295,7 +1340,8 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000):
         if CHAR_SNAP > 0:
             charmask = snap_charmask(charmask, g)
     final = compose(g, gutter, bubble, seg, frameless, lab, stats, sticker,
-                    core_ids=promoted, frame=(lhm | lvm), regions=regions, charmask=charmask)
+                    core_ids=promoted, frame=(lhm | lvm), regions=regions, charmask=charmask,
+                    veto=load_veto_mask(page_path, g.shape, charmask))
 
     pref = os.path.join(outdir, name)
     with open(f"{pref}_regions.json", "w", encoding="utf-8") as f:
