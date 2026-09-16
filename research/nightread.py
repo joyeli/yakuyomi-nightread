@@ -217,6 +217,10 @@ CHARMASK_DIR = os.environ.get("NIGHTREAD_CHARMASK", "")
 # 贏過人物保護——臉被精準遮罩蓋住時仍受保護；isnet 補漏抓框時順便蓋到的泡（肥遮罩）則能填深。
 # 空＝偽泡一律輸給人物保護（舊行為）。
 CHARMASK_PRECISE_DIR = os.environ.get("NIGHTREAD_CHARMASK_PRECISE", "")
+BUBBLE_GUARD_FULL = os.environ.get("NIGHTREAD_BUBBLE_GUARD_FULL", "1") == "1"
+# ↑ **定案開**：扣泡改用完整遮罩（含 isnet 補漏那層）。原本怕 isnet 把整顆泡當人物而挖出白泡，
+# 實測泡內仍是純黑 16.0（沒挖洞）——因為 isnet 只在「偵測框內且精準遮罩覆蓋<15%」的漏抓框生效，
+# 那些框裡本來就沒有泡。違規 21→14，7 框實質改善、0 框變差。
 BUBBLE_TRIM_CHAR = os.environ.get("NIGHTREAD_BUBBLE_TRIM_CHAR", "1") == "1"   # 泡遮罩不得跨進人物
 BUBBLE_SNAP = int(os.environ.get("NIGHTREAD_BUBBLE_SNAP", "0"))
 BUBBLE_REST_FILL = os.environ.get("NIGHTREAD_BUBBLE_REST", "1") == "1"   # 核心填色的剩餘部分當背景填深
@@ -245,8 +249,11 @@ CHAR_FILL = os.environ.get("NIGHTREAD_CHAR_FILL", "0") == "1"   # 未列管白�
 CHAR_FILL_MIN_AREA = float(os.environ.get("NIGHTREAD_CHAR_FILL_MIN", "0.002"))   # 元件整頁佔比下限
 CHAR_FILL_MAX_OVERLAP = float(os.environ.get("NIGHTREAD_CHAR_FILL_OVL", "0.30")) # 與人物遮罩重疊上限
 CHAR_TRIM = int(os.environ.get("NIGHTREAD_CHAR_TRIM", "0"))   # **定案 0**：收邊縮到 1/1 後修邊反而變差（見下表）
+REGION_SNAP_COVER = float(os.environ.get("NIGHTREAD_REGION_SNAP", "0"))   # 線稿區域吸附覆蓋門檻（0=關）
+REGION_SNAP_MAX = float(os.environ.get("NIGHTREAD_REGION_SNAP_MAX", "0.04"))  # 區塊頁佔比上限
 CHAR_SNAP_PAD = int(os.environ.get("NIGHTREAD_CHAR_SNAP_PAD", "1"))   # **定案 1**：這是邊緣厚度的主因，非修邊
-CHAR_SNAP = int(os.environ.get("NIGHTREAD_CHAR_SNAP", "1"))   # **定案 1**（使用者：再小）：邊緣離墨線 1.00px；
+CHAR_SNAP = int(os.environ.get("NIGHTREAD_CHAR_SNAP", "10"))  # **定案 10**（2026-09-16）：測地生長到墨線就停，所以
+                                                              # 邊緣厚度不變（0.98→1.13px）但遮罩貼合度大增：違規 31→21、7 框實質改善、0 框變差；
                                                               # 代價＝遮罩不足處補不滿，違規 12→22（多出的 10 框多落在 16-38%＝剛越過 15% 門檻）
 # 人物上的氣泡誰優先：bubble＝泡贏（字壓臉時仍深底亮字，臉被吃）；char＝人物贏（泡讓開、
 # 字留在場景調上＝該處不變暗但臉保住）。守護框上差 27 框，觀感上差「字壓臉的可讀性」。
@@ -444,6 +451,32 @@ def trim_charmask(keep, g, r=None):
     outside = (~keep) & allowed
     leak = geodesic_grow(outside, allowed, r, step=4) & keep
     return keep & ~leak
+
+
+def region_snap_charmask(keep, g, cover=None, max_frac=None):
+    """線稿區域吸附（trapped-ball 的簡化版，4 個 OpenCV op）：把「非墨」區域切成封閉區塊，
+    某區塊被人物遮罩覆蓋超過 cover 就**整塊**納入遮罩。
+
+    動機（2026-09-16）：31 框違規裡 27 框的遮罩覆蓋已達 63–87%，缺的是**邊緣沒貼到輪廓**——
+    模型邊界是 640 解析度放大來的，停在物體內側。無差別外擴（snap/dilate）會讓邊界變粗
+    （使用者明確要求細），而區域吸附只長到**畫出來的輪廓線**就停，不會溢出。
+    max_frac 擋掉「整片背景是一個大區塊」的情況（網點頁/開放背景會讓區塊變超大）。
+    """
+    cover = REGION_SNAP_COVER if cover is None else cover
+    max_frac = REGION_SNAP_MAX if max_frac is None else max_frac
+    ink = (g < WHITE_TH).astype(np.uint8)
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    sealed = cv2.dilate(ink, k)                       # 補線稿缺口，免得區塊漏成一片
+    n, lab_r, st, _ = cv2.connectedComponentsWithStats((1 - sealed).astype(np.uint8), 4)
+    out = keep.copy()
+    for i in range(1, n):
+        a = int(st[i, cv2.CC_STAT_AREA])
+        if a < 60 or a > max_frac * g.size:
+            continue
+        blob = lab_r == i
+        if float(keep[blob].mean()) >= cover:
+            out |= blob
+    return out
 
 
 def snap_charmask(keep, g, r=None):
@@ -1491,6 +1524,8 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000):
         charmask = trim_charmask(charmask, g)
         if CHAR_SNAP > 0:
             charmask = snap_charmask(charmask, g)
+        if REGION_SNAP_COVER > 0:
+            charmask = region_snap_charmask(charmask, g)
     bubble, merged, rejected, cored = build_bubble_mask(
         g, regions, seg, lab, stats, gutter_ids | panel_ids, charmask=charmask)
     sticker, audit, promoted = sticker_plan(g, img, lab, stats, gutter_ids, panel_ids,
@@ -1560,7 +1595,7 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000):
         bubble_rest = rest
     else:
         bubble_rest = None
-    bubble_guard = load_precise_mask(page_path, g.shape)
+    bubble_guard = charmask if BUBBLE_GUARD_FULL else load_precise_mask(page_path, g.shape)
     if bubble_guard is None:
         bubble_guard = charmask
     if bubble_guard is not None and BUBBLE_TRIM_CHAR:
