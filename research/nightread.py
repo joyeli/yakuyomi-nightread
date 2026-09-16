@@ -127,7 +127,7 @@ STICKER_FIG_MIN = 0.10          # 前景佔 bbox 比例下限（過低＝整格�
 STICKER_FIG_MAX = 0.85          # 上限（過高＝根本沒分出背景）
 STICKER_THIN_R = 4              # W 細碎判定半徑（距離變換 ≤ R ＝細白絲）
 STICKER_THIN_MAX = 0.45         # W 細碎佔比上限（整體細碎＝背景根本破碎）
-STICKER_CHROMA_MAX = 6.0        # 元件平均彩度（max−min 通道）上限：淡彩水彩底
+STICKER_CHROMA_MAX = float(os.environ.get("NIGHTREAD_CHROMA_MAX", "6.0"))        # 元件平均彩度（max−min 通道）上限：淡彩水彩底
                                 # 灰階會 ≥235 但不是「純白」，整顆不進候選（彩頁不毀）
                                 # （校準：demo04 淡彩 2.5–15.4、demo05 11.7/18.3、
                                 #   純黑白頁全 ≤2.0；demo04 最低那顆 2.5 另由 textCov 擋）
