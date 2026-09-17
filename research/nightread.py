@@ -1181,8 +1181,13 @@ def mask_viz(img_bgr, gutter, panel_scene, bubble, seg, regions, sticker_mask=No
     return viz
 
 
-def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000):
-    """單頁一條龍：偵測 → 遮罩 → 合成 → 落檔。回傳統計 dict（批次表用）。"""
+def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None):
+    """單頁一條龍：偵測 → 遮罩 → 合成 → 落檔。回傳統計 dict（批次表用）。
+
+    [regions] 與 [seg] 可以由外部提供，跳過偵測——**產品路徑就是這樣走的**：頁面先經過翻譯，
+    文字區早就算過（存在翻譯素材裡），譯文的筆畫位置則由排版器自己知道，都不必重測一次。
+    只給其中一個也行，另一個仍走偵測。
+    """
     name = os.path.splitext(os.path.basename(page_path))[0]
     os.makedirs(outdir, exist_ok=True)
     img = cv2.imread(page_path)                        # 彩頁也吃（偵測吃 BGR）
@@ -1191,7 +1196,12 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000):
     g, paper_peak = normalize_paper(g, img)           # 色紙/掃描頁：亮部拉到 255（見 PAPER_NORM_MIN；淡彩底不動）
     H, W = g.shape
 
-    lines, regions, seg = detect(img)
+    if regions is None or seg is None:
+        lines, det_regions, det_seg = detect(img)
+        regions = det_regions if regions is None else regions
+        seg = det_seg if seg is None else seg
+    else:
+        lines = []                                     # 兩者都給了就完全不跑偵測
     frameless, hk, vk = page_is_frameless(g)
     lab, stats, gutter_ids, panel_ids = classify_white_components(g)
     char_raw = load_charmask(page_path, g.shape)      # 模型原輸出（未收邊、未平滑）
