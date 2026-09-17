@@ -10,8 +10,11 @@ does: it **rebuilds** the page. Speech bubbles become dark with light text, empt
 black with the figures lifted out by a light outline, and everything else is tone-mapped so black lines stay
 black.
 
-It is the sibling of [yakuyomi-engine](https://github.com/joyeli/yakuyomi-engine) (the translation engine)
-and consumes only its text-detection output.
+Night reading stands on its own. It takes a page in greyscale, a text-region mask, the text-region boxes
+and a character mask, and returns a dark page; where those inputs come from is the caller's choice. Yakuyomi
+produces them with the DBNet detector in
+[yakuyomi-engine](https://github.com/joyeli/yakuyomi-engine), which is one way of wiring it up, not a
+requirement.
 
 ![Six stages of the rebuild](docs/img/showcase.webp)
 
@@ -36,6 +39,9 @@ Full walkthrough in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md); every tunabl
 [`docs/SHOWCASE.md`](docs/SHOWCASE.md).
 
 ## How it fits in the product
+
+This section describes how Yakuyomi itself uses night reading. The pipeline does not require translation;
+the ordering below is a product decision.
 
 Night reading runs after translation: what it rebuilds is the finished page, with the translated text
 already typeset into the bubbles. Computed before translation it would be looking at the original text, and
@@ -76,7 +82,8 @@ percentage points of light area; with the mask the same pipeline sits at 18.
 | `research/make_showcase.py` | The six-stage showcase sheets. |
 | `research/pipeline_diagram.py` | The pipeline-stage figure at the top of this file. |
 | `fixtures/pages/` | The 11 test pages. `fixtures/baseline/` holds reference outputs for regression. |
-| `nightread/` | Future Kotlin library (Android library, **no `android.graphics` dependency** so JVM tests can compare against the Python fixtures bit-for-bit). Only the primitive API contract (`Cv.kt`) exists so far. |
+| `nightread/` | The Kotlin library. The whole pipeline is ported and passes parity tests against the Python fixtures. Android library with **no `android.graphics` and no ONNX dependency**; `kotlin.math` is all the source imports, so the tests run on a plain JVM. Integration guide in [`nightread/README.md`](nightread/README.md). |
+| `nightread-ort/` | ONNX Runtime inference for the character mask (`CharMaskOrt`). The only module that depends on ONNX Runtime. |
 | `docs/` | Architecture, parameter reference, decision log. |
 
 ## Running
@@ -84,6 +91,11 @@ percentage points of light area; with the mask the same pipeline sits at 18.
 The research scripts need the engine's parity tools for text detection (the DBNet checkpoint loader and the
 m-i-t grouping spec). Point `YAKU_ENGINE_CLONE` at a checkout of yakuyomi-engine (default
 `/mnt/d/Gits/Yakuyomi`); the same Python environment as its `parity/` works here.
+
+That dependency belongs to the scripts, not to the pipeline: they call the engine's DBNet to produce `seg`
+and `regions`. Supply those two yourself and no engine is involved.
+`run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None)` skips detection when both are
+passed, which is the same shape as the Kotlin `NightReadInput`.
 
 ```bash
 cd research

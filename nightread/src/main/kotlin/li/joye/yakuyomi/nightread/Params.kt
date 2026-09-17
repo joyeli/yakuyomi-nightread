@@ -134,7 +134,10 @@ data class TextRegion(val x0: Int, val y0: Int, val x1: Int, val y1: Int)
  * 不綁任何推論框架，JVM 測試才跑得起來。
  *
  * @param gray 頁面灰階（0..255）
- * @param seg 文字筆畫遮罩（DBNet 第二輸出二值化後）
+ * @param seg 文字遮罩。**要的是文字「區域」不是精確筆畫**：氣泡的核心填色拿它當種子，
+ *            換成只有筆畫的精確遮罩會讓種子太小、泡填不滿（實測某顆泡區域覆蓋 90%、精確筆畫
+ *            只有 32% 是黑）。而且它要涵蓋所有文字，包括不打算處理的裝飾字——漏掉的那顆泡
+ *            會整顆沒填。DBNet 的第二個輸出正好是區域，所以合用。
  * @param regions 文字區
  * @param charMask 人物遮罩（模型原輸出，未收邊未平滑）。**必要**：沒有它紅線不可達。
  * @param chroma 每像素彩度（max−min 通道），彩頁判定用；純灰階頁可傳 null。

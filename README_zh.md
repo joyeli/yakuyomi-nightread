@@ -8,8 +8,9 @@
 兩者都沒碰頁面內容。這個專案碰：它**重建**頁面。對話框變成深底亮字，空白背景填黑、人物用亮邊
 抬出來，其餘部分經過色調映射，讓黑線維持黑。
 
-它是 [yakuyomi-engine](https://github.com/joyeli/yakuyomi-engine)（翻譯引擎）的姊妹專案，
-只吃引擎的文字偵測輸出。
+夜讀自成一件。它吃一頁的灰階、文字區域遮罩、文字區 bbox 與人物遮罩，回傳一張暗色頁；這些輸入
+從哪裡來由呼叫端決定。Yakuyomi 是用 [yakuyomi-engine](https://github.com/joyeli/yakuyomi-engine)
+的 DBNet 偵測器產生的，那是其中一種接法，不是硬性要求。
 
 ![重建的六個階段](docs/img/showcase.webp)
 
@@ -31,6 +32,8 @@
 [`docs/SHOWCASE_zh.md`](docs/SHOWCASE_zh.md)。
 
 ## 在產品裡怎麼用
+
+這節講的是 Yakuyomi 自己怎麼用夜讀。管線本身不要求翻譯，下面的順序是產品決策。
 
 夜讀接在翻譯之後，吃的是已經貼好譯文的成品頁；在翻譯前算，夜讀看到的是原文，譯文貼上去就成了
 黑字壓在黑底上。因此 OCR、翻譯、去字、排版這些翻譯的大宗成本全部省掉，成品頁只要重跑偵測，
@@ -65,7 +68,8 @@
 | `research/make_showcase.py` | 六階段成果展示圖。 |
 | `research/pipeline_diagram.py` | 本頁上方那張管線階段圖。 |
 | `fixtures/pages/` | 11 張測試頁。`fixtures/baseline/` 是回歸用的參考輸出。 |
-| `nightread/` | 未來的 Kotlin library（Android library，**不依賴 `android.graphics`**，這樣 JVM 測試才能對 Python fixture 逐位元比對）。目前只有 `Cv.kt` 的 API 契約。 |
+| `nightread/` | Kotlin library。整條管線已經移植完成，並通過對 Python fixture 的 parity 測試。Android library，**不依賴 `android.graphics`、也不依賴 ONNX**；原始碼只 import `kotlin.math`，所以測試在一般 JVM 上就跑得起來。接法見 [`nightread/README_zh.md`](nightread/README_zh.md)。 |
+| `nightread-ort/` | 人物遮罩的 ONNX Runtime 推論（`CharMaskOrt`）。只有這個模組依賴 ONNX Runtime。 |
 | `docs/` | 架構、參數表、決策記錄。 |
 
 ## 執行
@@ -73,6 +77,10 @@
 研究腳本需要引擎的 parity 工具做文字偵測（DBNet checkpoint 載入器與 m-i-t 的 grouping 規格）。
 把 `YAKU_ENGINE_CLONE` 指向 yakuyomi-engine 的 checkout（預設 `/mnt/d/Gits/Yakuyomi`），
 用它 `parity/` 的同一套 Python 環境即可。
+
+這個依賴屬於腳本，不屬於管線：腳本是拿引擎的 DBNet 產出 `seg` 與 `regions`。這兩樣自己準備好，
+就完全用不到引擎。`run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None)`
+兩個都傳進去就跳過偵測，形狀與 Kotlin 的 `NightReadInput` 相同。
 
 ```bash
 cd research
