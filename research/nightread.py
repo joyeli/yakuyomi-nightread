@@ -202,7 +202,10 @@ EXP_GUTTER = os.environ.get("NIGHTREAD_GUTTER", "1") == "1"        # 留白填�
 GUTTER_FRAME_CUT = os.environ.get("NIGHTREAD_GUTTER_FRAME_CUT", "0") == "1"  # 留白填色不得跨越格框線
 SAFE_GUTTER = os.environ.get("NIGHTREAD_SAFE_GUTTER", "1") == "1"   # 留白只填「真頁邊帶」（深入 ≤ 短邊×比例）
 SAFE_GUTTER_DEPTH = float(os.environ.get("NIGHTREAD_GUTTER_DEPTH", "0.12"))
-SAFE_BUBBLE_RATIO = float(os.environ.get("NIGHTREAD_BUBBLE_RATIO", "2.0"))  # 泡元件面積 ≤ 字 bbox × 此；0=關
+SAFE_BUBBLE_RATIO = float(os.environ.get("NIGHTREAD_BUBBLE_RATIO", "2.5"))
+# ↑ **2.5**（2026-09-17 使用者指出 ch34_011「はい お父様」泡框內側一圈灰白）：**短字配大泡**
+# ——四個字的字框長邊 99px、泡 23029px ⇒ 比值 2.35 超過舊門檻 2.0 被拒收，只剩偽泡貼字填色，
+# 中間一塊黑、外圍一圈灰。放寬到 2.5 後該泡填黑 71%→100%；代價 2 框（同頁父親淡色頭髮）。  # 泡元件面積 ≤ 字 bbox × 此；0=關
 # 封閉泡救回（2026-09-15，使用者：「還是有白色泡泡」）：泡框有缺口/泡尾開口/泡壓出格框時，泡內白與
 # 頁邊留白或格內白**同一個元件** ⇒ 被 excluded_ids 整顆拒收 ⇒ 只剩偽泡貼身填字；人物遮罩又蓋到整顆
 # 泡（三合一的 isnet 很肥）⇒ 「人物優先」把偽泡內部還原成灰 ⇒ 白泡。無遮罩版是靠留白填色順手塗黑的。
