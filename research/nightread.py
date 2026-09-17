@@ -220,6 +220,10 @@ CHARMASK_PRECISE_DIR = os.environ.get("NIGHTREAD_CHARMASK_PRECISE", "")
 BUBBLE_CLEAN_WINS = float(os.environ.get("NIGHTREAD_BUBBLE_CLEAN", "0.005"))
 # ↑ **定案開**（使用者 2026-09-17 看圖後拍板）：判定為「乾淨泡」的整顆塗黑、不被人物遮罩扣。
 BUBBLE_CLEAN_TEXT_MAX = float(os.environ.get("NIGHTREAD_BUBBLE_CLEAN_TEXT", "0.80"))   # 內部非字墨 < 此值的泡整顆塗黑（0=關）
+MASK_SMOOTH = float(os.environ.get("NIGHTREAD_MASK_SMOOTH", "1"))   # 遮罩形狀平滑（>0 啟用；實際核見 MASK_SMOOTH_MEDIAN）
+MASK_SMOOTH_GUIDED = os.environ.get("NIGHTREAD_MASK_SMOOTH_GUIDED", "1") == "1"
+MASK_SMOOTH_MEDIAN = int(os.environ.get("NIGHTREAD_MASK_MEDIAN", "15"))  # **定案 15**：中值對方塊階梯有效
+EDGE_FEATHER = float(os.environ.get("NIGHTREAD_EDGE_FEATHER", "0.7"))  # **定案 0.7**：收尾的 1–2px 抗鋸齒
 TEXT_TOPMOST = os.environ.get("NIGHTREAD_TEXT_TOPMOST", "1") == "1"
 # ↑ **定案開**（使用者 2026-09-17 的圖層優先權洞察）：字永遠在最上層。泡遮罩被人物扣掉後，
 # 那塊的字失去「泡內亮字」待遇 ⇒ demo03 實測對比 **-6（字比底還暗、完全讀不出來）**。
@@ -460,6 +464,30 @@ def trim_charmask(keep, g, r=None):
     outside = (~keep) & allowed
     leak = geodesic_grow(outside, allowed, r, step=4) & keep
     return keep & ~leak
+
+
+def smooth_charmask(keep, g, sigma=None):
+    """遮罩形狀平滑（使用者 2026-09-17：黑白交界有明顯鋸齒感）。
+
+    病根不是 1px 鋸齒而是**塊狀階梯**：遮罩在 640 解析度產生、放大到全頁後每個遮罩像素變成
+    2–3px 的方塊，邊界呈直角梯級（2× 放大可見）。單純羽化只軟化 1–2px，救不了方塊。
+    作法＝高斯 + 0.5 門檻（形態學意義上的曲率平滑，凸角被削、凹角被填），再用原圖的墨線把
+    平滑後的邊界拉回輪廓（GUIDED：只在非墨區生效，避免把遮罩推過線稿）。
+    """
+    sigma = MASK_SMOOTH if sigma is None else sigma
+    if sigma <= 0:
+        return keep
+    if MASK_SMOOTH_MEDIAN > 1:
+        # 中值濾波對「方塊階梯」比高斯有效：它保直線、削掉突出的方塊角，不會把整體輪廓縮水。
+        r = int(MASK_SMOOTH_MEDIAN) | 1
+        sm = cv2.medianBlur(keep.astype(np.uint8) * 255, r) > 127
+    else:
+        sm = cv2.GaussianBlur(keep.astype(np.float32), (0, 0), sigma) > 0.5
+    if MASK_SMOOTH_GUIDED:
+        ink = g < WHITE_TH
+        # 平滑只准在非墨區改寫：墨線上的遮罩歸屬維持原判（線稿是可信的邊界）
+        sm = np.where(ink, keep, sm)
+    return sm
 
 
 def region_snap_charmask(keep, g, cover=None, max_frac=None):
@@ -1485,7 +1513,14 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
             kt2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (TEXT_TOP_PAD * 2 + 1,) * 2)
             keep_txt = (cv2.dilate((seg & lost_bubble).astype(np.uint8), kt2) > 0) & lost_bubble
             restore &= ~keep_txt
-        out[restore] = scene_keep[restore]
+        if EDGE_FEATHER > 0:
+            # 邊界抗鋸齒（使用者 2026-09-17：黑白交界有明顯鋸齒感）：遮罩是二值的、又是從 640
+            # 解析度放大來的 ⇒ 邊界呈階梯狀。用**小半徑**的高斯把還原遮罩軟化成 0..1 alpha 做混合，
+            # 只在 1–2px 內過渡 ⇒ 消鋸齒而不產生原作沒有的漸層（那是 glow 落選的理由，此處不同）。
+            a_e = cv2.GaussianBlur(restore.astype(np.float32), (0, 0), EDGE_FEATHER)
+            out = out * (1.0 - a_e) + scene_keep * a_e
+        else:
+            out[restore] = scene_keep[restore]
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
@@ -1552,6 +1587,8 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000):
             charmask = snap_charmask(charmask, g)
         if REGION_SNAP_COVER > 0:
             charmask = region_snap_charmask(charmask, g)
+        if MASK_SMOOTH > 0:
+            charmask = smooth_charmask(charmask, g)
     bubble, merged, rejected, cored = build_bubble_mask(
         g, regions, seg, lab, stats, gutter_ids | panel_ids, charmask=charmask)
     sticker, audit, promoted = sticker_plan(g, img, lab, stats, gutter_ids, panel_ids,
