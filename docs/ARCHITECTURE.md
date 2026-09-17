@@ -163,6 +163,76 @@ background behind that bubble.
 small-radius Gaussian to soften the restore mask into a 0-to-1 alpha for blending, transitioning over one to
 two pixels only. That kills the jaggies without producing a gradient the original art never had.
 
+## Where it sits in the product
+
+Night reading is downstream of translation, not a parallel branch.
+
+**Order: night reading runs after translation finishes.** What it processes is the finished page with the
+translated text already typeset onto it, not the original. Computed before translation, night reading sees the
+source text, and the translation then lands on top as black glyphs on a black ground, completely unreadable.
+
+**Translated text stays readable under night reading.** The material is real output from the translation
+engine, run through the whole night-reading pipeline:
+
+| Measurement | Value |
+|---|---|
+| Output brightness of the text strokes | 238.7 (ceiling 240) |
+| Output brightness of the bubble ground | 16.1 |
+| Contrast | +222.6 |
+| Main bubbles short of contrast, out of six | 0 |
+
+Translated text is easier to handle than native handwritten lettering: flat black glyphs have high ink density
+and clean edges, so the low-ink knee that crushes to black cuts exactly where it should.
+
+The measurement itself has a trap. Measuring "stroke mask ∩ bubble" directly gives 96.5, which looks too dark,
+because 60.4% of the pixels in that mask are the bubble white around the glyphs rather than strokes. Measuring
+readability means filtering the non-stroke pixels out first.
+
+**What can be borrowed from translation.** Saved: OCR, translation, text removal and typesetting, which is the
+bulk of translation's cost. Not saved: **detection**. The character mask is night reading's own cost, about
+10.5 MB if only YOLO11-seg is used (nine more guard-box
+violations), or 238 MB with CartoonSegmentation alongside it. CartoonSegmentation cannot be quantized:
+its int8 build needs the score threshold dropped far enough that the mask over-covers and eats bubbles.
+
+**Why detection cannot be saved.** Three recipes, measured:
+
+| Recipe | Detection | Stroke mask | seg px | Light area | Text | Contrast |
+|---|---|---|---|---|---|---|
+| A, remeasure everything | DBNet | DBNet | 166919 | 6.47% | 238.7 | +222.6 |
+| B, borrow the text regions | DBNet | DBNet | 166919 | 6.47% | 238.7 | +222.6 |
+| C, borrow everything | not run | the typesetter's precise strokes | 51227 | 6.96% | 239.3 | +223.2 |
+
+C is the best on the metrics, and **the images overturned it**. Two failure modes:
+
+1. **The bubble does not fill.** DBNet's seg is a text **region**: on one bubble it covers 90% of that area,
+   while the precise strokes are only 32% black. A bubble's core fill takes seg as its seed, and a seed that
+   small leaves the bubble unfilled, with a patch of grey in the bottom right corner.
+2. **A whole bubble is missed.** Decorative handwritten lettering lies inside no text region at all. The
+   typesetter only knows what it drew itself and cannot see text that was never translated, and leaving
+   decorative SFX untranslated is settled manga-image-translator policy.
+
+The conclusion: DBNet's seg mask has two properties night reading depends on that the typesetter's precise
+mask cannot give. It is a region rather than strokes, so it can serve directly as a fill seed; and it covers
+all of the text.
+
+B and A come out identical, because one DBNet forward pass produces the region and the stroke mask together,
+so sharing the text regions saves no time. There is no reason to store extra material for sharing's sake
+either.
+
+**The settled product shape.**
+
+```mermaid
+flowchart LR
+    SRC([source page]) --> TR[translation<br/><small>detection → OCR → translate → text removal → typeset</small>]
+    TR --> DAY([finished page])
+    DAY --> NR[night reading<br/><small>detection → character mask → region-wise rebuild</small>]
+    NR --> NIGHT([night version])
+    DAY <-->|switch: swap the file pointer, zero computation| NIGHT
+```
+
+The night version and the normal version switch freely, because both are images that have already been
+computed.
+
 ## Two red lines
 
 1. **Never paint the wrong thing.** Faces, hands, skin, white clothes and white hair must never be filled
@@ -217,6 +287,11 @@ is also why `nightread/` deliberately avoids `android.graphics`: JVM tests have 
 The model recipe for the device is settled. The character mask needs two ONNX models, 267MB together:
 CartoonSegmentation (228MB, 58MB once int8) and YOLO11-seg (38.9MB). Detection reuses the engine's existing
 DBNet, so it costs nothing extra.
+
+The API is aligned too: `run_page` in `research/nightread.py` takes `regions` and `seg` parameters, and
+supplying them from outside skips detection, the same shape as `NightReadInput` on the Kotlin side. Recipe C
+being rejected does not make that interface useless; on the device it is still what decouples detection from
+the rebuild.
 
 ## Repo layout
 

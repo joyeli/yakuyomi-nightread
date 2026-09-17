@@ -35,6 +35,24 @@ Full walkthrough in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md); every tunabl
 [`docs/PARAMETERS.md`](docs/PARAMETERS.md); all eleven pages side by side in
 [`docs/SHOWCASE.md`](docs/SHOWCASE.md).
 
+## How it fits in the product
+
+Night reading runs after translation: what it rebuilds is the finished page, with the translated text
+already typeset into the bubbles. Computed before translation it would be looking at the original text, and
+the translation pasted in afterwards would land as black type on a dark bubble. So OCR, translation,
+inpainting and typesetting, the bulk of the translation cost, are all saved; the finished page only needs
+detection run again, plus a night-reading-only character mask (10.5 MB for the quantized YOLO11-seg
+alone, 238 MB with CartoonSegmentation alongside it). That detection cannot be saved was settled by
+measurement: skipping it as well and using the typesetter's own exact
+strokes scores best of the three recipes (text 239.3, contrast +223.2), and was then overturned by looking
+at the output. Exact strokes cannot seed the bubble core fill (on one bubble the detected text region
+covers 90% of the area, while the exact strokes are only 32% black), so the bubble does not fill and leaves
+a grey patch in the bottom-right corner; and decorative hand-lettering sits inside no text region at all,
+because the typesetter only knows what it drew itself and cannot see text that was never translated, so a
+whole bubble is missed. Both the night version and the normal one are images computed ahead of time, so
+switching is a file-pointer swap, zero computation. The full measurements of the three recipes and the
+settled product shape are in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
 ## The red line
 
 **Never paint over a face, a hand, a white sleeve or white hair.** The only acceptable failure is "not dark
@@ -54,6 +72,7 @@ percentage points of light area; with the mask the same pipeline sits at 18.
 | `research/charmask.py` | The character-mask probe (CartoonSegmentation, YOLO11-seg, and their union). Its output is a **required input** to the pipeline. |
 | `research/nightread_batch.py` | Run the 11 fixture pages, print the light-area table. |
 | `research/nightread_guard.py` + `nightread_guard.json` | The red-line test: 704 hand-annotated foreground boxes. |
+| `research/nightread_translated.py` | The translated-page material-sharing check: run night reading on the engine's finished page, compare the three detection-material recipes. |
 | `research/make_showcase.py` | The six-stage showcase sheets. |
 | `research/pipeline_diagram.py` | The pipeline-stage figure at the top of this file. |
 | `fixtures/pages/` | The 11 test pages. `fixtures/baseline/` holds reference outputs for regression. |

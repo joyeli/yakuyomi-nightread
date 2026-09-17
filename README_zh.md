@@ -30,6 +30,18 @@
 [`docs/PARAMETERS_zh.md`](docs/PARAMETERS_zh.md)，11 張測試頁的完整對照見
 [`docs/SHOWCASE_zh.md`](docs/SHOWCASE_zh.md)。
 
+## 在產品裡怎麼用
+
+夜讀接在翻譯之後，吃的是已經貼好譯文的成品頁；在翻譯前算，夜讀看到的是原文，譯文貼上去就成了
+黑字壓在黑底上。因此 OCR、翻譯、去字、排版這些翻譯的大宗成本全部省掉，成品頁只要重跑偵測，
+再加一份夜讀專屬的人物遮罩（只用量化的 YOLO11-seg 是 10.5 MB，加上 CartoonSegmentation 則是
+238 MB）。偵測省不掉是量過才定的：連偵測一起省、改用排版器自己畫的精確筆畫，指標反而最好
+（字 239.3、對比 +223.2），卻被看圖否決。精確筆畫當不了氣泡核心
+填色的種子（某顆泡的偵測文字區覆蓋 90%，精確筆畫只有 32% 是黑），泡會填不滿、右下角留一塊灰；
+裝飾性的手寫字又完全不在任何文字區內，排版器只知道自己畫了什麼，看不到沒被翻譯的字，整顆泡會
+漏掉。夜讀版與正常版都是事先算好的圖，切換只是換檔案指標，零計算。三種配方的完整量測與定案的
+產品形狀見 [`docs/ARCHITECTURE_zh.md`](docs/ARCHITECTURE_zh.md)。
+
 ## 紅線
 
 **絕不塗到臉、手、白衣、白髮。** 唯一可接受的失敗是「不夠暗」。這條線用量的，不用看的：
@@ -49,6 +61,7 @@
 | `research/charmask.py` | 人物遮罩探針（CartoonSegmentation、YOLO11-seg、兩者聯集）。它的輸出是管線的**必要輸入**。 |
 | `research/nightread_batch.py` | 跑 11 張 fixture、印亮區表。 |
 | `research/nightread_guard.py` + `nightread_guard.json` | 紅線測試：704 個人工標註前景框。 |
+| `research/nightread_translated.py` | 譯文頁的素材共用驗證：對翻譯引擎的成品頁跑夜讀，比較三種偵測素材共用配方。 |
 | `research/make_showcase.py` | 六階段成果展示圖。 |
 | `research/pipeline_diagram.py` | 本頁上方那張管線階段圖。 |
 | `fixtures/pages/` | 11 張測試頁。`fixtures/baseline/` 是回歸用的參考輸出。 |
