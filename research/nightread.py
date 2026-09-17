@@ -197,6 +197,7 @@ EXP_PSEUDO = os.environ.get("NIGHTREAD_PSEUDO", "1") == "1"        # 偽泡
 EXP_HARMONIZE = os.environ.get("NIGHTREAD_HARMONIZE", "1") == "1"  # 人頭一致化
 EXP_GUTTER = os.environ.get("NIGHTREAD_GUTTER", "1") == "1"        # 留白填深（基礎機制，消融用）
 # 守護框驅動的結構性安全策略（2026-09-08 晚；v0 全關仍 61 框違規＝基礎機制在吃出血人物/字壓臉）：
+GUTTER_FRAME_CUT = os.environ.get("NIGHTREAD_GUTTER_FRAME_CUT", "0") == "1"  # 留白填色不得跨越格框線
 SAFE_GUTTER = os.environ.get("NIGHTREAD_SAFE_GUTTER", "1") == "1"   # 留白只填「真頁邊帶」（深入 ≤ 短邊×比例）
 SAFE_GUTTER_DEPTH = float(os.environ.get("NIGHTREAD_GUTTER_DEPTH", "0.12"))
 SAFE_BUBBLE_RATIO = float(os.environ.get("NIGHTREAD_BUBBLE_RATIO", "2.0"))  # 泡元件面積 ≤ 字 bbox × 此；0=關
@@ -1241,6 +1242,20 @@ def paint_gutter(out, g, gutter, frame=None, bubble=None):
     人物墨結構周圍 AURA_R 的白不填**（格線/氣泡輪廓排除不算人物）。代價＝人物旁一圈
     灰暈（失敗方向＝不夠暗，合紅線）；封閉輪廓的一般留白離人物墨遠、不受影響。"""
     fill = gutter.copy()
+    if frame is not None and GUTTER_FRAME_CUT:
+        # ★ 撕裂修正（審查員 2026-09-17：平坦淺色背景被挖出硬邊黑洞）：格內的地板/牆面白常與頁面
+        # 留白**同一個連通元件**（格框有缺口），於是被當成留白一起填黑，而邊界就是「白色連通區的
+        # 任意輪廓」⇒ 不跟畫面走、呈波浪/階梯狀，看起來像畫面被撕掉一塊。
+        # 修法：用格框線把留白切開，**只填仍能碰到頁邊的部分**（那才是真留白）。
+        H_, W_ = g.shape
+        cut = fill & ~(cv2.dilate(frame.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0)
+        nn_, lb_, st_, _ = cv2.connectedComponentsWithStats(cut.astype(np.uint8), 8)
+        keep = np.zeros_like(fill)
+        for i in range(1, nn_):
+            x, y, w_, h_ = st_[i, :4]
+            if x <= 2 or y <= 2 or x + w_ >= W_ - 2 or y + h_ >= H_ - 2:
+                keep |= lb_ == i
+        fill = keep | (fill & (cv2.dilate(frame.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0))
     if frame is not None:
         ink = (g < WHITE_TH).astype(np.uint8)
         k7 = np.ones((15, 15), np.uint8)
