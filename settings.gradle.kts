@@ -6,3 +6,4 @@ dependencyResolutionManagement {
 }
 rootProject.name = "yakuyomi-nightread"
 include(":nightread")
+include(":nightread-ort")
