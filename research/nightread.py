@@ -93,6 +93,7 @@ BUBBLE_CORE_MIN_FRAC = float(os.environ.get("NIGHTREAD_BUBBLE_CORE_MIN", "0.003"
 # ↑ ≥ 此頁面佔比的泡元件走「文字種子核心填色」；小於的整顆填。**0＝一律核心填色**：整顆填會在
 # 「泡白與髮白連通」時把髮吃掉（demo04 第2格垂髮 0→75%），而核心填色對緊實小泡＝開運算切不掉
 # 任何東西、結果等於整顆填 ⇒ 沒有下行風險。大頁（demo04 3000px 高）用固定頁佔比門檻本來就偏鬆。
+BUBBLE_REACH = float(os.environ.get("NIGHTREAD_BUBBLE_REACH", "0"))   # 泡最遠離字框對角線的倍數（0=不限）
 BUBBLE_NECK_R = int(os.environ.get("NIGHTREAD_BUBBLE_NECK", "8"))   # 泡的切頸半徑：泡框缺口漏進背景（ch34_011 圓泡右側漏出）、字寫在背景上
                                 # 的白連進臉的下巴縫（demo01 主角）都是窄頸；真泡內部寬闊、行間白 ≥13px 不受影響。
                                 # ★形狀門（實心度）已實測不可用：真泡的白被字切成凹形、填洞後 demo01 臉塊 0.72
@@ -757,6 +758,19 @@ def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids, charmask=None):
                 if sx1 > sx0 and sy1 > sy0:
                     seed[sy0:sy1, sx0:sx1] = True
                 core = broad_core_fill(comp, seed & comp, neck_r=BUBBLE_NECK_R, recover_r=BUBBLE_NECK_R)
+                if BUBBLE_REACH > 0 and core.any():
+                    # ★ 撕裂修正（審查員 2026-09-17）：泡的白常與**格內地板/牆面**同一個白元件
+                    # （ch34_010 comp5＝泡+地板，3.46% 頁），切頸切不開（要 neck 40 才行，而那時泡
+                    # 自己也被切掉六成）⇒ 泡遮罩溢出到地板、整片填黑，邊界呈波浪狀＝畫面被撕掉一塊。
+                    # 泡是**承載字的容器**、不會離字很遠 ⇒ 用字框尺度限制泡的空間範圍。
+                    reach = int(BUBBLE_REACH * np.hypot(x1 - x0, y1 - y0))
+                    kr = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (reach * 2 + 1,) * 2)
+                    near = np.zeros_like(comp)
+                    sy0, sy1 = max(0, y0 - by), min(bh, y1 - by)
+                    sx0, sx1 = max(0, x0 - bx), min(bw, x1 - bx)
+                    if sy1 > sy0 and sx1 > sx0:
+                        near[sy0:sy1, sx0:sx1] = True
+                        core &= cv2.dilate(near.astype(np.uint8), kr) > 0
                 if not core.any():
                     rejected.add(int(i))
                     continue
