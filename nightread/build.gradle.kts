@@ -17,3 +17,11 @@ android {
 dependencies {
     testImplementation(libs.junit)
 }
+
+// parity 測試會印出逐頁的差異統計，沒有這段就只看得到「失敗」而看不到數字
+tasks.withType<Test>().configureEach {
+    testLogging {
+        showStandardStreams = true
+        events("passed", "failed")
+    }
+}

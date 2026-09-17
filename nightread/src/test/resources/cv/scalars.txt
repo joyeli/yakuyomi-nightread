@@ -1,0 +1,2 @@
+contourLength 493.539104
+maskCount 7487
