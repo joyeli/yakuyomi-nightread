@@ -20,5 +20,5 @@ android {
 
 dependencies {
     api(project(":nightread"))
-    implementation(libs.onnxruntime.android)
+    api(libs.onnxruntime.android)   // app 端的 int8 偵測器也要用 ORT ⇒ 傳遞出去
 }
