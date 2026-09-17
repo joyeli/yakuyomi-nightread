@@ -593,6 +593,7 @@ def _hole_ink_ratio(comp_u8, g):
     return ink / max(int(comp_u8.sum()), 1)
 
 
+WHITE_SPLIT_STD = float(os.environ.get("NIGHTREAD_WHITE_SPLIT", "0"))   # 白元件分類前先用局部 std 切開（0=關）
 INNER_PANEL_MIN_FRAC = float(os.environ.get("NIGHTREAD_INNER_PANEL", "0"))
 INNER_PANEL_AS_PANEL = os.environ.get("NIGHTREAD_INNER_AS_PANEL", "0") == "1"   # 封閉格內白納入 panel 的頁佔比門檻（0=關）
 
@@ -606,6 +607,14 @@ def classify_white_components(g):
     """
     H, W = g.shape
     white = (g >= WHITE_TH).astype(np.uint8)
+    if WHITE_SPLIT_STD > 0:
+        # ★ 重構原型（2026-09-17）：在**白元件分類的最源頭**就把「泡的白」與「畫面的白」切開。
+        # 先前把局部 std 用在 core fill 之後，效果被 bubble_rest 抵消（泡變小 ⇒ 剩餘填色變大）；
+        # 在這裡切，下游每個機制（留白/貼紙/泡/剩餘填色）看到的就都是正確的元件。
+        # 判準＝局部 std（31×31）：泡內部是空白（實測 3.3），畫面的白附近有紋路（地板 24.0）。
+        quiet = local_std(g) < WHITE_SPLIT_STD
+        white = (white > 0) & quiet
+        white = white.astype(np.uint8)
     n, lab, stats, _ = cv2.connectedComponentsWithStats(white, 8)
     dist = cv2.distanceTransform(white, cv2.DIST_L2, 5)   # 白內距最近非白（元件間互不影響）
     deep_px = max(64, int(round(DEEP_EDGE_FRAC * min(W, H))))
