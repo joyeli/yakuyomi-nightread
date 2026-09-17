@@ -217,6 +217,12 @@ CHARMASK_DIR = os.environ.get("NIGHTREAD_CHARMASK", "")
 # 贏過人物保護——臉被精準遮罩蓋住時仍受保護；isnet 補漏抓框時順便蓋到的泡（肥遮罩）則能填深。
 # 空＝偽泡一律輸給人物保護（舊行為）。
 CHARMASK_PRECISE_DIR = os.environ.get("NIGHTREAD_CHARMASK_PRECISE", "")
+TEXT_TOPMOST = os.environ.get("NIGHTREAD_TEXT_TOPMOST", "1") == "1"
+# ↑ **定案開**（使用者 2026-09-17 的圖層優先權洞察）：字永遠在最上層。泡遮罩被人物扣掉後，
+# 那塊的字失去「泡內亮字」待遇 ⇒ demo03 實測對比 **-6（字比底還暗、完全讀不出來）**。
+TEXT_TOP_PAD = int(os.environ.get("NIGHTREAD_TEXT_TOP_PAD", "3"))
+BUBBLE_FRAMED_WINS = float(os.environ.get("NIGHTREAD_BUBBLE_FRAMED", "0"))   # 邊界墨線比 >= 此值的泡贏過人物（0=關）
+BUBBLE_NEAR_TEXT = int(os.environ.get("NIGHTREAD_BUBBLE_NEAR_TEXT", "0"))   # 離字此距離內的泡區優先於人物（0=關）
 BUBBLE_GUARD_FULL = os.environ.get("NIGHTREAD_BUBBLE_GUARD_FULL", "1") == "1"
 # ↑ **定案開**：扣泡改用完整遮罩（含 isnet 補漏那層）。原本怕 isnet 把整顆泡當人物而挖出白泡，
 # 實測泡內仍是純黑 16.0（沒挖洞）——因為 isnet 只在「偵測框內且精準遮罩覆蓋<15%」的漏抓框生效，
@@ -1353,7 +1359,7 @@ def harmonize_enclosed_whites(out, g, lab, stats, skip_mask):
 
 
 def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
-            core_ids=(), frame=None, regions=None, charmask=None, veto=None, precise=None, bubble_rest=None):
+            core_ids=(), frame=None, regions=None, charmask=None, veto=None, precise=None, bubble_rest=None, lost_bubble=None):
     """整頁合成：D2 畫面 →（有框頁才）留白填深 → 修法4 貼紙式背景 → 氣泡重繪。"""
     out = scene_final(g, seg).astype(np.float32)
     scene_keep = out.copy() if charmask is not None else None   # 人物區最終一律還原成場景調
@@ -1416,6 +1422,15 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
         skip = bubble | gutter
     if lab is not None and EXP_HARMONIZE:               # 批1.5：浮在黑裡的空白人頭一致化
         out = harmonize_enclosed_whites(out, g, lab, stats, skip)
+    if lost_bubble is not None and TEXT_TOPMOST and lost_bubble.any():
+        txt = (cv2.dilate((seg & lost_bubble).astype(np.uint8),
+                          np.ones((TEXT_TOP_PAD * 2 + 1,) * 2, np.uint8)) > 0) & lost_bubble
+        if txt.any():
+            out[txt] = BG
+            a3 = ink_alpha(g, TEXT_GAMMA)
+            if TEXT_KNEE > 0:
+                a3 = np.clip((a3 - TEXT_KNEE) / (1.0 - TEXT_KNEE), 0.0, 1.0)
+            out[txt] = np.maximum(out[txt], BG + a3[txt] * (INK - BG))
     if bubble_rest is not None and bubble_rest.any():
         out[bubble_rest] = BG
         kk = np.ones((STROKE * 2 + 1,) * 2, np.uint8)
@@ -1459,6 +1474,14 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
             if text_on_char.any():
                 kb = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (TEXT_BACKING_R * 2 + 1,) * 2)
                 restore &= ~(cv2.dilate(text_on_char.astype(np.uint8), kb) > 0)
+        if lost_bubble is not None and TEXT_TOPMOST and lost_bubble.any():
+            # ★ 字永遠在最上層（使用者 2026-09-17 的圖層優先權原則）：泡遮罩被人物扣掉後，那塊
+            # 區域的字失去「泡內亮字」待遇 ⇒ 暗字疊在灰底上，實測對比 **-6（字比底還暗、讀不出來）**。
+            # 修法不是讓整顆泡贏（會把臉填黑、弄壞 17 框），而是**只讓字本身贏**：被扣掉的泡區裡，
+            # 字筆畫及其貼身帶不還原 ⇒ 維持深底亮字，人物的其餘部分照樣受保護。
+            kt2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (TEXT_TOP_PAD * 2 + 1,) * 2)
+            keep_txt = (cv2.dilate((seg & lost_bubble).astype(np.uint8), kt2) > 0) & lost_bubble
+            restore &= ~keep_txt
         out[restore] = scene_keep[restore]
     return np.clip(out, 0, 255).astype(np.uint8)
 
@@ -1595,9 +1618,39 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000):
         bubble_rest = rest
     else:
         bubble_rest = None
+    bubble_before_trim = None
     bubble_guard = charmask if BUBBLE_GUARD_FULL else load_precise_mask(page_path, g.shape)
     if bubble_guard is None:
         bubble_guard = charmask
+    if bubble_guard is not None and BUBBLE_FRAMED_WINS > 0:
+        # ★ 圖層優先權（使用者 2026-09-17）：漫畫疊法是 字/對話框 > 人物 > 背景。
+        # 但單純「泡贏」會弄壞 17 框（demo01 臉 0→98%）——因為泡遮罩會溢出：字寫在臉上時，
+        # 泡遮罩從字長到整片白皮膚。分辨的關鍵是**有沒有泡框**：
+        #   ・真泡（demo03 那顆橢圓）：核心邊界幾乎全是泡框墨線 ⇒ 泡蓋住人物是原作意圖 ⇒ 泡贏
+        #   ・字壓畫面（demo01 特寫臉）：邊界大半是白（沒有框）⇒ 那不是泡 ⇒ 人物贏
+        # 實測不用這道判準時，demo03 的泡被人物遮罩扣掉 **70.8%**、demo01 扣掉 52.7%
+        # ⇒ 泡底黑了但字不亮（使用者看到的現象）。
+        ink_b = (g < WHITE_TH)
+        nb, lb_b, st_b, _ = cv2.connectedComponentsWithStats(bubble.astype(np.uint8), 8)
+        framed = np.zeros_like(bubble)
+        k1 = np.ones((3, 3), np.uint8)
+        for i in range(1, nb):
+            if st_b[i, cv2.CC_STAT_AREA] < 400:
+                continue
+            blob = lb_b == i
+            ring = (cv2.dilate(blob.astype(np.uint8), k1) > 0) & ~blob
+            if ring.sum() >= 20 and float(ink_b[ring].mean()) >= BUBBLE_FRAMED_WINS:
+                framed |= blob
+        bubble_guard = bubble_guard & ~framed
+    if bubble_guard is not None and BUBBLE_NEAR_TEXT > 0:
+        # ★ 圖層優先權（使用者 2026-09-17）：漫畫的疊法是 字/對話框 > 人物 > 背景，所以泡蓋住人物
+        # 的地方該填深。但**泡遮罩會溢出**（泡白與臉白連通 ⇒ 從字長到整張臉，demo01 實測 98%），
+        # 單純「泡贏」會弄壞 17 框。分辨真泡與溢出用**離字的距離**：泡是為了承載字而存在，
+        # 泡內部離字近；溢出是從泡框缺口流出去的，離字遠。
+        # ⇒ 離字 ≤ BUBBLE_NEAR_TEXT 的泡區：**泡贏**（不被人物扣）；更遠的：人物贏（當溢出處理）。
+        kd = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (BUBBLE_NEAR_TEXT * 2 + 1,) * 2)
+        near_text = cv2.dilate(seg.astype(np.uint8), kd) > 0
+        bubble_guard = bubble_guard & ~near_text
     if bubble_guard is not None and BUBBLE_TRIM_CHAR:
         # 泡遮罩不得跨進人物：氣泡是**畫在人物之上**的圖層 ⇒ 泡內部不可能是人物；反過來，泡的白
         # 元件常與人物白（髮/衣）連通（泡框有缺口、髮壓在泡邊），整顆填就把髮吃掉
@@ -1607,6 +1660,7 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000):
         # ⚠️ 只扣「從泡邊緣伸進來的人物」：遮罩誤蓋到泡中央時，粗暴地扣會把泡挖出洞＝白泡
         # （實測白泡 21.9→29.4 萬 px）。判準＝被扣掉的連通塊有沒有碰到泡的外緣：碰到＝髮/衣從外面
         # 連進來（扣），完全被泡包住＝遮罩誤判泡內部（還原）。
+        bubble_before_trim = bubble.copy()
         removed = bubble & bubble_guard
         if removed.any():
             outside = ~bubble
@@ -1619,10 +1673,13 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000):
             # 泡的貼墨收邊（同人物那套）：泡遮罩停在泡框墨線之前會留白環（使用者：泡框跟黑底
             # 中間的白色區塊太大）。在非墨區內從泡往外測地生長到碰泡框就停。
             bubble = snap_charmask(bubble, g, BUBBLE_SNAP)
+    lost = None
+    if bubble_before_trim is not None and TEXT_TOPMOST:
+        lost = bubble_before_trim & ~bubble
     final = compose(g, gutter, bubble, seg, frameless, lab, stats, sticker,
                     core_ids=promoted, frame=(lhm | lvm), regions=regions, charmask=charmask,
                     veto=load_veto_mask(page_path, g.shape, charmask),
-                    precise=load_precise_mask(page_path, g.shape), bubble_rest=bubble_rest)
+                    precise=load_precise_mask(page_path, g.shape), bubble_rest=bubble_rest, lost_bubble=lost)
 
     pref = os.path.join(outdir, name)
     with open(f"{pref}_regions.json", "w", encoding="utf-8") as f:
