@@ -217,7 +217,9 @@ CHARMASK_DIR = os.environ.get("NIGHTREAD_CHARMASK", "")
 # 贏過人物保護——臉被精準遮罩蓋住時仍受保護；isnet 補漏抓框時順便蓋到的泡（肥遮罩）則能填深。
 # 空＝偽泡一律輸給人物保護（舊行為）。
 CHARMASK_PRECISE_DIR = os.environ.get("NIGHTREAD_CHARMASK_PRECISE", "")
-BUBBLE_CLEAN_WINS = float(os.environ.get("NIGHTREAD_BUBBLE_CLEAN", "0"))   # 內部非字墨 < 此值的泡整顆塗黑（0=關）
+BUBBLE_CLEAN_WINS = float(os.environ.get("NIGHTREAD_BUBBLE_CLEAN", "0.005"))
+# ↑ **定案開**（使用者 2026-09-17 看圖後拍板）：判定為「乾淨泡」的整顆塗黑、不被人物遮罩扣。
+BUBBLE_CLEAN_TEXT_MAX = float(os.environ.get("NIGHTREAD_BUBBLE_CLEAN_TEXT", "0.80"))   # 內部非字墨 < 此值的泡整顆塗黑（0=關）
 TEXT_TOPMOST = os.environ.get("NIGHTREAD_TEXT_TOPMOST", "1") == "1"
 # ↑ **定案開**（使用者 2026-09-17 的圖層優先權洞察）：字永遠在最上層。泡遮罩被人物扣掉後，
 # 那塊的字失去「泡內亮字」待遇 ⇒ demo03 實測對比 **-6（字比底還暗、完全讀不出來）**。
@@ -1647,8 +1649,14 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000):
             tmp = blob.astype(np.uint8).copy()
             cv2.floodFill(tmp, ffm, (0, 0), 2)
             holes = (tmp != 2) & ~blob & ~segd_c[sy, sx]
-            if float(holes.sum()) / a_b < BUBBLE_CLEAN_WINS:
-                clean[sy, sx] |= blob
+            if float(holes.sum()) / a_b >= BUBBLE_CLEAN_WINS:
+                continue
+            # 保險②：**文字佔比**。真泡是容器，字只佔一部分（實測 8.7–50.7%）；
+            # 被誤判的白髮/白手區塊幾乎全是字筆畫本身（demo04 垂髮 94.7%、demo01 那些 99–100%），
+            # 因為 build_bubble_mask 最後會把字區內的筆畫一律併進泡。⇒ 文字佔比過高＝不是泡。
+            if float(seg[sy, sx][blob].mean()) > BUBBLE_CLEAN_TEXT_MAX:
+                continue
+            clean[sy, sx] |= blob
         bubble_guard = bubble_guard & ~clean
     if bubble_guard is not None and BUBBLE_FRAMED_WINS > 0:
         # ★ 圖層優先權（使用者 2026-09-17）：漫畫疊法是 字/對話框 > 人物 > 背景。
