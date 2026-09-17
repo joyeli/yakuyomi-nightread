@@ -27,7 +27,7 @@ detection output and computes everything else itself.
 
 ## Per-page data flow
 
-![Pipeline stages](img/pipeline.png)
+![Pipeline stages](img/pipeline.webp)
 
 A page is first split into four independent judgements, then composed back. The first half is analysis
 (what is on this page); the second half is the rebuild (how each region should be drawn).

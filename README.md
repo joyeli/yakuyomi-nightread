@@ -13,7 +13,7 @@ black.
 It is the sibling of [yakuyomi-engine](https://github.com/joyeli/yakuyomi-engine) (the translation engine)
 and consumes only its text-detection output.
 
-![Six stages of the rebuild](docs/img/showcase.png)
+![Six stages of the rebuild](docs/img/showcase.webp)
 
 **Status: desktop research.** Nothing ships yet. The pipeline has converged — 1351 lines of Python, 18
 violations out of 665 guard boxes — and the remaining work is the Kotlin port. Decisions and current numbers
@@ -29,10 +29,11 @@ same pixel value.
 
 So the page has to be split into semantic regions first, then rebuilt region by region.
 
-![Pipeline stages](docs/img/pipeline.png)
+![Pipeline stages](docs/img/pipeline.webp)
 
 Full walkthrough in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md); every tunable in
-[`docs/PARAMETERS.md`](docs/PARAMETERS.md).
+[`docs/PARAMETERS.md`](docs/PARAMETERS.md); all eleven pages side by side in
+[`docs/SHOWCASE.md`](docs/SHOWCASE.md).
 
 ## The red line
 

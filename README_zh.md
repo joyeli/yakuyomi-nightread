@@ -11,7 +11,7 @@
 它是 [yakuyomi-engine](https://github.com/joyeli/yakuyomi-engine)（翻譯引擎）的姊妹專案，
 只吃引擎的文字偵測輸出。
 
-![重建的六個階段](docs/img/showcase.png)
+![重建的六個階段](docs/img/showcase.webp)
 
 **現況：桌面研究。** 還沒有東西上機。管線已經收斂——1351 行 Python、665 個守護框裡 18 框違規
 ——剩下的是 Kotlin 移植。所有決策與當前數字見 [`docs/DECISIONS.md`](docs/DECISIONS.md)。
@@ -24,10 +24,11 @@
 
 所以必須先把頁面拆成語意分區，再逐區重建。
 
-![管線各階段](docs/img/pipeline.png)
+![管線各階段](docs/img/pipeline.webp)
 
 完整說明見 [`docs/ARCHITECTURE_zh.md`](docs/ARCHITECTURE_zh.md)，每個參數見
-[`docs/PARAMETERS_zh.md`](docs/PARAMETERS_zh.md)。
+[`docs/PARAMETERS_zh.md`](docs/PARAMETERS_zh.md)，11 張測試頁的完整對照見
+[`docs/SHOWCASE_zh.md`](docs/SHOWCASE_zh.md)。
 
 ## 紅線
 

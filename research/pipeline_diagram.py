@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """pipeline_diagram.py — 管線視覺化：一頁在每個階段看到什麼。
 
-產 docs/img/pipeline.png：原圖 ／ 文字筆畫 ／ 人物遮罩 ／ 留白 ／ 氣泡 ／ 成品，
+產 docs/img/pipeline.webp：原圖 ／ 文字筆畫 ／ 人物遮罩 ／ 留白 ／ 氣泡 ／ 成品，
 六格橫排，每格標題說明那一步在判斷什麼。與 make_showcase.py 不同——那張是給讀者看
 「效果」，這張是給實作者看「管線內部」。
 
@@ -92,11 +92,11 @@ def main():
     ap = argparse.ArgumentParser(description="管線視覺化圖")
     ap.add_argument("page", nargs="?", default="ch34_011")
     ap.add_argument("-r", "--results", default=os.path.join(paths.OUT, "nightread", "v11"))
-    ap.add_argument("-o", "--out", default=os.path.join(DOCS_IMG, "pipeline.png"))
+    ap.add_argument("-o", "--out", default=os.path.join(DOCS_IMG, "pipeline.webp"))
     a = ap.parse_args()
     os.makedirs(os.path.dirname(a.out), exist_ok=True)
     img = build(a.page, a.results)
-    cv2.imwrite(a.out, img, [cv2.IMWRITE_PNG_COMPRESSION, 7])
+    cv2.imwrite(a.out, img, [cv2.IMWRITE_WEBP_QUALITY, 92])
     print(f"→ {a.out}  {img.shape[1]}×{img.shape[0]}")
 
 
