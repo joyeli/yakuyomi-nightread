@@ -131,6 +131,61 @@ def run_yoloseg(pages, outdir, conf=0.25):
         yield p, mask
 
 
+def run_yoloseg_onnx(pages, outdir, conf=0.25, size=1024, model="manga_seg_s.onnx",
+                     iou=0.45, char_cls=2):
+    """yoloseg 的 **ONNX + ORT** 版（上機用；.pt 需要 PyTorch runtime，Android 跑不了）。
+
+    `ultralytics export format=onnx imgsz=1024 opset=12` 產出，38.9MB（.pt 是 77.6MB）。
+    輸出 output0[1,4+nc+32,N]（cx,cy,w,h + 3 類分數 + 32 個 mask 係數）、output1[1,32,256,256]
+    （mask prototypes）。後處理＝篩分數 → NMS → sigmoid(係數·prototypes) → 裁到 bbox → 還原尺寸。
+    類別：0=frame 1=speech_bubble 2=character，只取 character。
+    """
+    import onnxruntime as ort
+    sess = ort.InferenceSession(os.path.join(MODEL_DIR, model), providers=["CPUExecutionProvider"])
+    iname = sess.get_inputs()[0].name
+    for p in pages:
+        img = cv2.imread(p)
+        h, w = img.shape[:2]
+        r = min(size / h, size / w)                       # ultralytics letterbox：等比 + 置中 pad 114
+        nh, nw = int(round(h * r)), int(round(w * r))
+        top, left = (size - nh) // 2, (size - nw) // 2
+        canvas = np.full((size, size, 3), 114, np.uint8)
+        canvas[top:top + nh, left:left + nw] = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_LINEAR)
+        x = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        x = np.transpose(x, (2, 0, 1))[None]
+        o0, o1 = sess.run(None, {iname: x})
+        pred = o0[0].T                                    # [N, 4+nc+32]
+        protos = o1[0]                                    # [32, mh, mw]
+        nc = pred.shape[1] - 4 - protos.shape[0]
+        scores = pred[:, 4:4 + nc]
+        cls = scores.argmax(1)
+        sc = scores.max(1)
+        keep = (sc > conf) & (cls == char_cls)
+        mask = np.zeros((h, w), np.uint8)
+        if keep.any():
+            boxes = pred[keep, :4]
+            xyxy = np.stack([boxes[:, 0] - boxes[:, 2] / 2, boxes[:, 1] - boxes[:, 3] / 2,
+                             boxes[:, 2], boxes[:, 3]], 1)
+            idx = cv2.dnn.NMSBoxes(xyxy.tolist(), sc[keep].tolist(), conf, iou)
+            idx = np.array(idx).ravel() if len(idx) else np.array([], int)
+            coeff = pred[keep][idx, 4 + nc:]              # [k, 32]
+            mh, mw = protos.shape[1:]
+            mm = 1.0 / (1.0 + np.exp(-(coeff @ protos.reshape(protos.shape[0], -1))))
+            mm = mm.reshape(-1, mh, mw)
+            for j, bi in enumerate(idx):
+                bx = boxes[bi]
+                # bbox（1024 座標）→ prototype 座標，裁掉框外（ultralytics 的 crop_mask）
+                x1 = (bx[0] - bx[2] / 2) * mw / size; x2 = (bx[0] + bx[2] / 2) * mw / size
+                y1 = (bx[1] - bx[3] / 2) * mh / size; y2 = (bx[1] + bx[3] / 2) * mh / size
+                m1 = np.zeros((mh, mw), bool)
+                m1[max(0, int(y1)):int(np.ceil(y2)), max(0, int(x1)):int(np.ceil(x2))] = True
+                full = cv2.resize((mm[j] * m1).astype(np.float32), (size, size),
+                                  interpolation=cv2.INTER_LINEAR)
+                sub = full[top:top + nh, left:left + nw]  # 去 letterbox
+                mask[cv2.resize(sub, (w, h), interpolation=cv2.INTER_LINEAR) > 0.5] = 255
+        yield p, mask
+
+
 # ── cseg（CartoonSegmentation / AnimeInstanceSegmentation，RTMDet-Ins + IS-Net refiner）──
 CSEG_MEAN = np.array([103.53, 116.28, 123.675], np.float32)     # BGR，mmdet RTMDet 標準
 CSEG_STD = np.array([57.375, 57.12, 58.395], np.float32)
@@ -164,8 +219,21 @@ def run_cseg(pages, outdir, size=640, score=0.3, model="cartoonseg.onnx"):
 
 
 # ── combine（定案配方）────────────────────────────────────────────────
-def run_combine(pages, outdir, base=("cseg", "yoloseg"), gap="isnet", boxes_dir="char_yolodet", min_cov=0.15):
-    """定案遮罩 = 精準遮罩（cseg ∪ yoloseg）∪（isnet ∩ 漏抓框）。
+def run_combine(pages, outdir, base=("cseg", "yoloseg_onnx"), gap=None, boxes_dir="char_yolodet", min_cov=0.15):
+    """定案遮罩 = **cseg ∪ yoloseg(ONNX)**（2026-09-17 改：isnet 已無貢獻、yoloseg 改 ONNX）。
+
+    ★ 上機可行性定案：原本的 .pt 需要 PyTorch runtime，Android 跑不了；`ultralytics export
+    format=onnx imgsz=1024 opset=12` 產出 38.9MB（.pt 是 77.6MB），用 ORT 直接跑。
+    與 .pt 版 IoU 0.899（差異來自 NMS/門檻細節），**接進管線後違規 17→16、亮區 38.0→37.9%、
+    白泡也更少 ⇒ 比 .pt 版還好**。同時 isnet（168MB）的補漏在此配置下已無貢獻（拿掉零變化）。
+
+    | 配方 | 違規 | 亮區 | 上機大小 | 可上機 |
+    |---|---|---|---|---|
+    | cseg ∪ yoloseg(.pt) ∪ (isnet∩漏抓) | 17 | 38.0% | 454MB | ✗ PyTorch |
+    | **cseg ∪ yoloseg(onnx)（定案）** | **16** | **37.9%** | **267MB** | ✓ |
+    | 只有 cseg | 21 | 37.6% | 228MB | ✓ |
+
+    只用 cseg 的代價＝4 框（demo02 兩隻遠景小人物的手 0→58%/57%）。
 
     isnet 是肥遮罩（彩色動畫訓練、會把整顆對話泡當人物 ⇒ 泡被人物保護還原成灰＝使用者回報的
     「白色泡泡」），但它漏的跟另外兩顆不同（ch34_006 那隻手：cseg 0% / yoloseg 0% / isnet 100%）。
@@ -177,20 +245,25 @@ def run_combine(pages, outdir, base=("cseg", "yoloseg"), gap="isnet", boxes_dir=
     實測（A 模式）：三合一全聯集 違規 30 / 白泡 31 萬 px；本配方 違規 27 / 白泡 19 萬（無遮罩底線 21 萬）。
     需先跑：charmask.py cseg / yoloseg / isnet / yolodet --kinds body face（產 boxes.json）。"""
     import json
-    with open(os.path.join(paths.OUT, boxes_dir, "boxes.json"), encoding="utf-8") as f:
-        boxes = json.load(f)
+    boxes = {}
+    if gap:
+        with open(os.path.join(paths.OUT, boxes_dir, "boxes.json"), encoding="utf-8") as f:
+            boxes = json.load(f)
     for p in pages:
         name = os.path.splitext(os.path.basename(p))[0]
         ms = [cv2.imread(os.path.join(paths.OUT, f"char_{b}", f"{name}_char.png"), 0) > 127 for b in base]
         prec = np.logical_or.reduce(ms)
-        g = cv2.imread(os.path.join(paths.OUT, f"char_{gap}", f"{name}_char.png"), 0) > 127
-        veto = np.zeros_like(prec)
-        for x0, y0, x1, y1 in boxes.get(name, []):
-            if x1 > x0 and y1 > y0 and prec[y0:y1, x0:x1].mean() < min_cov:
-                veto[y0:y1, x0:x1] = True
-        # 精準遮罩另存一份：nightread 用它修剪泡遮罩（combine 含 isnet、會把整顆泡當人物）
+        out = prec
+        if gap:
+            g = cv2.imread(os.path.join(paths.OUT, f"char_{gap}", f"{name}_char.png"), 0) > 127
+            veto = np.zeros_like(prec)
+            for x0, y0, x1, y1 in boxes.get(name, []):
+                if x1 > x0 and y1 > y0 and prec[y0:y1, x0:x1].mean() < min_cov:
+                    veto[y0:y1, x0:x1] = True
+            out = prec | (g & veto)
+        # 精準遮罩另存一份供 nightread 修剪泡遮罩（gap=None 時兩者相同，保留介面一致）
         cv2.imwrite(os.path.join(outdir, f"{name}_precise.png"), prec.astype(np.uint8) * 255)
-        yield p, ((prec | (g & veto)).astype(np.uint8) * 255)
+        yield p, (out.astype(np.uint8) * 255)
 
 
 def _cseg_one(sess, img, size=640, score=0.3):
@@ -237,7 +310,7 @@ def run_cseg_tiled(pages, outdir, size=640, score=0.3, grid=2, overlap=0.25,
         yield p, (mask.astype(np.uint8) * 255)
 
 
-RUNNERS = {"isnet": run_isnet, "cseg_tiled": run_cseg_tiled, "yolodet": run_yolodet, "yoloseg": run_yoloseg, "cseg": run_cseg,
+RUNNERS = {"isnet": run_isnet, "cseg_tiled": run_cseg_tiled, "yoloseg_onnx": run_yoloseg_onnx, "yolodet": run_yolodet, "yoloseg": run_yoloseg, "cseg": run_cseg,
            "combine": run_combine}
 
 

@@ -171,6 +171,28 @@ demo03 那顆泡實測 **字亮度 59 / 底亮度 65 ⇒ 對比 −6，字比底
   demo03 那顆泡對比 **−6 → 22（可讀）**，代價違規 14→16。
   `TEXT_TOP_PAD` 加大到 6/10 只讓對比到 23/24 卻讓違規到 17/18 ⇒ 3 是甜蜜點。
 
+## ★★★ 上機可行性定案：全 ONNX 配方（2026-09-17）
+
+**發現的阻礙**：定案配方用的 yoloseg 是 PyTorch `.pt`（77.6MB），需要 ultralytics runtime，
+**Android 跑不了**。另外 isnet 佔 168MB。原配方合計 454MB 且上不了機。
+
+**解法**：`ultralytics export format=onnx imgsz=1024 opset=12` → **38.9MB**（比 .pt 小一半），
+用 ORT 直接跑。自己實作後處理（篩分數 → NMS → `sigmoid(係數·prototypes)` → 裁到 bbox → 去 letterbox），
+見 `charmask.py run_yoloseg_onnx`。與 .pt 版 IoU **0.899**。
+
+| 配方 | 違規 | 亮區 | 白泡 | 上機大小 | 可上機 |
+|---|---|---|---|---|---|
+| cseg ∪ yoloseg(.pt) ∪ (isnet∩漏抓) | 17 | 38.0% | 18.9萬 | 454MB | ✗ PyTorch |
+| **cseg ∪ yoloseg(onnx)（定案）** | **16** | **37.9%** | **18.7萬** | **267MB** | ✓ |
+| 只有 cseg | 21 | 37.6% | 18.4萬 | 228MB | ✓ |
+
+**ONNX 版比 .pt 版還好**（違規 17→16、更暗、白泡更少），而且 **isnet 的補漏在此配置下已無貢獻**
+（拿掉零變化）⇒ 直接砍掉 168MB。只用 cseg 的代價是 4 框（demo02 兩隻遠景小人物的手 0→58%/57%）。
+
+**上機模型清單（全 ONNX、ORT 可跑）**：cseg 228MB（int8 58MB 可選）＋ yoloseg 38.9MB。
+DBNet 偵測器沿用 engine 既有的。授權：cseg 權重 MIT、yoloseg 是 Ultralytics AGPL-3.0
+（與本專案 GPL-3.0 相容，GPLv3 §13）。
+
 ## ★ 邊界鋸齒：遮罩中值平滑 + 1px 羽化（2026-09-17 定案）
 
 **使用者**：「黑白交界有很明顯的鋸齒感，想要修一下，讓線條更平滑。」
