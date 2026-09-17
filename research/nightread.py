@@ -217,6 +217,7 @@ CHARMASK_DIR = os.environ.get("NIGHTREAD_CHARMASK", "")
 # 贏過人物保護——臉被精準遮罩蓋住時仍受保護；isnet 補漏抓框時順便蓋到的泡（肥遮罩）則能填深。
 # 空＝偽泡一律輸給人物保護（舊行為）。
 CHARMASK_PRECISE_DIR = os.environ.get("NIGHTREAD_CHARMASK_PRECISE", "")
+BUBBLE_CLEAN_WINS = float(os.environ.get("NIGHTREAD_BUBBLE_CLEAN", "0"))   # 內部非字墨 < 此值的泡整顆塗黑（0=關）
 TEXT_TOPMOST = os.environ.get("NIGHTREAD_TEXT_TOPMOST", "1") == "1"
 # ↑ **定案開**（使用者 2026-09-17 的圖層優先權洞察）：字永遠在最上層。泡遮罩被人物扣掉後，
 # 那塊的字失去「泡內亮字」待遇 ⇒ demo03 實測對比 **-6（字比底還暗、完全讀不出來）**。
@@ -1622,6 +1623,33 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000):
     bubble_guard = charmask if BUBBLE_GUARD_FULL else load_precise_mask(page_path, g.shape)
     if bubble_guard is None:
         bubble_guard = charmask
+    if bubble_guard is not None and BUBBLE_CLEAN_WINS > 0:
+        # ★★ 圖層優先權的正確實作（使用者 2026-09-17：「要塗黑的泡直接全部塗黑，文字再補上去」）。
+        # 難點是分辨「真泡蓋住人物」與「字寫在臉上被誤判成泡」。判準＝**泡內部的非字內容**：
+        #   ・真泡是**空白容器**，裡面除了字什麼都沒有 ⇒ 填洞後的內部非字墨 0.0–0.3%
+        #   ・臉被誤判成泡：裡面有五官、陰影 ⇒ demo01 那張 2.7%、demo04 1.6%
+        # （正常泡 97 個的中位 0.0%、P90 0.7% ⇒ 門檻 1% 分得開。）
+        # 判定為真泡的：**整顆塗黑、不被人物遮罩扣**；判定為臉的：人物贏，照舊保護。
+        segd_c = cv2.dilate(seg.astype(np.uint8),
+                            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))) > 0
+        nb, lb_b, st_b, _ = cv2.connectedComponentsWithStats(bubble.astype(np.uint8), 8)
+        clean = np.zeros_like(bubble)
+        for i in range(1, nb):
+            a_b = int(st_b[i, cv2.CC_STAT_AREA])
+            if a_b < 4000:
+                continue
+            bx_, by_, bw_, bh_ = (int(st_b[i, 0]), int(st_b[i, 1]), int(st_b[i, 2]), int(st_b[i, 3]))
+            sy = slice(max(0, by_ - 2), by_ + bh_ + 2)
+            sx = slice(max(0, bx_ - 2), bx_ + bw_ + 2)
+            blob = lb_b[sy, sx] == i
+            hh, ww = blob.shape
+            ffm = np.zeros((hh + 2, ww + 2), np.uint8)
+            tmp = blob.astype(np.uint8).copy()
+            cv2.floodFill(tmp, ffm, (0, 0), 2)
+            holes = (tmp != 2) & ~blob & ~segd_c[sy, sx]
+            if float(holes.sum()) / a_b < BUBBLE_CLEAN_WINS:
+                clean[sy, sx] |= blob
+        bubble_guard = bubble_guard & ~clean
     if bubble_guard is not None and BUBBLE_FRAMED_WINS > 0:
         # ★ 圖層優先權（使用者 2026-09-17）：漫畫疊法是 字/對話框 > 人物 > 背景。
         # 但單純「泡贏」會弄壞 17 框（demo01 臉 0→98%）——因為泡遮罩會溢出：字寫在臉上時，
