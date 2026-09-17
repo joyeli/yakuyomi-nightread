@@ -1,56 +1,50 @@
 #!/usr/bin/env python3
-"""nightread.py — 夜讀重繪（單頁）：DBNet 偵測 → 三分區遮罩 → 合成暗色閱讀頁。
+"""nightread.py — 夜讀重繪：把白底漫畫頁重建成適合夜間閱讀的暗色頁。
 
-這是什麼：把白底漫畫頁「重繪」成適合夜間閱讀的暗色頁（非濾鏡、非反相），
-桌面原型（scratchpad dm_detect/dm_v4/dm_art/dm_final 系列）的正式收斂版。
-三分區處理：
-  留白（貼頁邊白＝頁邊距/格溝）→ 填深 BG + 格框描亮；
-  氣泡內部                     → 深底 BG、文字筆畫畫亮 INK（原圖墨度當 alpha、
-                                 邊緣天然抗鋸齒）、輪廓描亮；
-  畫面（其餘）                 → D2：高光滾降 LUT（單調、保序）+ 自適應墨線增亮
-                                 （只在局部背景偏暗處拉筆畫、cap<紙白 ⇒ 不反相）。
+不是濾鏡，也不是反相。全域函式在這題上無解：漫畫的**紙白參與構圖**（臉的亮部、
+反光、留白都用同一個紙白畫），任何「白→暗」的全域映射都會翻掉「紙白 vs 網點」的
+相對關係。唯一的辦法是先認出頁面的語意分區，再逐區重建。
 
-設計紅線（不可違反）：畫面絕不反相（只允許單調映射壓暗）；框白填深、字反白
-（氣泡＝深底亮字）。最壞情況只是「某區沒變暗」，絕不出現負片畫面。
+一頁的資料流（`run_page`）：
 
-相對原型的三個修法（2026-08 校準，11 張測試頁量測定閾）：
-  修法1  氣泡白元件「整頁面積上限」——併入白色連通元件前先查它在整頁的佔比
-         （BUBBLE_COMP_MAX_FRAC）與「相對文字窗的局部性」（BUBBLE_LOCAL_K），
-         超標＝不是氣泡（格內背景白）不併；改成整顆元件併入（不裁窗截斷），
-         原型的 regrow 事後補救隨之移除。滅：demo01 黑塊、demo02 灰縫、
-         ch34_014 方塊化。
-  修法2  頁型判別降級——長直格框線（形態學開運算）太少＝無框/白背景頁
-         （demo04/05 這型），命中則背景不填深、只重繪氣泡，畫面照 D2 壓暗。
-         判準：H/V 線各 ≥ FRAME_MIN_EACH 且合計 ≥ FRAME_MIN_SUM（px/千像素；
-         校準：有框頁最弱 demo02=1.19/5.77，無框頁最強 demo04=0.86/3.36）。
-  修法3  留白遮罩格框感知——貼頁邊白元件逐顆分類：厚芯（距離變換 > CORE_R）
-         大量「深入頁內」（距頁邊 > deep_px）＝格內白（如出血格的天空），
-         或「深入頁內且包住線稿」（小洞內墨密度 ≥ DEEP_INK_RATIO）＝白包畫，
-         皆改判畫面（D2 壓暗、不填深）。校準：真留白網絡 coreDeep 0.00–0.08，
-         問題格（ch34_006 老人格 0.58 / ch34_010 第1格 0.40 / demo06 教堂 0.91）。
-  修法4  純白背景填黑＋前景白描邊（貼紙式立體化）——「不承載調子的純白背景」
-         （修法3 的格內白元件；frameless 頁則是 ≥WHITE_TH 的大面積背景白元件）
-         不再只壓暗：背景 W 填 BG、格內容照 D2、dilate(F,STROKE_OBJ)∩W 畫白
-         描邊把前景從黑底抬出來（與氣泡「深底亮字」同語彙）。figure/ground
-         分離靠連通性：被墨線封閉的白（臉/衣服）不與 W 連通、天然保留。
-         安全網（sticker_metrics，分離可疑 ⇒ 整顆退回上輪壓暗降級）：
-         figFrac（前景佔比過低＝整格都被當背景，如 demo05 合格紙、demo02
-         人群格）、thinFrac（W 細碎佔比過高＝鬍鬚型交界，前景白已連進背景，
-         如 ch34_006 白鬍老人格）、textOn（語意證據＝文字以 tight bbox 真的
-         壓在該元件上才算；eaten 超標或小元件須有證據才填黑——40px 窗版
-         textCov 只留給漏併氣泡閘，防鄰格文字湊假證據吃掉前景白，
-         如 ch34_010 披肩）。校準見 STICKER_* 常數行內註記。
+    頁圖
+      ├ 偵測      DBNet → 文字行四邊形 + 逐像素筆畫遮罩 + 區域合併
+      ├ 人物遮罩  charmask.py 的輸出（cseg ∪ yoloseg）→ 貼墨收邊 → 中值平滑
+      ├ 頁型      長直格框線密度 → 有框頁／無框頁
+      ├ 白元件    整頁白連通元件一次算完 → 留白／格內白／其餘
+      ├ 氣泡      白元件 ∩ 文字區 → 面積與局部性守門 → 文字種子核心填色
+      └ 合成      場景曲線 → 留白填深 → 貼紙式背景 → 氣泡 → 偽泡
+                  → 人頭一致化 → 剩餘填色 → 人物還原
+    暗色頁
 
-偵測路徑＝export_dbnet_ncnn.build_model（m-i-t TextDetection @ .upstream-ref、
-detect-20241225.ckpt，paths.fetch 自動下載+驗 sha256）torch eager 前向 ＋
-m-i-t dbnet_utils.SegDetectorRepresenter 後處理 ＋ mit_grouping 兩階段區域合併
-——與引擎同款前處理（長邊 1024、pad 右下到 256 倍數、/127.5-1）。
+分區的待遇：
+
+    留白（頁邊距／格溝）  填 BG、邊界描亮
+    純白背景             填 BG、前景白描邊抬出立體感
+    氣泡內部             填 BG、文字筆畫畫亮到 INK（原圖墨度當 alpha ⇒ 天然抗鋸齒）
+    人物                 場景曲線壓暗，任何填色都要讓開
+    其餘畫面             場景曲線壓暗（線性、保序）
+
+兩條紅線：
+  1. **絕不塗錯**。臉、手、皮膚、白衣、白髮絕不可以被填黑。失敗方向只准「不夠暗」。
+     驗收靠 `nightread_guard.py` 的 704 個人工標註框，目視不算數。
+  2. **畫面絕不反相**。畫面區只允許單調映射，墨線永遠比紙面暗。
+
+圖層優先權（決定衝突時誰贏）：**字 > 對話框 > 人物 > 背景**。
+
+人物語意遮罩是**必要輸入**：守護框證明沒有它紅線不可達（純幾何最好也有 37 框違規，
+且要付 14 個百分點的亮區代價）。先跑 `charmask.py`，再把輸出夾給 `NIGHTREAD_CHARMASK`。
+
+偵測路徑＝`export_dbnet_ncnn.build_model`（m-i-t TextDetection @ .upstream-ref，
+detect-20241225.ckpt）torch 前向 ＋ m-i-t `SegDetectorRepresenter` 後處理 ＋
+`mit_grouping` 兩階段區域合併，與引擎同款前處理（長邊 1024、pad 到 256 倍數、/127.5-1）。
 
 用法：
-  python3 nightread.py <頁圖> [-o 輸出夾]      # 預設輸出 parity/out/nightread/
-輸出（皆帶頁名前綴）：_regions.json / _seg.png / _bubble.png / _gutter.png /
-  _final.png / _cmp.png（三聯：原圖｜成品｜遮罩視覺化）。
-批次（多頁 + 白面積表）用 nightread_batch.py。
+    NIGHTREAD_CHARMASK=<遮罩夾> python3 nightread.py <頁圖> [-o 輸出夾]
+輸出（皆帶頁名前綴）：_final.png ／ _regions.json ／ _seg.png ／ _bubble.png ／
+_gutter.png ／ _cmp.png（三聯：原圖｜成品｜遮罩視覺化）。批次見 nightread_batch.py。
+
+每個參數的由來、以及所有被實測否決的替代方案，見 ../docs/DECISIONS.md。
 """
 import argparse
 import importlib.util
@@ -68,276 +62,128 @@ from mit_grouping import Quadrilateral, merge_bboxes_text_region  # noqa: E402  
 
 OUT_DEFAULT = os.path.join(paths.OUT, "nightread")
 
-# ── 設計常數（真機 A/B 要調的旋鈕全在這）─────────────────────────────
-# 顏色/位準
-BG = 16                # 深底（留白/氣泡底）
-INK = 240              # 亮字
-# 描邊半徑（格框/氣泡輪廓描亮 band）。氣泡填黑後原作的黑泡框在黑底上看不見 ⇒ 描亮它；但半徑 3
-# ＋泡框本身 2–3px ⇒ 泡外一圈約 6px 白環（使用者 2026-09-15：「泡泡框跟黑底中間的白色區塊太大」）。
-STROKE = int(os.environ.get("NIGHTREAD_STROKE", "1"))   # **定案 1**：3 ⇒ 泡外約 6px 白環
-# 畫面 D2 曲線
-DIM_FLOOR, DIM_CEIL = 30, 140   # 壓暗值域（紙白 255 → 140）
-ROLLOFF_G = 0.55                # 高光滾降 y = floor+(ceil-floor)*x^g（g<1 凹）
-GLOW_STRENGTH = 55              # 自適應墨線增亮強度
-GLOW_CAP = 112                  # 增亮上限（< DIM_CEIL ⇒ 線永遠比紙暗、不反相）
-# 偵測/遮罩
-SEG_TH = 0.12          # 筆畫遮罩二值化閾（引擎 Config.segThreshold 同款）
-WHITE_TH = 235         # 「白」的灰階下限（氣泡白/留白共用同一份連通元件）
-BUBBLE_PAD = 40        # 文字區 bbox 外擴的搜尋窗
-WHITE_MEASURE_TH = 200 # 白面積統計閾（回報用，不進演算法）
-GUTTER_MIN_AREA_FRAC = 0.0006   # 留白元件最小面積（整頁佔比）
-# 修法1：氣泡白元件上限
-BUBBLE_COMP_MAX_FRAC = 0.07     # 元件整頁佔比上限（6–8% 帶，取中偏上）
-BUBBLE_LOCAL_K = 4.0            # 元件面積 ≤ K × 文字搜尋窗面積（局部性）
-BUBBLE_CORE_MIN_FRAC = float(os.environ.get("NIGHTREAD_BUBBLE_CORE_MIN", "0.003"))
-# ↑ ≥ 此頁面佔比的泡元件走「文字種子核心填色」；小於的整顆填。**0＝一律核心填色**：整顆填會在
-# 「泡白與髮白連通」時把髮吃掉（demo04 第2格垂髮 0→75%），而核心填色對緊實小泡＝開運算切不掉
-# 任何東西、結果等於整顆填 ⇒ 沒有下行風險。大頁（demo04 3000px 高）用固定頁佔比門檻本來就偏鬆。
-BUBBLE_QUIET = float(os.environ.get("NIGHTREAD_BUBBLE_QUIET", "0"))   # 泡內部的局部 std 上限（0=關）
-BUBBLE_REACH = float(os.environ.get("NIGHTREAD_BUBBLE_REACH", "0"))   # 泡最遠離字框對角線的倍數（0=不限）
-BUBBLE_NECK_R = int(os.environ.get("NIGHTREAD_BUBBLE_NECK", "8"))   # 泡的切頸半徑：泡框缺口漏進背景（ch34_011 圓泡右側漏出）、字寫在背景上
-                                # 的白連進臉的下巴縫（demo01 主角）都是窄頸；真泡內部寬闊、行間白 ≥13px 不受影響。
-                                # ★形狀門（實心度）已實測不可用：真泡的白被字切成凹形、填洞後 demo01 臉塊 0.72
-                                # 落在真泡分佈正中；「貼厚墨」也不可用（粗體字筆畫本身就 ≥6px）。幾何切頸是唯一解。
-# 修法2：頁型判別（長直格框線，px/千像素）
-FRAME_LINE_L_DIV = 5            # 線長 = min(W,H)//DIV（至少 60px）
-FRAME_DARK_TH = 100             # 「框線暗」灰階上限
-FRAME_MIN_EACH = 1.0            # H、V 各自下限
-FRAME_MIN_SUM = 4.5             # H+V 合計下限
-# 修法3：留白元件分類（gutter vs 格內白）
-CORE_R = 26                     # 厚芯：距離變換 > CORE_R（真格溝半寬遠小於此）
-DEEP_EDGE_FRAC = 0.07           # deep_px = max(64, 0.07*min(W,H))（頁邊距帶寬）
-IN_PANEL_CORE_FRAC = 0.15       # 規則A：厚芯佔元件 ≥ 此
-IN_PANEL_CORE_DEEP = 0.25       #        且厚芯深入頁內比例 ≥ 此 ⇒ 格內白
-DEEP_INK_DEEP = 0.5             # 規則B：厚芯深入比例 ≥ 此
-DEEP_INK_RATIO = 0.02           #        且小洞內墨/元件面積 ≥ 此 ⇒ 白包畫
-HOLE_MAX_FRAC = 0.01            # 「小洞」上限（整頁佔比；大洞＝整格，不算包線稿）
-INK_DARK_TH = 128               # 洞內「墨」灰階上限
-# 修法4：純白背景填黑＋前景白描邊（貼紙式）
-# 前景描白邊半徑（× min(W,H)，clamp 下二行）。**這就是「泡框/人物外圍那圈白」的真正寬度**
-# ——使用者兩次回報（人物留邊、泡框與黑底之間）都是它：填黑區外圍 dilate(fill, r) 的亮帶。
-# 遮罩邊界調再細都沒用，描邊半徑才是旋鈕。
-STROKE_OBJ_FRAC = float(os.environ.get("NIGHTREAD_STROKE_OBJ_FRAC", "0.0035"))
-STROKE_OBJ_MIN = int(os.environ.get("NIGHTREAD_STROKE_OBJ_MIN", "4"))
-STROKE_OBJ_MAX = int(os.environ.get("NIGHTREAD_STROKE_OBJ_MAX", "7"))
-STROKE_OBJ_V = 220              # 描邊亮度（略低於 INK＝與氣泡字位準區分）
-STICKER_MIN_FRAC = 0.01         # frameless 背景白元件最小整頁佔比（大面積才算背景）
-FIG_NOISE_AREA = 40             # F 小噪點面積門檻（px）：不描邊、整顆併入背景填深
-FIG_NOISE_CLOSE = 11            # 噪點「在 W 內」判定：comp 閉運算核（覆蓋到的孤點才吞）
-# 修法4 安全網（figure/ground 分離可疑 ⇒ 該元件退回上輪壓暗降級）
-STICKER_FIG_MIN = 0.10          # 前景佔 bbox 比例下限（過低＝整格都被當背景）
-STICKER_FIG_MAX = 0.85          # 上限（過高＝根本沒分出背景）
-STICKER_THIN_R = 4              # W 細碎判定半徑（距離變換 ≤ R ＝細白絲）
-STICKER_THIN_MAX = 0.45         # W 細碎佔比上限（整體細碎＝背景根本破碎）
-STICKER_CHROMA_MAX = float(os.environ.get("NIGHTREAD_CHROMA_MAX", "6.0"))        # 元件平均彩度（max−min 通道）上限：淡彩水彩底
-                                # 灰階會 ≥235 但不是「純白」，整顆不進候選（彩頁不毀）
-                                # （校準：demo04 淡彩 2.5–15.4、demo05 11.7/18.3、
-                                #   純黑白頁全 ≤2.0；demo04 最低那顆 2.5 另由 textCov 擋）
-STICKER_EATEN_R = 5             # 「疑似被吃前景白」判定：細白（dist ≤ R）…
-STICKER_EATEN_DENS = 0.35       # …且局部墨密度（blur 15×15，墨＝<WHITE_TH）≥ 此
-                                # ＝密集筆畫縫隙白（白鬍/髮絲 vs 花窗速寫都長這樣）
-STICKER_EATEN_MAX = float(os.environ.get("NIGHTREAD_EATEN_MAX", "0.06"))        # eaten 佔 W 比例軟上限：超標＝可能有白色前景物連進
-                                # 背景（ch34_006 白鬍老人格 0.073）…
-STICKER_TEXT_BG_MIN = 0.10      # …除非文字確實壓在這片白上（textOn）≥ 此＝作者把它
-                                # 當背景寫字的語意證據（demo06 教堂 0.167 / 金髮女孩格
-                                # 0.228 手寫字直接落在背景白 ⇒ 放行；老人格 0.000、
-                                # ch34_010 披肩 0.023 ⇒ 無證據）
-# 修法5：閉合格背景擢升（貼框白元件 → sticker 候選）
-FRAME_HUG_DILATE = 5            # 元件外擴後與格線遮罩的交集算「貼框」
-FRAME_HUG_THICK = 3.0           # 格線名目厚度（px）：交集數 → 貼框長度的除數
-FRAME_HUG_MIN = 0.25            # 貼框長度 / bbox 周長 下限（背景沿格框跑；前景白衣只點狀碰框）
-FRAME_HUG_STRONG = 0.40         # 強貼框：背景證據足夠強 → 走放寬門（見 sticker_plan 兩級制）
-PROMOTED_TEXTON_MAX = 0.30      # 強貼框仍拒的文字覆蓋上限：真有大量文字壓在上面＝旁白框，
-                                # 填黑會把字變描邊糊 → 留灰（demo06 教堂 textOn 0.167 是可接受上界的參照）
-# 批1（2026-08-26 使用者拍板「先大片白、複雜區塊第二批」）：
-CORE_NECK_R = 12                # 寬域核心：開運算半徑（切斷臉/白衣連進背景的線稿缺口窄頸）
-CORE_RECOVER_R = int(os.environ.get("NIGHTREAD_CORE_RECOVER", "9"))               # 核心確定後往墨線邊回收的測地半徑（貼線稿、免留白圈）
-FAINT_OF_F_MAX = 0.62           # F 像素中淡色(>FAINT_G)佔比上限：群眾/建築淡速寫背景 → 推遲批2
-FAINT_G = 160
-# 偽泡（開口氣泡/字壓背景救回）：
-PB_COV_MAX = 0.85               # 氣泡遮罩蓋率低於此的 text region 才啟動偽泡
-PB_NECK_R = 10                  # 偽泡切頸（擋下巴縫/泡尾缺口；泡內行間白不受影響）
-# 生長距離上限＝min(text bbox 邊) × 此值。⚠️ 用 min 邊對「橫排標題字/效果字」（寬而矮）會過小
-# ⇒ 只在字周圍長出一圈，字與字之間仍是白的（使用者 2026-09-15：「泡泡底雖是黑的，但文字間又白底」，
-# 實例＝demo04「つづく」「ぼ」「先生」名牌）。PB_GROW_REF=max 改用長邊。
-PB_GROW_FRAC = float(os.environ.get("NIGHTREAD_PB_GROW", "0.60"))
-PB_GROW_REF = os.environ.get("NIGHTREAD_PB_GROW_REF", "max")   # **定案 max**：白泡 21.5→20.2 萬 px
-                                # ⚠️ 用長邊時：直排長字串（60×500）可長 175px，穿過下巴縫流進臉白——
-                                #   demo01 主角下半臉、demo05 小臉、ch34_011 學生臉全被塗黑（2026-09-08
-                                #   審查員抓到，我三輪目檢都漏）。改短邊：直排字只長 36px＝貼身袖套；
-                                #   demo02 橫向大字框（600×150）長 90px 仍蓋到框邊。
-PB_AURA_R = int(os.environ.get("NIGHTREAD_PB_AURA_R", "12"))  # 偽泡/貼紙的人物灰暈：距「厚墨塊」此距離內不填
-PB_AURA_THICK = 6               #   字框/氣泡輪廓是細筆畫≤4px、不算）——第二道保險
-PB_AURA_MIN_AREA = 800
-# 批1.5（2026-08-26 使用者兩案）：
-# 手/外套漏填（ch34_010 左下案）：測地/直線比——背景從格框「直直就到」（比≈1）、
-# 衣料/皮膚要繞過人物墨線障礙才到（比高）。人物殼 closing 版已證蓋不住寬開衣料白、廢棄。
-GEO_RATIO_MAX = 1.6             # 測地距離 ≤ 直線距離×此 才視為背景
-GEO_SLACK = 40                  # 加法餘裕（px）：近框處比值不穩定的緩衝
-# ★ 核心填色的語意放行（使用者 2026-09-17 第三次指同一處：ch34_006 老人頭上「不知所謂的白塊」）。
-# 病根＝核心填色的兩道**幾何**保護（測地比刪填 geo/euc、厚墨灰暈）把那塊背景楔形當成人物附屬白：
-# 實測該點 corefill=1（本來就要填黑）、geo=468 / euc=130 ⇒ 比值 3.6 遠超門檻 1.6 → 刪。
-# 兩道保護都是**人物遮罩出現前**的粗略替代品（見 broad_core_fill/paint_sticker docstring）。
-# 有語意遮罩後判準直接得多：核心區裡「明確不是人物」的部分一律放行去填黑，是人物的才留給幾何保護。
-# 範圍只在 broad_core_fill 已認定的寬闊背景核心內（不是全頁的白）⇒ 比被否決的 CHAR_FILL 保守得多。
-# veto（偵測器說有人、分割沒抓到的框）一併當作人物，維持紅線「絕不塗錯」。
-CORE_MASK_RELEASE = os.environ.get("NIGHTREAD_CORE_RELEASE", "1") == "1"
-CORE_RELEASE_PAD = int(os.environ.get("NIGHTREAD_CORE_RELEASE_PAD", "16"))   # 放行時人物遮罩的安全外擴（px）：遮罩邊界是 640 解析度放大來的，貼身放行會咬到白衣/手
-# 人頭一致化（demo02 案）：元件級指標已證不可分（feat 被鄰墨污染、ringDark 與正常頁衣料
-# 重疊）→ 改構圖層「暗區地圖」：粗尺度上暗色主導的帶（群眾帶/已填格）內，小白元件一律
-# 填深+內緣亮。主角臉防護＝面積上限＋暗區要求（臉大、通常也不在暗帶）。
-HARMONIZE_ZONE_CELL = 16        # 暗區地圖降採樣尺度
-HARMONIZE_ZONE_DARK = 0.45      # 粗胞暗(<60)佔比 ≥ 此 ⇒ 暗區
-HARMONIZE_IN_ZONE = 0.6         # 亮島落在暗區內的比例下限
-HARMONIZE_AREA_MAX = 0.004      # 亮島整頁佔比上限（群眾人頭尺度；主角臉更大 → 排除）
-HARMONIZE_COLLAR_INK = 0.30     # 亮島外環細墨密度上限：鬍鬚/密集髮絲（ch34_006）高 → 排除；
-                                # 空白人頭只有單條輪廓線、低 → 放行
-# 紙白正規化（色紙/掃描頁）：demo05 水彩紙白峰 223 → 整頁沒有一個像素 ≥ WHITE_TH、整套失效。
-# 頁級估亮部眾數，低於 PAPER_NORM_MIN 就把亮部線性拉到 255（WHITE_TH 語意不變、13 個使用點免動）。
-# 批2 前兩刀（2026-09-08 轉正，11 頁回歸零附帶傷害；env 設 0 可重現 A/B）：
-# · PANEL_CORE：panel 候選卡在 eaten 中段門（0.06–0.30）者，改走核心填色（格框種子、切窄頸）+
-#   _sticker_protect 區域保護，不整顆拒。這道門當初就是為白鬍（ch34_006）設的，但那是核心填色
-#   出現之前——實測白鬍/白髮完整、背景全黑、輪廓白描邊，該頁 -6.7pt。
-# · TEXTCOV_OFF：≥2% 的大塊 panel 候選跳過 textCov 門。memory 曾警告鬆這門會漏併氣泡——但那是
-#   偽泡出現之前；漏併的泡現在會被偽泡重繪成深底亮字，demo03/04 實測零漏併，demo02 -0.6。
-EXP_PANEL_CORE = os.environ.get("NIGHTREAD_PANEL_CORE", "1") == "1"
-EXP_TEXTCOV_OFF = os.environ.get("NIGHTREAD_TEXTCOV_OFF", "1") == "1"
-# 機制開關（消融/守護框評測用，預設全開）：
-EXP_HUG = os.environ.get("NIGHTREAD_HUG", "1") == "1"              # 修法5 貼框擢升
-EXP_PSEUDO = os.environ.get("NIGHTREAD_PSEUDO", "1") == "1"        # 偽泡
-EXP_HARMONIZE = os.environ.get("NIGHTREAD_HARMONIZE", "1") == "1"  # 人頭一致化
-EXP_GUTTER = os.environ.get("NIGHTREAD_GUTTER", "1") == "1"        # 留白填深（基礎機制，消融用）
-# 守護框驅動的結構性安全策略（2026-09-08 晚；v0 全關仍 61 框違規＝基礎機制在吃出血人物/字壓臉）：
-GUTTER_FRAME_CUT = os.environ.get("NIGHTREAD_GUTTER_FRAME_CUT", "0") == "1"  # 留白填色不得跨越格框線
-SAFE_GUTTER = os.environ.get("NIGHTREAD_SAFE_GUTTER", "1") == "1"   # 留白只填「真頁邊帶」（深入 ≤ 短邊×比例）
-SAFE_GUTTER_DEPTH = float(os.environ.get("NIGHTREAD_GUTTER_DEPTH", "0.12"))
-SAFE_BUBBLE_RATIO = float(os.environ.get("NIGHTREAD_BUBBLE_RATIO", "2.5"))
-# ↑ **2.5**（2026-09-17 使用者指出 ch34_011「はい お父様」泡框內側一圈灰白）：**短字配大泡**
-# ——四個字的字框長邊 99px、泡 23029px ⇒ 比值 2.35 超過舊門檻 2.0 被拒收，只剩偽泡貼字填色，
-# 中間一塊黑、外圍一圈灰。放寬到 2.5 後該泡填黑 71%→100%；代價 2 框（同頁父親淡色頭髮）。  # 泡元件面積 ≤ 字 bbox × 此；0=關
-# 封閉泡救回（2026-09-15，使用者：「還是有白色泡泡」）：泡框有缺口/泡尾開口/泡壓出格框時，泡內白與
-# 頁邊留白或格內白**同一個元件** ⇒ 被 excluded_ids 整顆拒收 ⇒ 只剩偽泡貼身填字；人物遮罩又蓋到整顆
-# 泡（三合一的 isnet 很肥）⇒ 「人物優先」把偽泡內部還原成灰 ⇒ 白泡。無遮罩版是靠留白填色順手塗黑的。
-# 修法在語意層：**被墨線封住、裡面有字的白＝泡**，不管元件被歸成什麼——對 excluded 元件也跑文字種子
-# 核心填色（切頸把泡內白從留白切開），核心通過「面積 ≤ SAFE_BUBBLE_RATIO × 字框」＋「邊界墨線比 ≥
-# 此門檻」（真泡的核心邊界幾乎全是泡框；字壓臉的核心邊界一半以上是切頸截面＝白）才收為真泡。
-BUBBLE_ENCLOSE_CHAR_MAX = float(os.environ.get("NIGHTREAD_BUBBLE_ENCLOSE_CHAR", "0.5"))
-BUBBLE_ENCLOSE_MIN = float(os.environ.get("NIGHTREAD_BUBBLE_ENCLOSE", "0"))   # **預設關**：實測「邊界是墨線」臉也符合（髮際/下巴線），demo03 臉 0→94%、demo05 Q版臉 0→87%
-SAFE_STICKER = os.environ.get("NIGHTREAD_SAFE_STICKER", "1") == "1"   # panel 貼紙也一律核心填色+厚墨灰暈（不整顆填）
-# 人物前景遮罩（語意禁填區）：NIGHTREAD_CHARMASK=<dir> 指向 charmask.py 產的 <page>_char.png。
-# 守護框證明紅線在無語意下不可達（局部幾何/灰階特徵全失效）⇒ 有遮罩時「所有填色機制一律避開」。
-# CHAR_DILATE：遮罩外擴，補模型邊界誤差（YOLO-seg 的 proto 是輸入 1/4 解析度）。
-CHARMASK_DIR = os.environ.get("NIGHTREAD_CHARMASK", "")
-# 精準遮罩（cseg ∪ yoloseg，實例分割、不會把泡當人物）另給一份：偽泡只在**精準遮罩沒蓋到**的地方
-# 贏過人物保護——臉被精準遮罩蓋住時仍受保護；isnet 補漏抓框時順便蓋到的泡（肥遮罩）則能填深。
-# 空＝偽泡一律輸給人物保護（舊行為）。
-CHARMASK_PRECISE_DIR = os.environ.get("NIGHTREAD_CHARMASK_PRECISE", "")
-BUBBLE_CLEAN_WINS = float(os.environ.get("NIGHTREAD_BUBBLE_CLEAN", "0.005"))
-# ↑ **定案開**（使用者 2026-09-17 看圖後拍板）：判定為「乾淨泡」的整顆塗黑、不被人物遮罩扣。
-BUBBLE_CLEAN_TEXT_MAX = float(os.environ.get("NIGHTREAD_BUBBLE_CLEAN_TEXT", "0.80"))   # 內部非字墨 < 此值的泡整顆塗黑（0=關）
-MASK_SMOOTH = float(os.environ.get("NIGHTREAD_MASK_SMOOTH", "1"))   # 遮罩形狀平滑（>0 啟用；實際核見 MASK_SMOOTH_MEDIAN）
-MASK_SMOOTH_GUIDED = os.environ.get("NIGHTREAD_MASK_SMOOTH_GUIDED", "1") == "1"
-MASK_SMOOTH_MEDIAN = int(os.environ.get("NIGHTREAD_MASK_MEDIAN", "15"))  # **定案 15**：中值對方塊階梯有效
-EDGE_FEATHER = float(os.environ.get("NIGHTREAD_EDGE_FEATHER", "0.7"))  # **定案 0.7**：收尾的 1–2px 抗鋸齒
-TEXT_REGION_INK = float(os.environ.get("NIGHTREAD_TEXT_REGION_INK", "0"))   # 字框內原圖低於此值的像素也算字（補偵測器漏抓）
-TEXT_ALWAYS_LIT = float(os.environ.get("NIGHTREAD_TEXT_ALWAYS_LIT", "0"))   # 落在深色底上的字筆畫一律畫亮（0=關）
-TEXT_TOPMOST = os.environ.get("NIGHTREAD_TEXT_TOPMOST", "1") == "1"
-# ↑ **定案開**（使用者 2026-09-17 的圖層優先權洞察）：字永遠在最上層。泡遮罩被人物扣掉後，
-# 那塊的字失去「泡內亮字」待遇 ⇒ demo03 實測對比 **-6（字比底還暗、完全讀不出來）**。
-TEXT_TOP_PAD = int(os.environ.get("NIGHTREAD_TEXT_TOP_PAD", "3"))
-BUBBLE_FRAMED_WINS = float(os.environ.get("NIGHTREAD_BUBBLE_FRAMED", "0"))   # 邊界墨線比 >= 此值的泡贏過人物（0=關）
-BUBBLE_NEAR_TEXT = int(os.environ.get("NIGHTREAD_BUBBLE_NEAR_TEXT", "0"))   # 離字此距離內的泡區優先於人物（0=關）
-BUBBLE_GUARD_FULL = os.environ.get("NIGHTREAD_BUBBLE_GUARD_FULL", "1") == "1"
-# ↑ **定案開**：扣泡改用完整遮罩（含 isnet 補漏那層）。原本怕 isnet 把整顆泡當人物而挖出白泡，
-# 實測泡內仍是純黑 16.0（沒挖洞）——因為 isnet 只在「偵測框內且精準遮罩覆蓋<15%」的漏抓框生效，
-# 那些框裡本來就沒有泡。違規 21→14，7 框實質改善、0 框變差。
-BUBBLE_TRIM_CHAR = os.environ.get("NIGHTREAD_BUBBLE_TRIM_CHAR", "1") == "1"   # 泡遮罩不得跨進人物
-BUBBLE_SNAP = int(os.environ.get("NIGHTREAD_BUBBLE_SNAP", "0"))
-BUBBLE_REST_FILL = os.environ.get("NIGHTREAD_BUBBLE_REST", "1") == "1"   # 核心填色的剩餘部分當背景填深
-BUBBLE_REST_STICKER = os.environ.get("NIGHTREAD_BUBBLE_REST_STICKER", "1") == "1"  # 同上推廣到貼紙擢升元件
-REST_VETO = os.environ.get("NIGHTREAD_REST_VETO", "0") == "1"   # 剩餘填色也吃遮罩漏抓 veto
-REST_MIN_AREA = float(os.environ.get("NIGHTREAD_REST_MIN_AREA", "0.0001"))  # 剩餘塊最小頁佔比
-REST_MIN_RADIUS = float(os.environ.get("NIGHTREAD_REST_MIN_R", "0"))   # 剩餘塊最小內切半徑（>0 啟用）
-REST_CHAR_TOUCH = float(os.environ.get("NIGHTREAD_REST_CHAR_TOUCH", "0"))   # 剩餘塊貼人物比例上限（>0 啟用語意判準）
-REST_TOUCH_R = int(os.environ.get("NIGHTREAD_REST_TOUCH_R", "6"))
-BUBBLE_REST_NEAR = int(os.environ.get("NIGHTREAD_BUBBLE_REST_NEAR", "20"))   # 剩餘填深只在泡外此距離內（0=不限）
-CHAR_DILATE = int(os.environ.get("NIGHTREAD_CHAR_DILATE", "0"))    # 定案 0：均勻外擴已被貼墨收邊取代
-# 外擴貼墨收邊：均勻外擴 20px 會在角色外圍留一圈等寬留白（使用者 2026-09-15：「越細越好」）。
-# 角色輪廓本來就是**畫出來的墨線** ⇒ 改成「在非墨區內測地生長」：遮罩不足處長到碰輪廓就停、
-# 輪廓外的背景長不進去 ⇒ 邊界貼合角色而非等寬光暈。0＝關（用均勻 dilate）。
-# 貼墨修邊（向內）：遮罩在 640 解析度產生再放大 ⇒ 邊界階梯狀、越過髮絲伸進背景（實測外緣離
-# 最近墨線中位 4.2px、43% >5px、最多 18px）——這才是「角色外圍白色留邊」的真正來源，收邊半徑
-# 只佔 1–3%。作法＝從遮罩外側在非墨區內往內生長，能到達的都是多包的背景（角色輪廓的墨線擋住
-# 生長），從遮罩扣掉。輪廓有缺口處會漏進去，故限半徑。0＝關。
-# 「遮罩漏抓偵測」veto：用**另一個來源**（manga109 偵測器的 body/face bbox，黑白漫畫訓練、召回高
-# 但框太粗不能當遮罩）當第二意見。框內 charmask 覆蓋率 < 門檻 ⇒ 該框裡有人但分割遮罩沒抓到 ⇒
-# **此框內禁止填色**。B 模式把 ch34_006 整隻手塗黑，該處 body 框的遮罩覆蓋率 0%（正常頁 29-55%）
-# ⇒ 分得開。框太粗在這裡無害——它只否決填色、不決定填什麼。
-CHAR_BOXES_DIR = os.environ.get("NIGHTREAD_CHAR_BOXES", "")
-CHAR_BOX_MIN_COV = float(os.environ.get("NIGHTREAD_CHAR_BOX_COV", "0.15"))
-CHAR_FILL = os.environ.get("NIGHTREAD_CHAR_FILL", "0") == "1"   # 未列管白元件補填（見 compose）
-CHAR_FILL_MIN_AREA = float(os.environ.get("NIGHTREAD_CHAR_FILL_MIN", "0.002"))   # 元件整頁佔比下限
-CHAR_FILL_MAX_OVERLAP = float(os.environ.get("NIGHTREAD_CHAR_FILL_OVL", "0.30")) # 與人物遮罩重疊上限
-CHAR_TRIM = int(os.environ.get("NIGHTREAD_CHAR_TRIM", "0"))   # **定案 0**：收邊縮到 1/1 後修邊反而變差（見下表）
-REGION_SNAP_COVER = float(os.environ.get("NIGHTREAD_REGION_SNAP", "0"))   # 線稿區域吸附覆蓋門檻（0=關）
-REGION_SNAP_MAX = float(os.environ.get("NIGHTREAD_REGION_SNAP_MAX", "0.04"))  # 區塊頁佔比上限
-CHAR_SNAP_PAD = int(os.environ.get("NIGHTREAD_CHAR_SNAP_PAD", "1"))   # **定案 1**：這是邊緣厚度的主因，非修邊
-CHAR_SNAP = int(os.environ.get("NIGHTREAD_CHAR_SNAP", "10"))  # **定案 10**（2026-09-16）：測地生長到墨線就停，所以
-                                                              # 邊緣厚度不變（0.98→1.13px）但遮罩貼合度大增：違規 31→21、7 框實質改善、0 框變差；
-                                                              # 代價＝遮罩不足處補不滿，違規 12→22（多出的 10 框多落在 16-38%＝剛越過 15% 門檻）
-# 人物上的氣泡誰優先：bubble＝泡贏（字壓臉時仍深底亮字，臉被吃）；char＝人物贏（泡讓開、
-# 字留在場景調上＝該處不變暗但臉保住）。守護框上差 27 框，觀感上差「字壓臉的可讀性」。
-CHAR_OVER_BUBBLE = os.environ.get("NIGHTREAD_CHAR_OVER_BUBBLE", "1") == "1"  # 定案：人物優先
-# 字貼身暗襯（人物優先時保住 onArt 字的可讀性）：人物區還原時，留一條貼著文字筆畫的窄帶
-# **不**還原 ⇒ 該帶維持「填深＋亮字」。動機：寫在畫面上的字靠原作白描邊與畫面分離，但 lin8 把
-# 白描邊壓成 140、畫面也在 90–140 ⇒ 描邊失效、字埋進畫面（demo01 上兩格實例）。窄帶面積小，
-# 且該處原本就被字本身遮住 ⇒ 不損人物細節。0＝關（整塊還原）。
-TEXT_BACKING_R = int(os.environ.get("NIGHTREAD_TEXT_BACKING", "5"))
-SAFE_GUTTER_FAT = float(os.environ.get("NIGHTREAD_GUTTER_FAT", "0"))   # >0：留白元件最大內切半徑超過此 px ＝「肥留白」
-                                                                        # （含出血人物的臉/外套），整顆不填。真格間薄帶 ≤30。
-BUBBLE_MAX_OVERRIDE = float(os.environ.get("NIGHTREAD_BUBBLE_MAX", "0"))  # >0 覆蓋 BUBBLE_COMP_MAX_FRAC
-EXP_BUBBLE = os.environ.get("NIGHTREAD_BUBBLE", "1") == "1"        # 氣泡重繪（基礎機制，消融用）
-EXP_STICKER = os.environ.get("NIGHTREAD_STICKER", "1") == "1"      # 貼紙（修法4 panel 白＋擢升，消融用）
-PAPER_NORM_MIN = 245            # 紙白峰 ≥ 此視為乾淨白紙、不動
-PAPER_PEAK_LO = 200             # 估峰值只看 ≥ 此的像素（排除調子/墨）
-PAPER_NORM_CHROMA_MAX = 8.0     # 峰值區平均彩度 ≤ 此才視為「無彩色紙」；水彩淡彩底（demo05 粉底）超過 → 不動
-# 無框頁的「真頁邊帶」：無框頁不填背景（修法2），但貼頁邊的薄帶留白是安全的——
-# 元件深入頁內的最大距離 ≤ 短邊 × 此比例 才算頁邊帶（開放背景會深入頁心、不符）
-FRAMELESS_MARGIN_DEPTH = 0.12
-# 留白填深的人物灰暈（ch34_010 左下案＝出血式無框特寫：外套白與頁白連續且輪廓開放，
-# 像素層無界 → 唯一安全解＝gutter 填色避開大型人物墨結構周圍，人物旁留灰暈）：
-AURA_MIN_INK_AREA = 2500        # 「大型人物墨」門檻（px）；格線/氣泡輪廓先排除不算
-# ⚠️ 灰暈是**人物遮罩出現之前**的粗略替代品（用「離大墨團多遠」猜人物位置）。有語意遮罩時它
-# 多餘且會在角色外圍留一圈厚留白 ⇒ 有 CHARMASK 時應設 0（見 docs/DECISIONS.md 的邊界細緻化）。
-AURA_R = int(os.environ.get("NIGHTREAD_AURA_R", "0"))    # **定案 0**：有語意遮罩後灰暈多餘（關掉只多 1 框、省 0.6pt）
-AURA_FRAME_EXEMPT = 45          # 距格線此範圍內的留白豁免灰暈（正常格間留白照填；hard 模式用）
-AURA_BORDER_EXEMPT = 60         # 距頁邊此範圍內的留白豁免灰暈（hard 模式用）
-# ★ 拍板 hard（2026-09-05 使用者 A/B 目檢）：邊界 crisp、黑就是黑。glow 保留備查（見下），
-# 它把安全妥協變成「夜景輪廓光」但會在人物衣料上疊一層原作沒有的漸層 ⇒ 風格添加，不採用。
-AURA_MODE = os.environ.get("NIGHTREAD_AURA", "hard")  # hard=二值+豁免帶（定案）；glow=距離場漸層
-AURA_GLOW_R0 = 8                # glow：距人物墨 ≤R0 全保留場景調
-AURA_GLOW_R1 = 42               # glow：≥R1 全 BG；中間線性淡入（距離場＝天然跟隨輪廓、無鋸齒）
-STICKER_TEXTON_PAD = 8          # textOn 的文字 bbox 外擴（語意證據要「真的壓在元件上」
-                                # ⇒ 只容 bbox 抖動的小 pad；BUBBLE_PAD 40px 窗會把鄰格
-                                # 文字掃進相鄰白元件湊假證據——ch34_010 披肩 pad40=0.207
-                                # vs pad8=0.023、demo06 教堂 pad40=0.232 vs pad8=0.167）
-STICKER_SMALL_AREA = 0.02       # 「小元件」整頁佔比門檻：小於此的白元件必須有 textOn
-                                # 語意證據才可填黑（真正的格背景白都大：正當 ACCEPT 最小
-                                # ch34_006 天空 0.035；ch34_010 披肩衣料 0.0105 ⇒ 退回。
-                                # eaten 軟上限對平滑衣料白這型前景是盲區，面積補上）
-STICKER_EATEN_HARD = 0.30       # eaten 硬上限：細碎過半＝分離無意義，一律退回
-STICKER_TEXT_MAX = 0.55         # 文字窗（region bbox+BUBBLE_PAD）蓋住 W 的比例上限：
-                                # 過高＝這顆白其實是漏併的氣泡，交還壓暗、不當背景
-                                # （此閘保留 40px 窗：量的是「字＋周邊白」的氣泡構形；
-                                #   換 tight 值會讓 demo02/03/04 的漏併氣泡掉下 0.55）
-# 修法4 區域級保護（_sticker_protect：accept 後的第二道網，逐團不填不描、留 D2）
-STICKER_NECK_R = 8              # 窄頸半徑：附屬白＝只能經寬 < 2R 縫隙抵達的 W（白鬍/
-                                # 髮絲經筆畫縫隙連進背景就是這型；geodesic 重建切下）
-STICKER_CORE_MIN = 0.03         # 開放背景核最小佔比（× W 面積）：erode 後殘核 ≥ 此
-                                # 才當背景種子（白臉額頭的小殘核不算背景）
-STICKER_PROTECT_EATEN_MIN = 0.002  # 附屬白連通團含 eaten ≥ max(100px, 此×W面積) 才保護
-                                # （乾淨格的窄框縫也是附屬白、但無 eaten ⇒ 照填）
-STICKER_PROTECT_DILATE = 6      # 保護團外擴（px）：蓋住鬍鬚邊緣的過渡帶
+# ── 參數（唯一的旋鈕面板；每個值的由來與被否決的替代方案見 docs/DECISIONS.md）──────
+# 輸出位準
+BG = 16                 # 深底：留白／氣泡內部／背景填色都用它
+INK = 240               # 亮字：氣泡內的文字筆畫
+STROKE = 1              # 邊界描亮半徑（泡框、填色區外緣）。3 會在泡外留 6px 白環
+STROKE_OBJ_V = 220      # 前景描邊亮度（略低於 INK，與字區分）
+SCENE_FLOOR = 8         # 場景曲線：黑 → 8（極暗保護，OLED 黑碎的最小抬升）
+DIM_CEIL = 140          # 場景曲線：紙白 → 140（線永遠比紙暗 ⇒ 不反相）
+GLOW_STRENGTH = 55      # 自適應墨線增亮強度
+GLOW_CAP = 112          # 增亮上限（< DIM_CEIL）
+
+# 輸入與白元件
+SEG_TH = 0.12           # DBNet 筆畫遮罩二值化閾（同引擎 segThreshold）
+WHITE_TH = 235          # 「白」的灰階下限；整套分區都建立在這份白連通元件上
+INK_DARK_TH = 128       # 「墨」的灰階上限（洞內含墨判定）
+BUBBLE_PAD = 40         # 文字區 bbox 外擴的白元件搜尋窗
+GUTTER_MIN_AREA_FRAC = 0.0006   # 留白元件最小整頁佔比
+WHITE_MEASURE_TH = 200  # 白面積統計閾（只用於回報，不進演算法）
+
+# 紙白正規化（色紙／掃描頁）
+PAPER_PEAK_LO = 200         # 估紙白峰時只看這之上的亮部
+PAPER_NORM_MIN = 245        # 峰低於此才拉亮（乾淨白紙原樣通過）
+PAPER_NORM_CHROMA_MAX = 8.0 # 峰值區彩度上限：有彩＝淡彩畫底不是紙，不拉
+
+# 頁型判別（長直格框線密度，px/千像素）
+FRAME_LINE_L_DIV = 5    # 線長 = min(W,H)//此（至少 60px）
+FRAME_DARK_TH = 100     # 框線「暗」的灰階上限
+FRAME_MIN_EACH = 1.0    # 橫、直線各自的下限
+FRAME_MIN_SUM = 4.5     # 合計下限；不到＝無框頁，背景只壓暗不填深
+FRAMELESS_MARGIN_DEPTH = 0.12   # 無框頁只填深入 ≤ 短邊×此 的真頁邊帶
+
+# 留白 vs 格內白
+CORE_R = 26             # 厚芯：距離變換 > 此（真格溝半寬遠小於此）
+DEEP_EDGE_FRAC = 0.07   # 頁邊距帶寬 = max(64, 此×min(W,H))
+IN_PANEL_CORE_FRAC = 0.15   # 規則A：厚芯佔元件 ≥ 此
+IN_PANEL_CORE_DEEP = 0.25   #        且厚芯深入頁內 ≥ 此 ⇒ 格內白
+DEEP_INK_DEEP = 0.5     # 規則B：厚芯深入 ≥ 此
+DEEP_INK_RATIO = 0.02   #        且小洞內墨/面積 ≥ 此 ⇒ 白包畫，改判畫面
+HOLE_MAX_FRAC = 0.01    # 「小洞」整頁佔比上限（大洞＝整格，不算包線稿）
+SAFE_GUTTER_DEPTH = 0.12    # 有框頁的留白只填深入 ≤ 短邊×此 的部分
+
+# 氣泡
+BUBBLE_COMP_MAX_FRAC = 0.07 # 泡元件整頁佔比上限
+BUBBLE_LOCAL_K = 4.0        # 泡元件面積 ≤ 此×文字搜尋窗（局部性）
+BUBBLE_CORE_MIN_FRAC = 0.003    # ≥ 此頁佔比走文字種子核心填色；小的整顆填
+BUBBLE_NECK_R = 8           # 泡的切頸半徑：泡框缺口／下巴縫都是窄頸
+SAFE_BUBBLE_RATIO = 2.5     # 泡核心面積 ≤ 此×字框長邊²（擋「字壓臉」被當成泡）
+BUBBLE_CLEAN_WINS = 0.005   # 內部非字墨 < 此的泡＝乾淨容器 ⇒ 整顆塗黑、人物不扣
+BUBBLE_CLEAN_TEXT_MAX = 0.8 # 但文字佔比 > 此＝那不是泡（是被誤判的白髮／白手）
+BUBBLE_REST_NEAR = 20       # 泡元件的剩餘部分只在泡外此距離內填深
+
+# 偽泡（開口泡／字壓畫面）
+PB_COV_MAX = 0.85       # 泡遮罩蓋率低於此的文字區才啟動偽泡
+PB_NECK_R = 10          # 偽泡切頸
+PB_GROW_FRAC = 0.6      # 生長上限 = 字框邊 × 此
+PB_GROW_REF = "max"     # 用字框長邊（短邊會讓橫排標題字之間留白）
+PB_AURA_R = 12          # 厚墨灰暈：距厚墨塊此距離內不填（臉旁髮團的保險）
+PB_AURA_THICK = 6       # 「厚墨」的距離變換下限（細筆畫≤4px 不算）
+PB_AURA_MIN_AREA = 800  # 厚墨塊最小面積
+
+# 貼紙式背景（純白背景填黑＋前景白描邊）
+STROKE_OBJ_FRAC = 0.0035    # 前景描邊半徑 = min(W,H)×此，clamp 到下兩行
+STROKE_OBJ_MIN = 4
+STROKE_OBJ_MAX = 7
+STICKER_MIN_FRAC = 0.01     # 無框頁背景白元件的最小整頁佔比
+FIG_NOISE_AREA = 40         # 前景小噪點：不描邊、併入背景
+FIG_NOISE_CLOSE = 11        # 噪點「在背景內」的閉運算核
+STICKER_FIG_MIN = 0.1       # 前景佔 bbox 下限（過低＝整格被當背景）
+STICKER_FIG_MAX = 0.85      # 上限（過高＝根本沒分出背景）
+STICKER_THIN_R = 4          # 白的細碎判定半徑
+STICKER_THIN_MAX = 0.45     # 細碎佔比上限（整體細碎＝背景已破碎）
+STICKER_CHROMA_MAX = 6.0    # 元件平均彩度上限：擋淡彩水彩底（彩頁不毀）
+STICKER_EATEN_R = 5         # 「被吃前景白」＝細白（dist ≤ 此）…
+STICKER_EATEN_DENS = 0.35   # …且局部墨密度 ≥ 此（白鬍／髮絲的縫隙白）
+STICKER_EATEN_MAX = 0.06    # eaten 佔比軟上限：超標＝可能有前景白連進背景
+STICKER_EATEN_HARD = 0.3    # 硬上限：無論語意證據一律拒
+STICKER_TEXT_BG_MIN = 0.1   # 但文字確實壓在這片白上 ≥ 此＝作者當背景用的語意證據
+STICKER_TEXT_MAX = 0.55     # 漏併氣泡閘：文字覆蓋率上限
+STICKER_TEXTON_PAD = 8      # textOn 用 tight bbox + 此 px（不用 40px 窗，免鄰格字湊假證據）
+STICKER_SMALL_AREA = 0.02   # 小元件必須有語意證據才填黑
+STICKER_NECK_R = 8          # 區域級保護：開放背景核的侵蝕半徑
+STICKER_CORE_MIN = 0.03     # 殘核 ≥ 此×元件面積才算開放背景
+STICKER_PROTECT_EATEN_MIN = 0.002   # 附屬白含此比例的 eaten 才整團保護
+STICKER_PROTECT_DILATE = 6  # 保護區外擴
+FAINT_OF_F_MAX = 0.62       # 前景中淡色佔比上限：群眾／建築淡速寫背景不填
+FAINT_G = 160               # 「淡色」的灰階下限
+
+# 貼框擢升（被格框封閉的格內背景 → 貼紙候選）
+FRAME_HUG_DILATE = 5    # 元件外擴後與格線遮罩取交集算「貼框」
+FRAME_HUG_THICK = 3.0   # 格線名目厚度（交集像素數 → 貼框長度的除數）
+FRAME_HUG_MIN = 0.25    # 貼框長度／bbox 周長 下限
+FRAME_HUG_STRONG = 0.4  # 強貼框：背景證據夠強 ⇒ 走放寬門
+PROMOTED_TEXTON_MAX = 0.3   # 強貼框仍拒的文字覆蓋上限（真旁白框填黑會糊字）
+
+# 核心填色（從格框種子出發、不擠過窄頸的寬闊背景）
+CORE_NECK_R = 12        # 開運算半徑：切斷臉／白衣連進背景的線稿缺口
+CORE_RECOVER_R = 9      # 核心確定後往墨線回收的測地半徑（貼線稿、不留白圈）
+GEO_RATIO_MAX = 1.6     # 測地距離 ≤ 直線距離×此 才視為背景
+GEO_SLACK = 40          # 加法餘裕（px）：近框處比值不穩定的緩衝
+CORE_RELEASE_PAD = 16   # 語意放行時人物遮罩的安全外擴（見 docs/DECISIONS.md）
+
+# 人物語意遮罩（必要輸入；沒有它紅線不可達）
+CHARMASK_DIR = os.environ.get("NIGHTREAD_CHARMASK", "")   # charmask.py 的輸出夾
+CHAR_SNAP = 10          # 貼墨收邊：在非墨區內測地生長到碰輪廓就停（不會讓邊界變粗）
+CHAR_SNAP_PAD = 1       # 收邊後納入輪廓線本身的膨脹圈數（邊緣厚度的真正旋鈕）
+MASK_SMOOTH_MEDIAN = 15 # 中值平滑：削掉 640 解析度放大造成的方塊階梯
+EDGE_FEATHER = 0.7      # 還原邊界的 1–2px 抗鋸齒
+
+# 文字（圖層優先權：字 > 對話框 > 人物 > 背景）
+TEXT_PAD = 2            # 泡內畫亮字時筆畫遮罩的外擴
+TEXT_GAMMA = 1.4        # 墨度 → 亮度的 gamma
+TEXT_KNEE = 0.35        # 低墨度壓黑（消字邊緣殘灰）
+TEXT_TOP_PAD = 3        # 字永遠最上層：被人物扣掉的泡區裡，字筆畫的貼身帶
+TEXT_BACKING_R = 5      # 字壓在人物身上時的貼身暗襯半徑
+
+# 浮在黑裡的空白人頭一致化
+HARMONIZE_ZONE_CELL = 16    # 暗區地圖的降採樣尺度
+HARMONIZE_ZONE_DARK = 0.45  # 粗胞暗佔比 ≥ 此 ⇒ 暗區
+HARMONIZE_IN_ZONE = 0.6     # 亮島落在暗區內的比例下限
+HARMONIZE_AREA_MAX = 0.004  # 亮島整頁佔比上限（主角臉更大 ⇒ 排除）
+HARMONIZE_COLLAR_INK = 0.3  # 亮島外環細墨密度上限（鬍鬚／密集髮絲排除）
+
 
 _model = None
 _dbnet_utils = None
@@ -416,121 +262,30 @@ def detect(img_bgr):
     return lines, regions, seg
 
 
-# ── 遮罩：白元件分類（修法2/3）＋氣泡（修法1）───────────────────────
-
-def load_veto_mask(page_path, shape, charmask):
-    """遮罩漏抓偵測：讀 charmask.py --kinds body face 產的 boxes.json，回傳「禁止填色」遮罩
-    ＝所有「框內 charmask 覆蓋率 < CHAR_BOX_MIN_COV」的框的聯集。無資料回 None。"""
-    if not CHAR_BOXES_DIR or charmask is None:
-        return None
-    fp = os.path.join(CHAR_BOXES_DIR, "boxes.json")
-    if not os.path.exists(fp):
-        return None
-    with open(fp, encoding="utf-8") as f:
-        boxes = json.load(f)
-    veto = np.zeros(shape, bool)
-    for x0, y0, x1, y1 in boxes.get(os.path.splitext(os.path.basename(page_path))[0], []):
-        if x1 > x0 and y1 > y0 and charmask[y0:y1, x0:x1].mean() < CHAR_BOX_MIN_COV:
-            veto[y0:y1, x0:x1] = True
-    return veto if veto.any() else None
+# ── 遮罩：人物／頁型／白元件／氣泡 ──────────────────────────────────
 
 
-def load_precise_mask(page_path, shape):
+def load_charmask(page_path, shape):
+    """讀 charmask.py 產的人物遮罩（255=人物）。**必要輸入**：沒有語意遮罩時紅線不可達
+    （守護框實測最好也有 37 框違規），所以缺檔直接報錯而不是默默降級。"""
     name = os.path.splitext(os.path.basename(page_path))[0]
-    if CHARMASK_PRECISE_DIR:
-        fp = os.path.join(CHARMASK_PRECISE_DIR, f"{name}_char.png")
-    elif CHARMASK_DIR:
-        fp = os.path.join(CHARMASK_DIR, f"{name}_precise.png")   # combine 模式的副產物
-    else:
-        return None
-    m = cv2.imread(fp, cv2.IMREAD_GRAYSCALE)
+    fp = os.path.join(CHARMASK_DIR, f"{name}_char.png") if CHARMASK_DIR else ""
+    m = cv2.imread(fp, cv2.IMREAD_GRAYSCALE) if fp else None
     if m is None:
-        return None
+        raise SystemExit(f"缺人物遮罩：{fp or '未設 NIGHTREAD_CHARMASK'}\n"
+                         f"先跑 charmask.py 產遮罩，再設 NIGHTREAD_CHARMASK=<遮罩夾>。")
     if m.shape != shape:
         m = cv2.resize(m, (shape[1], shape[0]), interpolation=cv2.INTER_NEAREST)
     return m > 127
 
 
-def load_charmask(page_path, shape):
-    """讀 charmask.py 產的人物遮罩（255=人物），外擴 CHAR_DILATE 後回傳 bool；無遮罩回 None。"""
-    if not CHARMASK_DIR:
-        return None
-    name = os.path.splitext(os.path.basename(page_path))[0]
-    fp = os.path.join(CHARMASK_DIR, f"{name}_char.png")
-    m = cv2.imread(fp, cv2.IMREAD_GRAYSCALE)
-    if m is None:
-        return None
-    if m.shape != shape:
-        m = cv2.resize(m, (shape[1], shape[0]), interpolation=cv2.INTER_NEAREST)
-    keep = m > 127
-    if CHAR_SNAP > 0:
-        return keep          # 貼墨收邊需要灰階，交由 load_charmask_snap 在 run_page 完成
-    if CHAR_DILATE > 0:
-        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (CHAR_DILATE * 2 + 1,) * 2)
-        keep = cv2.dilate(keep.astype(np.uint8), k) > 0
-    return keep
-
-
-def trim_charmask(keep, g, r=None):
-    """貼墨修邊：從遮罩外側在非墨區內往內測地生長 r 步，可達處＝遮罩多包的背景 → 扣掉。
-    角色輪廓的墨線擋住生長 ⇒ 邊界收到輪廓上。輪廓有缺口會漏，故限半徑。"""
-    r = CHAR_TRIM if r is None else r
-    if r <= 0:
-        return keep
-    allowed = (g >= WHITE_TH)                   # 非墨才可穿透
-    outside = (~keep) & allowed
-    leak = geodesic_grow(outside, allowed, r, step=4) & keep
-    return keep & ~leak
-
-
-def smooth_charmask(keep, g, sigma=None):
-    """遮罩形狀平滑（使用者 2026-09-17：黑白交界有明顯鋸齒感）。
-
-    病根不是 1px 鋸齒而是**塊狀階梯**：遮罩在 640 解析度產生、放大到全頁後每個遮罩像素變成
-    2–3px 的方塊，邊界呈直角梯級（2× 放大可見）。單純羽化只軟化 1–2px，救不了方塊。
-    作法＝高斯 + 0.5 門檻（形態學意義上的曲率平滑，凸角被削、凹角被填），再用原圖的墨線把
-    平滑後的邊界拉回輪廓（GUIDED：只在非墨區生效，避免把遮罩推過線稿）。
-    """
-    sigma = MASK_SMOOTH if sigma is None else sigma
-    if sigma <= 0:
-        return keep
-    if MASK_SMOOTH_MEDIAN > 1:
-        # 中值濾波對「方塊階梯」比高斯有效：它保直線、削掉突出的方塊角，不會把整體輪廓縮水。
-        r = int(MASK_SMOOTH_MEDIAN) | 1
-        sm = cv2.medianBlur(keep.astype(np.uint8) * 255, r) > 127
-    else:
-        sm = cv2.GaussianBlur(keep.astype(np.float32), (0, 0), sigma) > 0.5
-    if MASK_SMOOTH_GUIDED:
-        ink = g < WHITE_TH
-        # 平滑只准在非墨區改寫：墨線上的遮罩歸屬維持原判（線稿是可信的邊界）
-        sm = np.where(ink, keep, sm)
-    return sm
-
-
-def region_snap_charmask(keep, g, cover=None, max_frac=None):
-    """線稿區域吸附（trapped-ball 的簡化版，4 個 OpenCV op）：把「非墨」區域切成封閉區塊，
-    某區塊被人物遮罩覆蓋超過 cover 就**整塊**納入遮罩。
-
-    動機（2026-09-16）：31 框違規裡 27 框的遮罩覆蓋已達 63–87%，缺的是**邊緣沒貼到輪廓**——
-    模型邊界是 640 解析度放大來的，停在物體內側。無差別外擴（snap/dilate）會讓邊界變粗
-    （使用者明確要求細），而區域吸附只長到**畫出來的輪廓線**就停，不會溢出。
-    max_frac 擋掉「整片背景是一個大區塊」的情況（網點頁/開放背景會讓區塊變超大）。
-    """
-    cover = REGION_SNAP_COVER if cover is None else cover
-    max_frac = REGION_SNAP_MAX if max_frac is None else max_frac
-    ink = (g < WHITE_TH).astype(np.uint8)
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    sealed = cv2.dilate(ink, k)                       # 補線稿缺口，免得區塊漏成一片
-    n, lab_r, st, _ = cv2.connectedComponentsWithStats((1 - sealed).astype(np.uint8), 4)
-    out = keep.copy()
-    for i in range(1, n):
-        a = int(st[i, cv2.CC_STAT_AREA])
-        if a < 60 or a > max_frac * g.size:
-            continue
-        blob = lab_r == i
-        if float(keep[blob].mean()) >= cover:
-            out |= blob
-    return out
+def smooth_charmask(keep, g):
+    """遮罩形狀平滑：中值濾波削掉「方塊階梯」（遮罩在 640 解析度產生、放大後邊界呈直角梯級），
+    再用原圖的墨線把平滑後的邊界拉回輪廓（只在非墨區生效，避免把遮罩推過線稿）。"""
+    r = MASK_SMOOTH_MEDIAN | 1
+    sm = cv2.medianBlur(keep.astype(np.uint8) * 255, r) > 127
+    # 平滑只准在非墨區改寫：墨線上的遮罩歸屬維持原判（線稿是可信的邊界）
+    return np.where(g < WHITE_TH, keep, sm)
 
 
 def snap_charmask(keep, g, r=None):
@@ -605,17 +360,10 @@ def _hole_ink_ratio(comp_u8, g):
     return ink / max(int(comp_u8.sum()), 1)
 
 
-_NOISY_WHITE = [None]
-_NOISY_W = [None]
 # ★ 三段式（2026-09-17）：原本只有「填黑 16」與「場景灰 140」兩種待遇，於是畫面的白只能二選一
 # ——填黑會撕裂（邊界不跟線稿走），留場景灰又不夠暗（源頭切分原型亮了 10pt 被否決）。
 # 補上第三種＝**畫面的白給中間調**，對應三個語意層次：
 #   純背景白（留白/格內背景）→ BG 16 ｜ 畫面的白（地板/牆面）→ 中間調 ｜ 人物的白 → 場景灰 140
-WHITE_SPLIT_STD = float(os.environ.get("NIGHTREAD_WHITE_SPLIT", "0"))
-NOISY_DIM = float(os.environ.get("NIGHTREAD_NOISY_DIM", "0"))   # 畫面白往 BG 壓暗的比例（0=不壓）
-NOISY_SOFT = float(os.environ.get("NIGHTREAD_NOISY_SOFT", "1.0"))  # 壓暗權重的過渡寬度（× 門檻）   # 白元件分類前先用局部 std 切開（0=關）
-INNER_PANEL_MIN_FRAC = float(os.environ.get("NIGHTREAD_INNER_PANEL", "0"))
-INNER_PANEL_AS_PANEL = os.environ.get("NIGHTREAD_INNER_AS_PANEL", "0") == "1"   # 封閉格內白納入 panel 的頁佔比門檻（0=關）
 
 
 def classify_white_components(g):
@@ -627,18 +375,6 @@ def classify_white_components(g):
     """
     H, W = g.shape
     white = (g >= WHITE_TH).astype(np.uint8)
-    if WHITE_SPLIT_STD > 0:
-        # ★ 重構原型（2026-09-17）：在**白元件分類的最源頭**就把「泡的白」與「畫面的白」切開。
-        # 先前把局部 std 用在 core fill 之後，效果被 bubble_rest 抵消（泡變小 ⇒ 剩餘填色變大）；
-        # 在這裡切，下游每個機制（留白/貼紙/泡/剩餘填色）看到的就都是正確的元件。
-        # 判準＝局部 std（31×31）：泡內部是空白（實測 3.3），畫面的白附近有紋路（地板 24.0）。
-        sd = local_std(g)
-        quiet = sd < WHITE_SPLIT_STD
-        _NOISY_WHITE[0] = (white > 0) & ~quiet     # 「有紋路的白」＝畫面的一部分（地板/牆面）
-        # 連續權重：二值門檻會讓壓暗量在門檻兩側跳變 ⇒ 地板出現深淺不一的灰斑塊（目檢可見）。
-        # 改用 std 的平滑映射，門檻附近漸進過渡。
-        _NOISY_W[0] = np.clip((sd - WHITE_SPLIT_STD) / max(1e-3, WHITE_SPLIT_STD * NOISY_SOFT), 0.0, 1.0)
-        white = ((white > 0) & quiet).astype(np.uint8)
     n, lab, stats, _ = cv2.connectedComponentsWithStats(white, 8)
     dist = cv2.distanceTransform(white, cv2.DIST_L2, 5)   # 白內距最近非白（元件間互不影響）
     deep_px = max(64, int(round(DEEP_EDGE_FRAC * min(W, H))))
@@ -652,15 +388,6 @@ def classify_white_components(g):
         x, y, cw, ch = (stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP],
                         stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT])
         if not (x <= 2 or y <= 2 or x + cw >= W - 2 or y + ch >= H - 2):
-            # ★ 結構性漏洞（2026-09-16，使用者指 ch34_014 右下格泡外一圈紅）：整套分類建立在
-            # 「留白/格溝從頁邊延伸進來」的假設上，於是**被格框完全封閉的格內背景白**連候選都進
-            # 不了 ⇒ 未列管 ⇒ 沒有任何機制處理 ⇒ 整格背景維持場景灰。ch34_014 那格就是
-            # comp1370（4.24% 頁）+ comp1355（2.85% 頁）兩塊未列管白。
-            # 補法：夠大的封閉白也算格內白（panel）。它本來就是「格內的背景」，只是不貼頁邊。
-            if INNER_PANEL_MIN_FRAC > 0 and a >= INNER_PANEL_MIN_FRAC * g.size:
-                # 歸 gutter（填深）不是 panel：panel 的語意是「當畫面壓暗、不填」，
-                # 而被格框封閉的大片背景白本來就該填深。
-                (panel_ids if INNER_PANEL_AS_PANEL else gutter_ids).add(i)
             continue                                    # 不貼頁邊 ⇒ 非留白候選
         comp = (lab == i)
         core = comp & (dist > CORE_R)                   # 厚芯：比格溝半寬還厚的部分
@@ -679,52 +406,6 @@ def classify_white_components(g):
     return lab, stats, gutter_ids, panel_ids
 
 
-def _enclosed_bubble_core(g, lab, stats, i, text_bbox, charmask=None):
-    """對 excluded（留白/格內白）元件做「封閉泡」判定：從字框內的白出發切頸核心填色，核心要
-    (1) 面積 ≤ SAFE_BUBBLE_RATIO × 字框（泡跟字同尺度）(2) 邊界墨線比 ≥ BUBBLE_ENCLOSE_MIN
-    （真泡的核心被泡框圍住；字壓臉/背景的核心邊界大半是切頸截面＝白）。通過回傳 comp 窗內的
-    core 遮罩，否則 None。"""
-    if BUBBLE_ENCLOSE_MIN <= 0:
-        return None
-    x0, y0, x1, y1 = text_bbox
-    bx, by, bw, bh = stats[i, :4]
-    comp = lab[by:by + bh, bx:bx + bw] == i
-    seed = np.zeros_like(comp)
-    sx0, sy0 = max(0, x0 - bx), max(0, y0 - by)
-    sx1, sy1 = min(bw, x1 - bx), min(bh, y1 - by)
-    if sx1 <= sx0 or sy1 <= sy0:
-        return None
-    seed[sy0:sy1, sx0:sx1] = True
-    core = broad_core_fill(comp, seed & comp, neck_r=BUBBLE_NECK_R, recover_r=BUBBLE_NECK_R)
-    area = int(core.sum())
-    if area == 0:
-        return None
-    if SAFE_BUBBLE_RATIO > 0 and area > SAFE_BUBBLE_RATIO * max(1, (x1 - x0) * (y1 - y0)):
-        return None
-    # 邊界墨線比：core 外一圈（1px）裡，原圖非白的比例；貼圖緣的邊不算
-    gw = g[by:by + bh, bx:bx + bw]
-    ring = (cv2.dilate(core.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0) & ~core
-    H, W_ = g.shape
-    if by == 0: ring[0, :] = False
-    if bx == 0: ring[:, 0] = False
-    if by + bh >= H: ring[-1, :] = False
-    if bx + bw >= W_: ring[:, -1] = False
-    if ring.sum() < 20:
-        return None
-    if float((gw[ring] < WHITE_TH).mean()) < BUBBLE_ENCLOSE_MIN:
-        return None
-    if charmask is not None:
-        # ★ 語意判準：「被墨線封住」臉也符合（髮際線/下巴線）——單靠幾何會把臉當泡填黑
-        # （實測 demo03 臉 0→94%、demo05 Q版臉 0→87%）。核心大半是人物 ⇒ 不是泡。
-        sub_cm = charmask[by:by + bh, bx:bx + bw]
-        if float(sub_cm[core].mean()) > BUBBLE_ENCLOSE_CHAR_MAX:
-            return None
-    return core
-
-
-_LOCAL_STD_CACHE = [None]
-
-
 def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids, charmask=None):
     """氣泡內部遮罩（修法1）：每文字區 bbox+BUBBLE_PAD 窗內，找「貼著（外擴後）
     文字筆畫」的白色連通元件，通過守門則整顆併入（不裁窗 ⇒ 無截斷方塊，
@@ -734,7 +415,6 @@ def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids, charmask=None):
       不在 excluded_ids（留白/格內白元件）
     """
     H, W = g.shape
-    _LOCAL_STD_CACHE[0] = local_std(g) if BUBBLE_QUIET > 0 else None
     seg_u8 = seg.astype(np.uint8) * 255
     seg_dil = cv2.dilate(seg_u8, np.ones((9, 9), np.uint8))  # 筆畫外擴→碰得到氣泡白底
     bubble = np.zeros((H, W), bool)
@@ -761,18 +441,11 @@ def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids, charmask=None):
             if (i in merged or int(i) in rejected) and i not in excluded_ids:
                 continue
             a = int(stats[i, cv2.CC_STAT_AREA])
-            max_frac = BUBBLE_MAX_OVERRIDE if BUBBLE_MAX_OVERRIDE > 0 else BUBBLE_COMP_MAX_FRAC
-            if a > max_frac * g.size or a > BUBBLE_LOCAL_K * win_area:
+            if a > BUBBLE_COMP_MAX_FRAC * g.size or a > BUBBLE_LOCAL_K * win_area:
                 rejected.add(int(i))
                 continue
             if i in excluded_ids:
-                # 封閉泡救回（見 BUBBLE_ENCLOSE_MIN）：留白/格內白元件裡的「被泡框封住的字白」。
-                # ⚠️ 不進 merged/rejected：留白是一整塊元件、裡面可能有很多顆泡，每個字區各自判。
-                core = _enclosed_bubble_core(g, lab, stats, i, (x0, y0, x1, y1), charmask)
-                if core is not None:
-                    bx, by, bw, bh = stats[i, :4]
-                    bubble[by:by + bh, bx:bx + bw] |= core
-                continue
+                continue                    # 留白/格內白元件不當泡（字交偽泡貼身填色）
             # 安全策略：泡元件不得遠大於它的字（真泡字塞 30–50%＝比 2–3.5；「字壓在臉頰/手上」
             # 的元件是整片皮膚白、比 10+）。超過 → 不當泡，字交偽泡貼身袖套。
             # ⚠️ 分母用**字框長邊平方**不是字框面積：單行直排的字框只有一行寬（ch34_006「その通り
@@ -798,30 +471,6 @@ def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids, charmask=None):
                 if sx1 > sx0 and sy1 > sy0:
                     seed[sy0:sy1, sx0:sx1] = True
                 core = broad_core_fill(comp, seed & comp, neck_r=BUBBLE_NECK_R, recover_r=BUBBLE_NECK_R)
-                if BUBBLE_QUIET > 0 and core.any():
-                    # ★ 撕裂修正：泡的白常與格內地板/牆面同一個白元件，切頸切不開、面積比擋不住
-                    # （比值只有 1.12）。用**局部 std** 把泡內部（空白、std 低）與畫面（有紋路、
-                    # std 高）切開：只保留 std 低的部分，再從字種子重新取連通塊。
-                    quiet = _LOCAL_STD_CACHE[0] < BUBBLE_QUIET
-                    kept = core & quiet[by:by + bh, bx:bx + bw]
-                    nq, lq = cv2.connectedComponents(kept.astype(np.uint8), 8)
-                    ids_q = np.unique(lq[seed & kept])
-                    ids_q = ids_q[ids_q > 0]
-                    if ids_q.size:
-                        core = np.isin(lq, ids_q)
-                if BUBBLE_REACH > 0 and core.any():
-                    # ★ 撕裂修正（審查員 2026-09-17）：泡的白常與**格內地板/牆面**同一個白元件
-                    # （ch34_010 comp5＝泡+地板，3.46% 頁），切頸切不開（要 neck 40 才行，而那時泡
-                    # 自己也被切掉六成）⇒ 泡遮罩溢出到地板、整片填黑，邊界呈波浪狀＝畫面被撕掉一塊。
-                    # 泡是**承載字的容器**、不會離字很遠 ⇒ 用字框尺度限制泡的空間範圍。
-                    reach = int(BUBBLE_REACH * np.hypot(x1 - x0, y1 - y0))
-                    kr = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (reach * 2 + 1,) * 2)
-                    near = np.zeros_like(comp)
-                    sy0, sy1 = max(0, y0 - by), min(bh, y1 - by)
-                    sx0, sx1 = max(0, x0 - bx), min(bw, x1 - bx)
-                    if sy1 > sy0 and sx1 > sx0:
-                        near[sy0:sy1, sx0:sx1] = True
-                        core &= cv2.dilate(near.astype(np.uint8), kr) > 0
                 if not core.any():
                     rejected.add(int(i))
                     continue
@@ -839,7 +488,7 @@ def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids, charmask=None):
     return bubble, merged, rejected, cored
 
 
-# ── 修法4：純白背景填黑＋前景白描邊（貼紙式）────────────────────────
+# ── 貼紙式背景：純白背景填黑＋前景白描邊 ────────────────────────────
 
 def _comp_window(g, lab, stats, i, margin):
     """元件 bbox 外擴 margin 的工作窗：回傳 (x0,y0,x1,y1, sub_g, comp_bool)。"""
@@ -1020,7 +669,7 @@ def sticker_plan(g, img_bgr, lab, stats, gutter_ids, panel_ids, frameless, regio
         hug = {}
         min_area = GUTTER_MIN_AREA_FRAC * g.size
         listed = gutter_ids | panel_ids
-        for i in (range(1, stats.shape[0]) if EXP_HUG else ()):
+        for i in range(1, stats.shape[0]):
             if i in listed or stats[i, cv2.CC_STAT_AREA] < min_area:
                 continue
             x, y, w_, h_ = (stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP],
@@ -1062,7 +711,7 @@ def sticker_plan(g, img_bgr, lab, stats, gutter_ids, panel_ids, frameless, regio
                 promoted.add(i)
         else:
             textcov_ok = (met["textCov"] <= STICKER_TEXT_MAX
-                          or (EXP_TEXTCOV_OFF and met["areaFrac"] >= 0.02))
+                          or met["areaFrac"] >= 0.02)
             eaten_mid_ok = (met["eatenFrac"] <= STICKER_EATEN_MAX
                             or met["textOn"] >= STICKER_TEXT_BG_MIN)
             ok = (STICKER_FIG_MIN <= met["figFrac"] <= STICKER_FIG_MAX
@@ -1070,10 +719,10 @@ def sticker_plan(g, img_bgr, lab, stats, gutter_ids, panel_ids, frameless, regio
                   and met["chroma"] <= STICKER_CHROMA_MAX
                   and textcov_ok
                   and met["eatenFrac"] <= STICKER_EATEN_HARD
-                  and (eaten_mid_ok or EXP_PANEL_CORE)
+
                   and (met["areaFrac"] >= STICKER_SMALL_AREA
                        or met["textOn"] >= STICKER_TEXT_BG_MIN))
-            if ok and EXP_PANEL_CORE and not eaten_mid_ok and not frameless and i in panel_ids:
+            if ok and not eaten_mid_ok and not frameless and i in panel_ids:
                 # E1：中段 eaten 的 panel 白改走核心填色（格框種子、切窄頸）+ 區域級保護，不整顆拒
                 promoted.add(i)
             if ok and i in hug:
@@ -1085,7 +734,7 @@ def sticker_plan(g, img_bgr, lab, stats, gutter_ids, panel_ids, frameless, regio
         audit.append(met)
         if ok:
             accept.add(i)
-            if SAFE_STICKER and not frameless:
+            if not frameless:
                 # 安全策略：panel 白也走核心填色（格框種子、切窄頸、厚墨灰暈），不整顆填。
                 # 守護框歸因：貼紙單獨 12 框違規、7 是白髮＝整顆填把連進背景的髮絲白吃掉。
                 promoted.add(i)
@@ -1131,18 +780,6 @@ def geodesic_grow(seed, within, iters, step=5):
     return cur > 0
 
 
-def local_std(g, win=31):
-    """局部亮度標準差（win×win）。借鏡翻譯引擎 `parity/auto_diag.py` 的 `is_bubble(mean,std)`
-    ——它用**整個文字區**的 std 判「泡 vs 壓畫面」（std<24 且夠白＝泡）。這裡改成**逐像素的局部
-    std**，用途不同：判斷「這個白像素屬於泡的內部，還是屬於畫面」。
-    實測 ch34_010 的 comp5（泡+地板合體）：全域 std 泡 1.1 / 地板 1.7（**分不開**，兩者都是純白），
-    但局部 std 泡 **3.3** / 地板 **24.0**（分得開）——因為地板附近有紋路與人物的腳，泡內部是空白。
-    """
-    lum = g.astype(np.float32)
-    mu = cv2.blur(lum, (win, win))
-    return np.sqrt(np.maximum(0.0, cv2.blur(lum * lum, (win, win)) - mu * mu))
-
-
 def broad_core_fill(comp, seeds, neck_r=CORE_NECK_R, recover_r=CORE_RECOVER_R):
     """批1 核心填色：comp（白元件）先開運算切窄頸 → 只留寬闊區；由 seeds 所在的
     寬闊連通塊出發（臉/白衣經細縫連入背景 → 在頸口被切開、到不了）；最後往墨線邊
@@ -1160,7 +797,7 @@ def broad_core_fill(comp, seeds, neck_r=CORE_NECK_R, recover_r=CORE_RECOVER_R):
 
 
 def paint_sticker(out, g, lab, stats, accept, bubble, core_ids=(), frame=None, seg=None,
-                  charmask=None, veto=None):
+                  charmask=None):
     """修法4 合成：W 填深、前景描白邊（dilate(F, r) ∩ W）、W 內孤立小噪點吞掉、
     eaten 聚團區域級保護（不填黑、原樣留 D2）。
 
@@ -1206,17 +843,10 @@ def paint_sticker(out, g, lab, stats, accept, bubble, core_ids=(), frame=None, s
                 sub_seg = seg[y0:y1, x0:x1] if seg is not None else None
                 strict = (fill & (geo <= GEO_RATIO_MAX * euc + GEO_SLACK)
                           & ~thick_ink_aura(sub, seg=sub_seg))   # 臉旁（髮團/深色特徵周圍）的白不填
-                if CORE_MASK_RELEASE and charmask is not None:
-                    guard = charmask[y0:y1, x0:x1]
-                    if veto is not None:
-                        guard = guard | veto[y0:y1, x0:x1]
-                    if CORE_RELEASE_PAD > 0:
-                        kg = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
-                                                       (CORE_RELEASE_PAD * 2 + 1,) * 2)
-                        guard = cv2.dilate(guard.astype(np.uint8), kg) > 0
-                    fill = strict | (fill & ~guard)   # 見 CORE_MASK_RELEASE：非人物的核心區照填
-                else:
-                    fill = strict
+                kg = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                               (CORE_RELEASE_PAD * 2 + 1,) * 2)
+                guard = cv2.dilate(charmask[y0:y1, x0:x1].astype(np.uint8), kg) > 0
+                fill = strict | (fill & ~guard)   # 見 CORE_RELEASE_PAD：非人物的核心區照填
             if not fill.any():
                 continue
         else:
@@ -1237,57 +867,22 @@ def paint_sticker(out, g, lab, stats, accept, bubble, core_ids=(), frame=None, s
     return out
 
 
-# ── 合成（畫面 D2 / 留白 / 氣泡）────────────────────────────────────
-
-def lut_rolloff(floor=DIM_FLOOR, ceil=DIM_CEIL, gpow=ROLLOFF_G):
-    """高光滾降 LUT：y = floor + (ceil-floor)*x^g。嚴格單調 ⇒ 保序、零負片感；
-    亮部（紙白）壓得重、中暗部（網點/陰影）對比留得比線性多。"""
-    x = np.arange(256, dtype=np.float32) / 255.0
-    return np.clip(floor + (ceil - floor) * np.power(x, gpow), 0, 255).astype(np.uint8)
+# ── 合成：場景曲線／留白／貼紙／氣泡／人物還原 ──────────────────────
 
 
-# ── 畫面曲線變體（2026-08-25 起：「只換白、不抬黑」實驗，NIGHTREAD_CURVE 選）──
+# ── 場景曲線 ────────────────────────────────────────────────────────
 # 使用者對 D2 的回饋＝「說不出的怪」：floor=30 全域抬黑 + g=0.55 凹曲線把暗部抬得特別兇
 # （原墨 26 → 61），整頁發灰=「濁」。以下變體共同原則：黑保持黑（或近黑）、白仍壓 140，
 # 動態範圍 110 → ~140。全部嚴格單調（保序鐵則不動）。
-KNEE_X = 64        # knee 變體：此值以下完全保真（墨線原樣）
-KNEE_END_SLOPE = 0.15  # 尾端斜率（紙白附近壓平）
 
-def lut_linear(floor=0, ceil=DIM_CEIL):
+def lut_linear(floor=SCENE_FLOOR, ceil=DIM_CEIL):
     """全線性：y = floor + (ceil-floor)·x/255。黑→floor、白→ceil，相對關係完全保留。"""
     x = np.arange(256, dtype=np.float32) / 255.0
     return np.clip(floor + (ceil - floor) * x, 0, 255).astype(np.uint8)
 
 
-def lut_knee(knee=KNEE_X, ceil=DIM_CEIL, end_slope=KNEE_END_SLOPE):
-    """暗部保真 + 高光滾降：x ≤ knee 恆等（墨線一階不動＝對比最大化）；knee 以上
-    monotone cubic Hermite (knee,knee,斜率1) → (255,ceil,斜率 end_slope)。
-    單調性（Fritsch–Carlson）：割線 (ceil-knee)/(255-knee)=0.398，兩端斜率 1、0.15
-    皆 ≤ 3×割線 ⇒ 全段單調。網點是抖點非平滑漸層，中段壓縮不致 banding。"""
-    x = np.arange(256, dtype=np.float32)
-    y = x.copy()
-    t = np.clip((x - knee) / (255.0 - knee), 0.0, 1.0)
-    h00 = 2 * t**3 - 3 * t**2 + 1
-    h10 = t**3 - 2 * t**2 + t
-    h01 = -2 * t**3 + 3 * t**2
-    h11 = t**3 - t**2
-    span = 255.0 - knee
-    hy = h00 * knee + h10 * span * 1.0 + h01 * ceil + h11 * span * end_slope
-    y = np.where(x > knee, hy, y)
-    return np.clip(y, 0, 255).astype(np.uint8)
-
-
-SCENE_CURVES = {
-    "d2":   lambda: lut_rolloff(),
-    "lin":  lambda: lut_linear(0),
-    "lin8": lambda: lut_linear(8),   # 極暗保護：OLED 黑碎顧慮的最小抬升（8 遠小於舊 30）
-    "knee": lambda: lut_knee(),
-}
-SCENE_CURVE = os.environ.get("NIGHTREAD_CURVE", "lin8")  # 2026-08-25 使用者目檢拍板 lin 系（黑實、對比大）
-
-
 def lut_scene():
-    return SCENE_CURVES[SCENE_CURVE]()
+    return lut_linear(SCENE_FLOOR)
 
 
 def ink_line_mask(g, seg=None, bh_ksize=7, bh_gain=45.0, dark_lo=40, dark_hi=185):
@@ -1324,65 +919,8 @@ def ink_alpha(g, gain):
 
 
 def paint_gutter(out, g, gutter, frame=None, bubble=None):
-    """留白填深 + 格框描亮 + 人物灰暈。
-
-    灰暈（批1.5，ch34_010 左下案）：出血式無框特寫的人物白衣與頁白連續且輪廓開放 →
-    修法3 正確判 gutter、但整顆塗掉會吞掉衣料/手。像素層無界 ⇒ 安全解＝**避開大型
-    人物墨結構周圍 AURA_R 的白不填**（格線/氣泡輪廓排除不算人物）。代價＝人物旁一圈
-    灰暈（失敗方向＝不夠暗，合紅線）；封閉輪廓的一般留白離人物墨遠、不受影響。"""
+    """留白（頁邊距／格溝）填深 + 邊界描亮。"""
     fill = gutter.copy()
-    if frame is not None and GUTTER_FRAME_CUT:
-        # ★ 撕裂修正（審查員 2026-09-17：平坦淺色背景被挖出硬邊黑洞）：格內的地板/牆面白常與頁面
-        # 留白**同一個連通元件**（格框有缺口），於是被當成留白一起填黑，而邊界就是「白色連通區的
-        # 任意輪廓」⇒ 不跟畫面走、呈波浪/階梯狀，看起來像畫面被撕掉一塊。
-        # 修法：用格框線把留白切開，**只填仍能碰到頁邊的部分**（那才是真留白）。
-        H_, W_ = g.shape
-        cut = fill & ~(cv2.dilate(frame.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0)
-        nn_, lb_, st_, _ = cv2.connectedComponentsWithStats(cut.astype(np.uint8), 8)
-        keep = np.zeros_like(fill)
-        for i in range(1, nn_):
-            x, y, w_, h_ = st_[i, :4]
-            if x <= 2 or y <= 2 or x + w_ >= W_ - 2 or y + h_ >= H_ - 2:
-                keep |= lb_ == i
-        fill = keep | (fill & (cv2.dilate(frame.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0))
-    if frame is not None:
-        ink = (g < WHITE_TH).astype(np.uint8)
-        k7 = np.ones((15, 15), np.uint8)
-        excl = cv2.dilate(frame.astype(np.uint8), k7) > 0
-        if bubble is not None:
-            excl |= cv2.dilate(bubble.astype(np.uint8), k7) > 0
-        ink[excl] = 0
-        n, lb, st, _ = cv2.connectedComponentsWithStats(ink, 8)
-        big = np.zeros(n, bool)
-        if n > 1:
-            big[1:] = st[1:, cv2.CC_STAT_AREA] >= AURA_MIN_INK_AREA
-        figm = big[lb]
-        if figm.any() and AURA_MODE == "glow":
-            # 發光式灰暈：距離場漸層——人物輪廓旁保留場景調、隨距離淡入 BG。距離場天然
-            # 跟隨輪廓（等距線＝輪廓偏移）⇒ 無鋸齒；不需豁免帶（b18 的代價在漸層下只剩
-            # 一圈柔光）。fill 本身不縮，改在最後把 gutter 區的值做 lerp。
-            dist = cv2.distanceTransform((~figm).astype(np.uint8), cv2.DIST_L2, 5)
-            alpha = np.clip((dist - AURA_GLOW_R0) / float(AURA_GLOW_R1 - AURA_GLOW_R0), 0.0, 1.0)
-            scene_g = out.copy()                     # 進來時＝場景曲線後的值
-            out_f = out
-            m = fill
-            out_f[m] = scene_g[m] * (1.0 - alpha[m]) + np.float32(BG) * alpha[m]
-            k = np.ones((STROKE * 2 + 1,) * 2, np.uint8)
-            band = (cv2.dilate(fill.astype(np.uint8), k) > 0) & ~fill
-            a2 = ink_alpha(g, 1.6)
-            out_f[band] = np.maximum(out_f[band], BG + a2[band] * (INK - BG))
-            return out_f
-        if figm.any():
-            ka = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (AURA_R * 2 + 1,) * 2)
-            aura = cv2.dilate(figm.astype(np.uint8), ka) > 0
-            # 灰暈只管「深入無框區」：距格線/頁邊近的留白＝正常格間留白，豁免（否則
-            # 出血人物碰個邊就吃掉整條 margin，全站 +5~10pt 亮區，b18 實測教訓）
-            fd = cv2.distanceTransform((frame == 0).astype(np.uint8), cv2.DIST_L2, 3)
-            H2, W2 = g.shape
-            yy, xx = np.mgrid[0:H2, 0:W2]
-            bd = np.minimum(np.minimum(yy, H2 - 1 - yy), np.minimum(xx, W2 - 1 - xx))
-            aura &= (fd > AURA_FRAME_EXEMPT) & (bd > AURA_BORDER_EXEMPT)
-            fill = fill & ~aura
     out[fill] = BG
     k = np.ones((STROKE * 2 + 1,) * 2, np.uint8)
     band = (cv2.dilate(fill.astype(np.uint8), k) > 0) & ~fill
@@ -1494,26 +1032,27 @@ def harmonize_enclosed_whites(out, g, lab, stats, skip_mask):
 
 
 def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
-            core_ids=(), frame=None, regions=None, charmask=None, veto=None, precise=None, bubble_rest=None, lost_bubble=None):
-    """整頁合成：D2 畫面 →（有框頁才）留白填深 → 修法4 貼紙式背景 → 氣泡重繪。"""
+            core_ids=(), frame=None, regions=None, charmask=None, char_raw=None,
+            bubble_rest=None, lost_bubble=None):
+    """整頁合成：場景曲線 →（有框頁才）留白填深 → 貼紙式背景 → 氣泡重繪 → 人物還原。"""
     out = scene_final(g, seg).astype(np.float32)
-    scene_keep = out.copy() if charmask is not None else None   # 人物區最終一律還原成場景調
-    if not EXP_GUTTER:
-        pass
-    elif not frameless and not SAFE_GUTTER:             # 修法2：無框頁背景不填深
-        out = paint_gutter(out, g, gutter, frame=frame, bubble=bubble)
+    scene_keep = out.copy()                     # 人物區最終一律還原成場景調
+    if frameless and gutter.any():
+        # 無框頁只填「真頁邊帶」：留白元件深入頁內的最大距離 ≤ 短邊×FRAMELESS_MARGIN_DEPTH 才是
+        # 貼邊薄帶（開放背景會深入頁心、不符）。
+        H2, W2 = g.shape
+        yy, xx = np.mgrid[0:H2, 0:W2]
+        bd = np.minimum(np.minimum(yy, H2 - 1 - yy), np.minimum(xx, W2 - 1 - xx))
+        n_, lb_, st_, _ = cv2.connectedComponentsWithStats(gutter.astype(np.uint8), 8)
+        keep = np.zeros_like(gutter)
+        lim = FRAMELESS_MARGIN_DEPTH * min(H2, W2)
+        for i in range(1, n_):
+            m = lb_ == i
+            if bd[m].max() <= lim:
+                keep |= m
+        if keep.any():
+            out = paint_gutter(out, g, keep, frame=frame, bubble=bubble)
     elif not frameless and gutter.any():
-        if SAFE_GUTTER_FAT > 0:
-            # 肥留白不填：每個留白元件量最大內切半徑（距離變換最大值）；真格間/頁邊薄帶 ≤ ~30px，
-            # 含出血人物臉/外套的元件是肥塊 ⇒ 整顆不填（all-or-nothing，避免只填一圈黑邊仍毀臉）。
-            n_, lb_, st_, _ = cv2.connectedComponentsWithStats(gutter.astype(np.uint8), 8)
-            dt = cv2.distanceTransform(gutter.astype(np.uint8), cv2.DIST_L2, 5)
-            keep = np.zeros_like(gutter)
-            for i in range(1, n_):
-                m = lb_ == i
-                if dt[m].max() <= SAFE_GUTTER_FAT:
-                    keep |= m
-            gutter = keep
         # 安全策略：留白元件「深入格內」的部分不填。出血特寫的臉/白衣與頁白同元件、只有細線稿、
         # 沒有墨團可觸發灰暈（demo01 臉頰 98% 黑、ch34_015 肩、demo02 貼頁緣的臉皆此型）。
         # 頁邊帶（距頁邊/格線 ≤ 短邊×SAFE_GUTTER_DEPTH）照填；更深處留灰＝失敗方向安全。
@@ -1542,23 +1081,15 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
                 keep |= m
         if keep.any():
             out = paint_gutter(out, g, keep, frame=frame if frame is not None else np.zeros_like(gutter, np.uint8), bubble=bubble)
-    if sticker and EXP_STICKER:                         # 修法4：純白背景填黑＋前景白描邊
+    if sticker:                                         # 貼紙式背景：純白背景填黑＋前景白描邊
         out = paint_sticker(out, g, lab, stats, sticker, bubble,
-                            core_ids=core_ids, frame=frame, seg=seg,
-                            charmask=charmask, veto=veto)
-    if EXP_BUBBLE:
-        out = paint_bubbles(out, g, bubble, seg)
-    pb = np.zeros_like(bubble)
-    if regions is not None and EXP_PSEUDO:              # 偽泡：開口泡/字壓背景/字壓留白救回
-        pb = build_pseudo_bubbles(g, regions, bubble, seg=seg)
-        if pb.any():
-            out = paint_bubbles(out, g, pb, seg)
-        skip = bubble | pb | gutter
-    else:
-        skip = bubble | gutter
-    if lab is not None and EXP_HARMONIZE:               # 批1.5：浮在黑裡的空白人頭一致化
-        out = harmonize_enclosed_whites(out, g, lab, stats, skip)
-    if lost_bubble is not None and TEXT_TOPMOST and lost_bubble.any():
+                            core_ids=core_ids, frame=frame, seg=seg, charmask=charmask)
+    out = paint_bubbles(out, g, bubble, seg)
+    pb = build_pseudo_bubbles(g, regions, bubble, seg=seg)   # 偽泡：開口泡/字壓背景/字壓留白救回
+    if pb.any():
+        out = paint_bubbles(out, g, pb, seg)
+    out = harmonize_enclosed_whites(out, g, lab, stats, bubble | pb | gutter)
+    if lost_bubble.any():
         txt = (cv2.dilate((seg & lost_bubble).astype(np.uint8),
                           np.ones((TEXT_TOP_PAD * 2 + 1,) * 2, np.uint8)) > 0) & lost_bubble
         if txt.any():
@@ -1567,100 +1098,43 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
             if TEXT_KNEE > 0:
                 a3 = np.clip((a3 - TEXT_KNEE) / (1.0 - TEXT_KNEE), 0.0, 1.0)
             out[txt] = np.maximum(out[txt], BG + a3[txt] * (INK - BG))
-    if NOISY_DIM > 0 and _NOISY_WHITE[0] is not None and _NOISY_WHITE[0].any():
-        # 畫面的白壓暗：lerp 到 BG，不是硬填 ⇒ 紋路與線稿都保留、邊界不會憑空產生（無撕裂）。
-        nw = _NOISY_WHITE[0] & ~bubble
-        if charmask is not None:
-            nw = nw & ~charmask          # 人物的白維持場景調
-        wgt = (_NOISY_W[0] * NOISY_DIM) if _NOISY_W[0] is not None else NOISY_DIM
-        wn = wgt[nw] if isinstance(wgt, np.ndarray) else wgt
-        out[nw] = out[nw] * (1.0 - wn) + BG * wn
     if bubble_rest is not None and bubble_rest.any():
         out[bubble_rest] = BG
         kk = np.ones((STROKE * 2 + 1,) * 2, np.uint8)
         band = (cv2.dilate(bubble_rest.astype(np.uint8), kk) > 0) & ~bubble_rest
         a2 = ink_alpha(g, 1.6)
         out[band] = np.maximum(out[band], BG + a2[band] * (INK - BG))
-    if charmask is not None and CHAR_FILL:
-        # ★ 未列管白元件補填（遮罩驅動）：使用者看到的「角色外圍白邊」經歸戶後，**一半是沒有任何
-        # 機制認領的白元件**（封閉背景口袋：被格框與角色夾住，既不是留白也不是格內白也不進貼紙）
-        # ——那是舊幾何分類法的結構性漏洞。有語意遮罩後可以判定：**沒被認領、又不是人物 ⇒ 背景**。
-        # ⚠️ 只補「整塊未列管」的元件，**不碰邊界行為**。全面「遮罩外的白一律填」已實測否決：
-        # 外觀正是想要的（白邊全消、亮區 40.5→27.5%）但違規 24→147 且**分散在 11 頁**
-        # ＝遮罩夠準到「保護」、不夠準到「驅動填色」。**veto 就是為此而生**（見 load_veto_mask）。
-        bg = (g >= WHITE_TH) & ~charmask & ~bubble & ~pb
-        if veto is not None:
-            bg &= ~veto                      # 另一個模型說「這框裡有人、但遮罩沒抓到」⇒ 不填
-        if bg.any():
-            out[bg] = BG
-            kk = np.ones((STROKE * 2 + 1,) * 2, np.uint8)
-            band = (cv2.dilate(bg.astype(np.uint8), kk) > 0) & ~bg
-            a2 = ink_alpha(g, 1.6)
-            out[band] = np.maximum(out[band], BG + a2[band] * (INK - BG))
-    if charmask is not None:
-        # 語意禁填：人物區（含描邊外擴）一律還原場景調。放最後＝不必逐機制改，任何新填色
-        # 機制自動受保護。**只扣氣泡/偽泡**（人物身上的對話框仍該深底亮字）——
-        # ⚠️ 不能扣 gutter：白衣被塗黑正是 gutter 幹的（出血人物與頁白同元件），
-        # 扣了等於把最大宗的違規排除在保護外（實測 55→52 框、几乎沒救到）。
-        restore = charmask.copy()
-        # ★ 真氣泡永遠贏過人物保護：氣泡是**畫在畫面之上**的圖層，它遮住後面的人物——該處根本看不到
-        # 人物，把它還原成「人物的場景調」等於讓對話框變成淺色底（使用者 2026-09-15 回報）。
-        # CHAR_OVER_BUBBLE 只該管**偽泡**（字直接寫在畫面上、人物在字周圍仍看得見）。
-        restore &= ~bubble
-        if not CHAR_OVER_BUBBLE:
-            if regions is not None and EXP_PSEUDO and pb.any():
-                restore &= ~pb
-        elif TEXT_BACKING_R > 0:
-            if precise is not None and pb.any():
-                restore &= ~(pb & ~precise)      # 精準遮罩沒蓋到 ⇒ 偽泡贏（見 CHARMASK_PRECISE_DIR）
-            # 人物優先，但字貼身暗襯保留（見 TEXT_BACKING_R）
-            text_on_char = pb & charmask & seg
-            if text_on_char.any():
-                kb = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (TEXT_BACKING_R * 2 + 1,) * 2)
-                restore &= ~(cv2.dilate(text_on_char.astype(np.uint8), kb) > 0)
-        if TEXT_ALWAYS_LIT > 0:
-            # ★★ 圖層優先權完整版（審查員 2026-09-17 抓到 demo04 的「空心鬼影字」）：
-            # 壓在畫面上的旁白常是**黑字＋白描邊**，DBNet 的 seg 涵蓋整塊（原圖均值 202）。
-            # 若該處只有一半落在泡遮罩內，另一半的字就不會被 paint_bubbles 畫亮、底卻被填深
-            # ⇒ 灰描邊浮在黑底上＝空心鬼影字（實測字 67／底 27–53，其中一區對比 **−11**）。
-            # 修法＝**字筆畫永遠畫亮**，不管在不在泡內：凡落在已填深區（out < 門檻）的字筆畫，
-            # 一律套泡內同一條亮字曲線。這是「字永遠在最上層」的完整版。
-            lit = seg & (out < TEXT_ALWAYS_LIT)
-            if regions is not None and TEXT_REGION_INK > 0:
-                # ★ 真病根（2026-09-17 追查）：偵測器的 seg **漏抓了 25% 的字筆畫**
-                # （demo04 那段旁白：黑筆畫 15543px，seg 只涵蓋 75%）。被涵蓋的成品是 239（正確），
-                # 漏掉的是 41 —— **比底色 56 還暗** ⇒ 空心鬼影字。
-                # 修法：在**文字區 bbox 內**，把「原圖夠黑 ∧ 成品已填深」的像素也一律畫亮。
-                # 限制在字框內＝不會把背景線條畫亮（那是「黑底亮白碎點」的來源，見審查員報告）。
-                rmask = np.zeros_like(lit)
-                for r_ in regions:
-                    rx0, ry0, rx1, ry1 = r_["bbox"]
-                    rx0, ry0 = max(0, rx0), max(0, ry0)
-                    rx1, ry1 = min(lit.shape[1], rx1), min(lit.shape[0], ry1)
-                    if rx1 > rx0 and ry1 > ry0:
-                        rmask[ry0:ry1, rx0:rx1] = True
-                lit |= rmask & (g < TEXT_REGION_INK) & (out < TEXT_ALWAYS_LIT)
-            if lit.any():
-                a4 = ink_alpha(g, TEXT_GAMMA)
-                if TEXT_KNEE > 0:
-                    a4 = np.clip((a4 - TEXT_KNEE) / (1.0 - TEXT_KNEE), 0.0, 1.0)
-                out[lit] = np.maximum(out[lit], BG + a4[lit] * (INK - BG))
-        if lost_bubble is not None and TEXT_TOPMOST and lost_bubble.any():
-            # ★ 字永遠在最上層（使用者 2026-09-17 的圖層優先權原則）：泡遮罩被人物扣掉後，那塊
-            # 區域的字失去「泡內亮字」待遇 ⇒ 暗字疊在灰底上，實測對比 **-6（字比底還暗、讀不出來）**。
-            # 修法不是讓整顆泡贏（會把臉填黑、弄壞 17 框），而是**只讓字本身贏**：被扣掉的泡區裡，
-            # 字筆畫及其貼身帶不還原 ⇒ 維持深底亮字，人物的其餘部分照樣受保護。
-            kt2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (TEXT_TOP_PAD * 2 + 1,) * 2)
-            keep_txt = (cv2.dilate((seg & lost_bubble).astype(np.uint8), kt2) > 0) & lost_bubble
-            restore &= ~keep_txt
-        if EDGE_FEATHER > 0:
-            # 邊界抗鋸齒（使用者 2026-09-17：黑白交界有明顯鋸齒感）：遮罩是二值的、又是從 640
-            # 解析度放大來的 ⇒ 邊界呈階梯狀。用**小半徑**的高斯把還原遮罩軟化成 0..1 alpha 做混合，
-            # 只在 1–2px 內過渡 ⇒ 消鋸齒而不產生原作沒有的漸層（那是 glow 落選的理由，此處不同）。
-            a_e = cv2.GaussianBlur(restore.astype(np.float32), (0, 0), EDGE_FEATHER)
-            out = out * (1.0 - a_e) + scene_keep * a_e
-        else:
-            out[restore] = scene_keep[restore]
+    # 語意禁填：人物區（含描邊外擴）一律還原場景調。放最後＝不必逐機制改，任何新填色
+    # 機制自動受保護。**只扣氣泡/偽泡**（人物身上的對話框仍該深底亮字）——
+    # ⚠️ 不能扣 gutter：白衣被塗黑正是 gutter 幹的（出血人物與頁白同元件），
+    # 扣了等於把最大宗的違規排除在保護外（實測 55→52 框、几乎沒救到）。
+    restore = charmask.copy()
+    # ★ 真氣泡永遠贏過人物保護：氣泡是**畫在畫面之上**的圖層，它遮住後面的人物——該處根本看不到
+    # 人物，把它還原成「人物的場景調」等於讓對話框變成淺色底（使用者 2026-09-15 回報）。
+    # CHAR_OVER_BUBBLE 只該管**偽泡**（字直接寫在畫面上、人物在字周圍仍看得見）。
+    restore &= ~bubble
+    # ★ 收邊生長出來的邊緣不得壓過偽泡：restore 用的是**加工後**的遮罩（測地收邊 + 中值平滑
+    # 把邊界推到輪廓線上），偽泡內那些「模型原輸出沒蓋到、是加工長出來的」像素屬於畫面不屬於
+    # 人物 ⇒ 偽泡贏。判準用未加工的 char_raw。
+    if pb.any():
+        restore &= ~(pb & ~char_raw)
+    # 偽泡（字直接寫在畫面上）則是人物優先，只保留字的貼身暗襯（見 TEXT_BACKING_R）
+    text_on_char = pb & charmask & seg
+    if text_on_char.any():
+        kb = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (TEXT_BACKING_R * 2 + 1,) * 2)
+        restore &= ~(cv2.dilate(text_on_char.astype(np.uint8), kb) > 0)
+    if lost_bubble.any():
+        # ★ 字永遠在最上層（使用者 2026-09-17 的圖層優先權原則）：泡遮罩被人物扣掉後，那塊
+        # 區域的字失去「泡內亮字」待遇 ⇒ 暗字疊在灰底上，實測對比 **-6（字比底還暗、讀不出來）**。
+        # 修法不是讓整顆泡贏（會把臉填黑、弄壞 17 框），而是**只讓字本身贏**：被扣掉的泡區裡，
+        # 字筆畫及其貼身帶不還原 ⇒ 維持深底亮字，人物的其餘部分照樣受保護。
+        kt2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (TEXT_TOP_PAD * 2 + 1,) * 2)
+        keep_txt = (cv2.dilate((seg & lost_bubble).astype(np.uint8), kt2) > 0) & lost_bubble
+        restore &= ~keep_txt
+    # 邊界抗鋸齒：遮罩是二值的、又是從 640 解析度放大來的 ⇒ 邊界呈階梯狀。用小半徑高斯
+    # 把還原遮罩軟化成 0..1 alpha 做混合，只在 1–2px 內過渡。
+    a_e = cv2.GaussianBlur(restore.astype(np.float32), (0, 0), EDGE_FEATHER)
+    out = out * (1.0 - a_e) + scene_keep * a_e
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
@@ -1720,15 +1194,8 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000):
     lines, regions, seg = detect(img)
     frameless, hk, vk = page_is_frameless(g)
     lab, stats, gutter_ids, panel_ids = classify_white_components(g)
-    charmask = load_charmask(page_path, g.shape)
-    if charmask is not None:
-        charmask = trim_charmask(charmask, g)
-        if CHAR_SNAP > 0:
-            charmask = snap_charmask(charmask, g)
-        if REGION_SNAP_COVER > 0:
-            charmask = region_snap_charmask(charmask, g)
-        if MASK_SMOOTH > 0:
-            charmask = smooth_charmask(charmask, g)
+    char_raw = load_charmask(page_path, g.shape)      # 模型原輸出（未收邊、未平滑）
+    charmask = smooth_charmask(snap_charmask(char_raw, g), g)
     bubble, merged, rejected, cored = build_bubble_mask(
         g, regions, seg, lab, stats, gutter_ids | panel_ids, charmask=charmask)
     sticker, audit, promoted = sticker_plan(g, img, lab, stats, gutter_ids, panel_ids,
@@ -1739,8 +1206,8 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000):
     panel_scene = np.isin(lab, sorted(panel_show)) if panel_show else np.zeros((H, W), bool)
     sticker_mask = np.isin(lab, sorted(sticker)) if sticker else np.zeros((H, W), bool)
     lhm, lvm = frame_line_mask(g)
-    rest_ids = set(cored) | (set(promoted) if BUBBLE_REST_STICKER else set())
-    if rest_ids and BUBBLE_REST_FILL:
+    rest_ids = set(cored) | set(promoted)
+    if rest_ids:
         # 泡元件的**剩餘部分**（元件 − 核心）＝泡框外的背景白。它與泡是同一個白元件，核心填色只填
         # 了泡內部，剩下的既不是 gutter 也不是 panel（未列管）⇒ 沒有任何機制接手 ⇒ 維持場景灰 140，
         # 看起來就是「泡泡外面那一圈」（使用者 2026-09-15 兩次回報；實測泡外 6px 起原 255→成品 140）。
@@ -1751,148 +1218,70 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000):
         # 有語意遮罩後扣掉 charmask 即可，剩餘一律填深。
         # 扣人物遮罩（背景填色一律讓開人物）。
         rest = np.isin(lab, sorted(rest_ids)) & ~bubble
-        if REST_MIN_RADIUS > 0:
-            # 分「背景楔形」與「人物附屬白」靠**粗細**，不是靠貼不貼人物（實測貼不貼分不開：
-            # 鬍鬚縫隙跟頭上楔形一樣都在遮罩外、被輪廓線隔開，違規全跳到 52）。
-            # 背景楔形＝寬（最大內切半徑大）；鬍鬚/髮絲縫隙＝細。只填夠寬的塊。
-            nn_, lb_, st_, _ = cv2.connectedComponentsWithStats(rest.astype(np.uint8), 8)
-            dist = cv2.distanceTransform(rest.astype(np.uint8), cv2.DIST_L2, 5)
-            keep = np.zeros_like(rest)
-            for j in range(1, nn_):
-                if st_[j, cv2.CC_STAT_AREA] < REST_MIN_AREA * g.size:
-                    continue
-                blob = lb_ == j
-                if float(dist[blob].max()) >= REST_MIN_RADIUS:
-                    keep |= blob
-            rest = keep
-        elif REST_CHAR_TOUCH > 0 and charmask is not None:
-            # 距離限制（BUBBLE_REST_NEAR）太粗：救得到泡外那圈，救不到離泡遠的背景楔形
-            # （ch34_006 老人頭髮上方那塊「不知所謂的白」＝核心填色把窄楔形切掉、沒人補）。
-            # 改用語意判準：剩餘塊**貼著人物**＝人物的附屬白（鬍子/髮絲，貼紙保護的對象）⇒ 不填；
-            # **不貼人物**＝被輪廓線隔開的背景 ⇒ 填。兩者的差別正是「鬍子」與「頭上的背景」。
-            kt = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (REST_TOUCH_R * 2 + 1,) * 2)
-            near_char = cv2.dilate(charmask.astype(np.uint8), kt) > 0
-            nn_, lb_, st_, _ = cv2.connectedComponentsWithStats(rest.astype(np.uint8), 8)
-            keep = np.zeros_like(rest)
-            for j in range(1, nn_):
-                if st_[j, cv2.CC_STAT_AREA] < 200:
-                    continue
-                blob = lb_ == j
-                if float(near_char[blob].mean()) <= REST_CHAR_TOUCH:
-                    keep |= blob
-            rest = keep
-        elif BUBBLE_REST_NEAR > 0 and bubble.any():
+        if bubble.any():
             # ⚠️ 只填**泡框周圍**這一圈：貼紙的核心填色保護是為了留住「被吃的前景白」（白鬍老人的
             # 鬍子/髮絲），全部取消會把它們吃掉（實測違規 28→52）。使用者抱怨的是泡外那一圈，
             # 限制在泡附近即可兩全。
             kn = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (BUBBLE_REST_NEAR * 2 + 1,) * 2)
             rest &= cv2.dilate(bubble.astype(np.uint8), kn) > 0
-        if charmask is not None:
-            rest &= ~charmask
-        if REST_VETO:
-            # 遮罩漏抓 veto（同 load_veto_mask）：偵測器說框裡有人、分割遮罩卻沒抓到 ⇒ 該框禁填。
-            # 沒有它，開放剩餘填色會吃掉遠景小人物的手（demo02 一頁就 9 框，全是「手」）。
-            vt = load_veto_mask(page_path, g.shape, charmask)
-            if vt is not None:
-                rest &= ~vt
+        rest &= ~charmask           # 背景填色一律讓開人物
         bubble_rest = rest
     else:
         bubble_rest = None
-    bubble_before_trim = None
-    bubble_guard = charmask if BUBBLE_GUARD_FULL else load_precise_mask(page_path, g.shape)
-    if bubble_guard is None:
-        bubble_guard = charmask
-    if bubble_guard is not None and BUBBLE_CLEAN_WINS > 0:
-        # ★★ 圖層優先權的正確實作（使用者 2026-09-17：「要塗黑的泡直接全部塗黑，文字再補上去」）。
-        # 難點是分辨「真泡蓋住人物」與「字寫在臉上被誤判成泡」。判準＝**泡內部的非字內容**：
-        #   ・真泡是**空白容器**，裡面除了字什麼都沒有 ⇒ 填洞後的內部非字墨 0.0–0.3%
-        #   ・臉被誤判成泡：裡面有五官、陰影 ⇒ demo01 那張 2.7%、demo04 1.6%
-        # （正常泡 97 個的中位 0.0%、P90 0.7% ⇒ 門檻 1% 分得開。）
-        # 判定為真泡的：**整顆塗黑、不被人物遮罩扣**；判定為臉的：人物贏，照舊保護。
-        segd_c = cv2.dilate(seg.astype(np.uint8),
-                            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))) > 0
-        nb, lb_b, st_b, _ = cv2.connectedComponentsWithStats(bubble.astype(np.uint8), 8)
-        clean = np.zeros_like(bubble)
-        for i in range(1, nb):
-            a_b = int(st_b[i, cv2.CC_STAT_AREA])
-            if a_b < 4000:
-                continue
-            bx_, by_, bw_, bh_ = (int(st_b[i, 0]), int(st_b[i, 1]), int(st_b[i, 2]), int(st_b[i, 3]))
-            sy = slice(max(0, by_ - 2), by_ + bh_ + 2)
-            sx = slice(max(0, bx_ - 2), bx_ + bw_ + 2)
-            blob = lb_b[sy, sx] == i
-            hh, ww = blob.shape
-            ffm = np.zeros((hh + 2, ww + 2), np.uint8)
-            tmp = blob.astype(np.uint8).copy()
-            cv2.floodFill(tmp, ffm, (0, 0), 2)
-            holes = (tmp != 2) & ~blob & ~segd_c[sy, sx]
-            if float(holes.sum()) / a_b >= BUBBLE_CLEAN_WINS:
-                continue
-            # 保險②：**文字佔比**。真泡是容器，字只佔一部分（實測 8.7–50.7%）；
-            # 被誤判的白髮/白手區塊幾乎全是字筆畫本身（demo04 垂髮 94.7%、demo01 那些 99–100%），
-            # 因為 build_bubble_mask 最後會把字區內的筆畫一律併進泡。⇒ 文字佔比過高＝不是泡。
-            if float(seg[sy, sx][blob].mean()) > BUBBLE_CLEAN_TEXT_MAX:
-                continue
-            clean[sy, sx] |= blob
-        bubble_guard = bubble_guard & ~clean
-    if bubble_guard is not None and BUBBLE_FRAMED_WINS > 0:
-        # ★ 圖層優先權（使用者 2026-09-17）：漫畫疊法是 字/對話框 > 人物 > 背景。
-        # 但單純「泡贏」會弄壞 17 框（demo01 臉 0→98%）——因為泡遮罩會溢出：字寫在臉上時，
-        # 泡遮罩從字長到整片白皮膚。分辨的關鍵是**有沒有泡框**：
-        #   ・真泡（demo03 那顆橢圓）：核心邊界幾乎全是泡框墨線 ⇒ 泡蓋住人物是原作意圖 ⇒ 泡贏
-        #   ・字壓畫面（demo01 特寫臉）：邊界大半是白（沒有框）⇒ 那不是泡 ⇒ 人物贏
-        # 實測不用這道判準時，demo03 的泡被人物遮罩扣掉 **70.8%**、demo01 扣掉 52.7%
-        # ⇒ 泡底黑了但字不亮（使用者看到的現象）。
-        ink_b = (g < WHITE_TH)
-        nb, lb_b, st_b, _ = cv2.connectedComponentsWithStats(bubble.astype(np.uint8), 8)
-        framed = np.zeros_like(bubble)
-        k1 = np.ones((3, 3), np.uint8)
-        for i in range(1, nb):
-            if st_b[i, cv2.CC_STAT_AREA] < 400:
-                continue
-            blob = lb_b == i
-            ring = (cv2.dilate(blob.astype(np.uint8), k1) > 0) & ~blob
-            if ring.sum() >= 20 and float(ink_b[ring].mean()) >= BUBBLE_FRAMED_WINS:
-                framed |= blob
-        bubble_guard = bubble_guard & ~framed
-    if bubble_guard is not None and BUBBLE_NEAR_TEXT > 0:
-        # ★ 圖層優先權（使用者 2026-09-17）：漫畫的疊法是 字/對話框 > 人物 > 背景，所以泡蓋住人物
-        # 的地方該填深。但**泡遮罩會溢出**（泡白與臉白連通 ⇒ 從字長到整張臉，demo01 實測 98%），
-        # 單純「泡贏」會弄壞 17 框。分辨真泡與溢出用**離字的距離**：泡是為了承載字而存在，
-        # 泡內部離字近；溢出是從泡框缺口流出去的，離字遠。
-        # ⇒ 離字 ≤ BUBBLE_NEAR_TEXT 的泡區：**泡贏**（不被人物扣）；更遠的：人物贏（當溢出處理）。
-        kd = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (BUBBLE_NEAR_TEXT * 2 + 1,) * 2)
-        near_text = cv2.dilate(seg.astype(np.uint8), kd) > 0
-        bubble_guard = bubble_guard & ~near_text
-    if bubble_guard is not None and BUBBLE_TRIM_CHAR:
-        # 泡遮罩不得跨進人物：氣泡是**畫在人物之上**的圖層 ⇒ 泡內部不可能是人物；反過來，泡的白
-        # 元件常與人物白（髮/衣）連通（泡框有缺口、髮壓在泡邊），整顆填就把髮吃掉
-        # （demo04 第2格垂髮 0→75%）。
-        # ⚠️ 用**精準遮罩**（cseg∪yoloseg）扣、不用 combine：combine 含 isnet（會把整顆泡當人物）
-        # ⇒ 泡被挖成白泡。精準遮罩是實例分割、不會把泡判成人物。
-        # ⚠️ 只扣「從泡邊緣伸進來的人物」：遮罩誤蓋到泡中央時，粗暴地扣會把泡挖出洞＝白泡
-        # （實測白泡 21.9→29.4 萬 px）。判準＝被扣掉的連通塊有沒有碰到泡的外緣：碰到＝髮/衣從外面
-        # 連進來（扣），完全被泡包住＝遮罩誤判泡內部（還原）。
-        bubble_before_trim = bubble.copy()
-        removed = bubble & bubble_guard
-        if removed.any():
-            outside = ~bubble
-            nrm, lbrm = cv2.connectedComponents(removed.astype(np.uint8), 8)
-            touch = np.unique(lbrm[(cv2.dilate(outside.astype(np.uint8),
-                                               np.ones((3, 3), np.uint8)) > 0) & removed])
-            touch = touch[touch > 0]
-            bubble = bubble & ~np.isin(lbrm, touch)
-        if BUBBLE_SNAP > 0:
-            # 泡的貼墨收邊（同人物那套）：泡遮罩停在泡框墨線之前會留白環（使用者：泡框跟黑底
-            # 中間的白色區塊太大）。在非墨區內從泡往外測地生長到碰泡框就停。
-            bubble = snap_charmask(bubble, g, BUBBLE_SNAP)
-    lost = None
-    if bubble_before_trim is not None and TEXT_TOPMOST:
-        lost = bubble_before_trim & ~bubble
+    bubble_guard = charmask
+    # ★★ 圖層優先權的正確實作（使用者 2026-09-17：「要塗黑的泡直接全部塗黑，文字再補上去」）。
+    # 難點是分辨「真泡蓋住人物」與「字寫在臉上被誤判成泡」。判準＝**泡內部的非字內容**：
+    #   ・真泡是**空白容器**，裡面除了字什麼都沒有 ⇒ 填洞後的內部非字墨 0.0–0.3%
+    #   ・臉被誤判成泡：裡面有五官、陰影 ⇒ demo01 那張 2.7%、demo04 1.6%
+    # （正常泡 97 個的中位 0.0%、P90 0.7% ⇒ 門檻 1% 分得開。）
+    # 判定為真泡的：**整顆塗黑、不被人物遮罩扣**；判定為臉的：人物贏，照舊保護。
+    segd_c = cv2.dilate(seg.astype(np.uint8),
+                        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))) > 0
+    nb, lb_b, st_b, _ = cv2.connectedComponentsWithStats(bubble.astype(np.uint8), 8)
+    clean = np.zeros_like(bubble)
+    for i in range(1, nb):
+        a_b = int(st_b[i, cv2.CC_STAT_AREA])
+        if a_b < 4000:
+            continue
+        bx_, by_, bw_, bh_ = (int(st_b[i, 0]), int(st_b[i, 1]), int(st_b[i, 2]), int(st_b[i, 3]))
+        sy = slice(max(0, by_ - 2), by_ + bh_ + 2)
+        sx = slice(max(0, bx_ - 2), bx_ + bw_ + 2)
+        blob = lb_b[sy, sx] == i
+        hh, ww = blob.shape
+        ffm = np.zeros((hh + 2, ww + 2), np.uint8)
+        tmp = blob.astype(np.uint8).copy()
+        cv2.floodFill(tmp, ffm, (0, 0), 2)
+        holes = (tmp != 2) & ~blob & ~segd_c[sy, sx]
+        if float(holes.sum()) / a_b >= BUBBLE_CLEAN_WINS:
+            continue
+        # 保險②：**文字佔比**。真泡是容器，字只佔一部分（實測 8.7–50.7%）；
+        # 被誤判的白髮/白手區塊幾乎全是字筆畫本身（demo04 垂髮 94.7%、demo01 那些 99–100%），
+        # 因為 build_bubble_mask 最後會把字區內的筆畫一律併進泡。⇒ 文字佔比過高＝不是泡。
+        if float(seg[sy, sx][blob].mean()) > BUBBLE_CLEAN_TEXT_MAX:
+            continue
+        clean[sy, sx] |= blob
+    bubble_guard = bubble_guard & ~clean
+    # 泡遮罩不得跨進人物：氣泡是**畫在人物之上**的圖層 ⇒ 泡內部不可能是人物；反過來，泡的白
+    # 元件常與人物白（髮/衣）連通（泡框有缺口、髮壓在泡邊），整顆填就把髮吃掉
+    # （demo04 第2格垂髮 0→75%）。
+    # ⚠️ 用**精準遮罩**（cseg∪yoloseg）扣、不用 combine：combine 含 isnet（會把整顆泡當人物）
+    # ⇒ 泡被挖成白泡。精準遮罩是實例分割、不會把泡判成人物。
+    # ⚠️ 只扣「從泡邊緣伸進來的人物」：遮罩誤蓋到泡中央時，粗暴地扣會把泡挖出洞＝白泡
+    # （實測白泡 21.9→29.4 萬 px）。判準＝被扣掉的連通塊有沒有碰到泡的外緣：碰到＝髮/衣從外面
+    # 連進來（扣），完全被泡包住＝遮罩誤判泡內部（還原）。
+    bubble_before_trim = bubble.copy()
+    removed = bubble & bubble_guard
+    if removed.any():
+        outside = ~bubble
+        nrm, lbrm = cv2.connectedComponents(removed.astype(np.uint8), 8)
+        touch = np.unique(lbrm[(cv2.dilate(outside.astype(np.uint8),
+                                           np.ones((3, 3), np.uint8)) > 0) & removed])
+        touch = touch[touch > 0]
+        bubble = bubble & ~np.isin(lbrm, touch)
+    lost = bubble_before_trim & ~bubble
     final = compose(g, gutter, bubble, seg, frameless, lab, stats, sticker,
                     core_ids=promoted, frame=(lhm | lvm), regions=regions, charmask=charmask,
-                    veto=load_veto_mask(page_path, g.shape, charmask),
-                    precise=load_precise_mask(page_path, g.shape), bubble_rest=bubble_rest, lost_bubble=lost)
+                    char_raw=char_raw, bubble_rest=bubble_rest, lost_bubble=lost)
 
     pref = os.path.join(outdir, name)
     with open(f"{pref}_regions.json", "w", encoding="utf-8") as f:
