@@ -174,6 +174,15 @@ PB_AURA_MIN_AREA = 800
 # 衣料/皮膚要繞過人物墨線障礙才到（比高）。人物殼 closing 版已證蓋不住寬開衣料白、廢棄。
 GEO_RATIO_MAX = 1.6             # 測地距離 ≤ 直線距離×此 才視為背景
 GEO_SLACK = 40                  # 加法餘裕（px）：近框處比值不穩定的緩衝
+# ★ 核心填色的語意放行（使用者 2026-09-17 第三次指同一處：ch34_006 老人頭上「不知所謂的白塊」）。
+# 病根＝核心填色的兩道**幾何**保護（測地比刪填 geo/euc、厚墨灰暈）把那塊背景楔形當成人物附屬白：
+# 實測該點 corefill=1（本來就要填黑）、geo=468 / euc=130 ⇒ 比值 3.6 遠超門檻 1.6 → 刪。
+# 兩道保護都是**人物遮罩出現前**的粗略替代品（見 broad_core_fill/paint_sticker docstring）。
+# 有語意遮罩後判準直接得多：核心區裡「明確不是人物」的部分一律放行去填黑，是人物的才留給幾何保護。
+# 範圍只在 broad_core_fill 已認定的寬闊背景核心內（不是全頁的白）⇒ 比被否決的 CHAR_FILL 保守得多。
+# veto（偵測器說有人、分割沒抓到的框）一併當作人物，維持紅線「絕不塗錯」。
+CORE_MASK_RELEASE = os.environ.get("NIGHTREAD_CORE_RELEASE", "1") == "1"
+CORE_RELEASE_PAD = int(os.environ.get("NIGHTREAD_CORE_RELEASE_PAD", "16"))   # 放行時人物遮罩的安全外擴（px）：遮罩邊界是 640 解析度放大來的，貼身放行會咬到白衣/手
 # 人頭一致化（demo02 案）：元件級指標已證不可分（feat 被鄰墨污染、ringDark 與正常頁衣料
 # 重疊）→ 改構圖層「暗區地圖」：粗尺度上暗色主導的帶（群眾帶/已填格）內，小白元件一律
 # 填深+內緣亮。主角臉防護＝面積上限＋暗區要求（臉大、通常也不在暗帶）。
@@ -1150,7 +1159,8 @@ def broad_core_fill(comp, seeds, neck_r=CORE_NECK_R, recover_r=CORE_RECOVER_R):
     return geodesic_grow(filled, comp, recover_r, step=3)
 
 
-def paint_sticker(out, g, lab, stats, accept, bubble, core_ids=(), frame=None, seg=None):
+def paint_sticker(out, g, lab, stats, accept, bubble, core_ids=(), frame=None, seg=None,
+                  charmask=None, veto=None):
     """修法4 合成：W 填深、前景描白邊（dilate(F, r) ∩ W）、W 內孤立小噪點吞掉、
     eaten 聚團區域級保護（不填黑、原樣留 D2）。
 
@@ -1193,9 +1203,20 @@ def paint_sticker(out, g, lab, stats, accept, bubble, core_ids=(), frame=None, s
                     cur = grown
                 fr8 = (~fr).astype(np.uint8)
                 euc = cv2.distanceTransform(fr8, cv2.DIST_L2, 3)
-                fill = fill & (geo <= GEO_RATIO_MAX * euc + GEO_SLACK)
                 sub_seg = seg[y0:y1, x0:x1] if seg is not None else None
-                fill = fill & ~thick_ink_aura(sub, seg=sub_seg)   # 臉旁（髮團/深色特徵周圍）的白不填
+                strict = (fill & (geo <= GEO_RATIO_MAX * euc + GEO_SLACK)
+                          & ~thick_ink_aura(sub, seg=sub_seg))   # 臉旁（髮團/深色特徵周圍）的白不填
+                if CORE_MASK_RELEASE and charmask is not None:
+                    guard = charmask[y0:y1, x0:x1]
+                    if veto is not None:
+                        guard = guard | veto[y0:y1, x0:x1]
+                    if CORE_RELEASE_PAD > 0:
+                        kg = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                                       (CORE_RELEASE_PAD * 2 + 1,) * 2)
+                        guard = cv2.dilate(guard.astype(np.uint8), kg) > 0
+                    fill = strict | (fill & ~guard)   # 見 CORE_MASK_RELEASE：非人物的核心區照填
+                else:
+                    fill = strict
             if not fill.any():
                 continue
         else:
@@ -1523,7 +1544,8 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
             out = paint_gutter(out, g, keep, frame=frame if frame is not None else np.zeros_like(gutter, np.uint8), bubble=bubble)
     if sticker and EXP_STICKER:                         # 修法4：純白背景填黑＋前景白描邊
         out = paint_sticker(out, g, lab, stats, sticker, bubble,
-                            core_ids=core_ids, frame=frame, seg=seg)
+                            core_ids=core_ids, frame=frame, seg=seg,
+                            charmask=charmask, veto=veto)
     if EXP_BUBBLE:
         out = paint_bubbles(out, g, bubble, seg)
     pb = np.zeros_like(bubble)
