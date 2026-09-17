@@ -93,6 +93,7 @@ BUBBLE_CORE_MIN_FRAC = float(os.environ.get("NIGHTREAD_BUBBLE_CORE_MIN", "0.003"
 # ↑ ≥ 此頁面佔比的泡元件走「文字種子核心填色」；小於的整顆填。**0＝一律核心填色**：整顆填會在
 # 「泡白與髮白連通」時把髮吃掉（demo04 第2格垂髮 0→75%），而核心填色對緊實小泡＝開運算切不掉
 # 任何東西、結果等於整顆填 ⇒ 沒有下行風險。大頁（demo04 3000px 高）用固定頁佔比門檻本來就偏鬆。
+BUBBLE_QUIET = float(os.environ.get("NIGHTREAD_BUBBLE_QUIET", "0"))   # 泡內部的局部 std 上限（0=關）
 BUBBLE_REACH = float(os.environ.get("NIGHTREAD_BUBBLE_REACH", "0"))   # 泡最遠離字框對角線的倍數（0=不限）
 BUBBLE_NECK_R = int(os.environ.get("NIGHTREAD_BUBBLE_NECK", "8"))   # 泡的切頸半徑：泡框缺口漏進背景（ch34_011 圓泡右側漏出）、字寫在背景上
                                 # 的白連進臉的下巴縫（demo01 主角）都是窄頸；真泡內部寬闊、行間白 ≥13px 不受影響。
@@ -226,6 +227,8 @@ MASK_SMOOTH = float(os.environ.get("NIGHTREAD_MASK_SMOOTH", "1"))   # 遮罩形�
 MASK_SMOOTH_GUIDED = os.environ.get("NIGHTREAD_MASK_SMOOTH_GUIDED", "1") == "1"
 MASK_SMOOTH_MEDIAN = int(os.environ.get("NIGHTREAD_MASK_MEDIAN", "15"))  # **定案 15**：中值對方塊階梯有效
 EDGE_FEATHER = float(os.environ.get("NIGHTREAD_EDGE_FEATHER", "0.7"))  # **定案 0.7**：收尾的 1–2px 抗鋸齒
+TEXT_REGION_INK = float(os.environ.get("NIGHTREAD_TEXT_REGION_INK", "0"))   # 字框內原圖低於此值的像素也算字（補偵測器漏抓）
+TEXT_ALWAYS_LIT = float(os.environ.get("NIGHTREAD_TEXT_ALWAYS_LIT", "0"))   # 落在深色底上的字筆畫一律畫亮（0=關）
 TEXT_TOPMOST = os.environ.get("NIGHTREAD_TEXT_TOPMOST", "1") == "1"
 # ↑ **定案開**（使用者 2026-09-17 的圖層優先權洞察）：字永遠在最上層。泡遮罩被人物扣掉後，
 # 那塊的字失去「泡內亮字」待遇 ⇒ demo03 實測對比 **-6（字比底還暗、完全讀不出來）**。
@@ -686,6 +689,9 @@ def _enclosed_bubble_core(g, lab, stats, i, text_bbox, charmask=None):
     return core
 
 
+_LOCAL_STD_CACHE = [None]
+
+
 def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids, charmask=None):
     """氣泡內部遮罩（修法1）：每文字區 bbox+BUBBLE_PAD 窗內，找「貼著（外擴後）
     文字筆畫」的白色連通元件，通過守門則整顆併入（不裁窗 ⇒ 無截斷方塊，
@@ -695,6 +701,7 @@ def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids, charmask=None):
       不在 excluded_ids（留白/格內白元件）
     """
     H, W = g.shape
+    _LOCAL_STD_CACHE[0] = local_std(g) if BUBBLE_QUIET > 0 else None
     seg_u8 = seg.astype(np.uint8) * 255
     seg_dil = cv2.dilate(seg_u8, np.ones((9, 9), np.uint8))  # 筆畫外擴→碰得到氣泡白底
     bubble = np.zeros((H, W), bool)
@@ -758,6 +765,17 @@ def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids, charmask=None):
                 if sx1 > sx0 and sy1 > sy0:
                     seed[sy0:sy1, sx0:sx1] = True
                 core = broad_core_fill(comp, seed & comp, neck_r=BUBBLE_NECK_R, recover_r=BUBBLE_NECK_R)
+                if BUBBLE_QUIET > 0 and core.any():
+                    # ★ 撕裂修正：泡的白常與格內地板/牆面同一個白元件，切頸切不開、面積比擋不住
+                    # （比值只有 1.12）。用**局部 std** 把泡內部（空白、std 低）與畫面（有紋路、
+                    # std 高）切開：只保留 std 低的部分，再從字種子重新取連通塊。
+                    quiet = _LOCAL_STD_CACHE[0] < BUBBLE_QUIET
+                    kept = core & quiet[by:by + bh, bx:bx + bw]
+                    nq, lq = cv2.connectedComponents(kept.astype(np.uint8), 8)
+                    ids_q = np.unique(lq[seed & kept])
+                    ids_q = ids_q[ids_q > 0]
+                    if ids_q.size:
+                        core = np.isin(lq, ids_q)
                 if BUBBLE_REACH > 0 and core.any():
                     # ★ 撕裂修正（審查員 2026-09-17）：泡的白常與**格內地板/牆面**同一個白元件
                     # （ch34_010 comp5＝泡+地板，3.46% 頁），切頸切不開（要 neck 40 才行，而那時泡
@@ -1078,6 +1096,18 @@ def geodesic_grow(seed, within, iters, step=5):
         cur = cv2.dilate(cur, k, iterations=n) & w8
         done += n
     return cur > 0
+
+
+def local_std(g, win=31):
+    """局部亮度標準差（win×win）。借鏡翻譯引擎 `parity/auto_diag.py` 的 `is_bubble(mean,std)`
+    ——它用**整個文字區**的 std 判「泡 vs 壓畫面」（std<24 且夠白＝泡）。這裡改成**逐像素的局部
+    std**，用途不同：判斷「這個白像素屬於泡的內部，還是屬於畫面」。
+    實測 ch34_010 的 comp5（泡+地板合體）：全域 std 泡 1.1 / 地板 1.7（**分不開**，兩者都是純白），
+    但局部 std 泡 **3.3** / 地板 **24.0**（分得開）——因為地板附近有紋路與人物的腳，泡內部是空白。
+    """
+    lum = g.astype(np.float32)
+    mu = cv2.blur(lum, (win, win))
+    return np.sqrt(np.maximum(0.0, cv2.blur(lum * lum, (win, win)) - mu * mu))
 
 
 def broad_core_fill(comp, seeds, neck_r=CORE_NECK_R, recover_r=CORE_RECOVER_R):
@@ -1534,6 +1564,33 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
             if text_on_char.any():
                 kb = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (TEXT_BACKING_R * 2 + 1,) * 2)
                 restore &= ~(cv2.dilate(text_on_char.astype(np.uint8), kb) > 0)
+        if TEXT_ALWAYS_LIT > 0:
+            # ★★ 圖層優先權完整版（審查員 2026-09-17 抓到 demo04 的「空心鬼影字」）：
+            # 壓在畫面上的旁白常是**黑字＋白描邊**，DBNet 的 seg 涵蓋整塊（原圖均值 202）。
+            # 若該處只有一半落在泡遮罩內，另一半的字就不會被 paint_bubbles 畫亮、底卻被填深
+            # ⇒ 灰描邊浮在黑底上＝空心鬼影字（實測字 67／底 27–53，其中一區對比 **−11**）。
+            # 修法＝**字筆畫永遠畫亮**，不管在不在泡內：凡落在已填深區（out < 門檻）的字筆畫，
+            # 一律套泡內同一條亮字曲線。這是「字永遠在最上層」的完整版。
+            lit = seg & (out < TEXT_ALWAYS_LIT)
+            if regions is not None and TEXT_REGION_INK > 0:
+                # ★ 真病根（2026-09-17 追查）：偵測器的 seg **漏抓了 25% 的字筆畫**
+                # （demo04 那段旁白：黑筆畫 15543px，seg 只涵蓋 75%）。被涵蓋的成品是 239（正確），
+                # 漏掉的是 41 —— **比底色 56 還暗** ⇒ 空心鬼影字。
+                # 修法：在**文字區 bbox 內**，把「原圖夠黑 ∧ 成品已填深」的像素也一律畫亮。
+                # 限制在字框內＝不會把背景線條畫亮（那是「黑底亮白碎點」的來源，見審查員報告）。
+                rmask = np.zeros_like(lit)
+                for r_ in regions:
+                    rx0, ry0, rx1, ry1 = r_["bbox"]
+                    rx0, ry0 = max(0, rx0), max(0, ry0)
+                    rx1, ry1 = min(lit.shape[1], rx1), min(lit.shape[0], ry1)
+                    if rx1 > rx0 and ry1 > ry0:
+                        rmask[ry0:ry1, rx0:rx1] = True
+                lit |= rmask & (g < TEXT_REGION_INK) & (out < TEXT_ALWAYS_LIT)
+            if lit.any():
+                a4 = ink_alpha(g, TEXT_GAMMA)
+                if TEXT_KNEE > 0:
+                    a4 = np.clip((a4 - TEXT_KNEE) / (1.0 - TEXT_KNEE), 0.0, 1.0)
+                out[lit] = np.maximum(out[lit], BG + a4[lit] * (INK - BG))
         if lost_bubble is not None and TEXT_TOPMOST and lost_bubble.any():
             # ★ 字永遠在最上層（使用者 2026-09-17 的圖層優先權原則）：泡遮罩被人物扣掉後，那塊
             # 區域的字失去「泡內亮字」待遇 ⇒ 暗字疊在灰底上，實測對比 **-6（字比底還暗、讀不出來）**。
