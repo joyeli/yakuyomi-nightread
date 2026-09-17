@@ -593,7 +593,15 @@ def _hole_ink_ratio(comp_u8, g):
     return ink / max(int(comp_u8.sum()), 1)
 
 
-WHITE_SPLIT_STD = float(os.environ.get("NIGHTREAD_WHITE_SPLIT", "0"))   # 白元件分類前先用局部 std 切開（0=關）
+_NOISY_WHITE = [None]
+_NOISY_W = [None]
+# ★ 三段式（2026-09-17）：原本只有「填黑 16」與「場景灰 140」兩種待遇，於是畫面的白只能二選一
+# ——填黑會撕裂（邊界不跟線稿走），留場景灰又不夠暗（源頭切分原型亮了 10pt 被否決）。
+# 補上第三種＝**畫面的白給中間調**，對應三個語意層次：
+#   純背景白（留白/格內背景）→ BG 16 ｜ 畫面的白（地板/牆面）→ 中間調 ｜ 人物的白 → 場景灰 140
+WHITE_SPLIT_STD = float(os.environ.get("NIGHTREAD_WHITE_SPLIT", "0"))
+NOISY_DIM = float(os.environ.get("NIGHTREAD_NOISY_DIM", "0"))   # 畫面白往 BG 壓暗的比例（0=不壓）
+NOISY_SOFT = float(os.environ.get("NIGHTREAD_NOISY_SOFT", "1.0"))  # 壓暗權重的過渡寬度（× 門檻）   # 白元件分類前先用局部 std 切開（0=關）
 INNER_PANEL_MIN_FRAC = float(os.environ.get("NIGHTREAD_INNER_PANEL", "0"))
 INNER_PANEL_AS_PANEL = os.environ.get("NIGHTREAD_INNER_AS_PANEL", "0") == "1"   # 封閉格內白納入 panel 的頁佔比門檻（0=關）
 
@@ -612,9 +620,13 @@ def classify_white_components(g):
         # 先前把局部 std 用在 core fill 之後，效果被 bubble_rest 抵消（泡變小 ⇒ 剩餘填色變大）；
         # 在這裡切，下游每個機制（留白/貼紙/泡/剩餘填色）看到的就都是正確的元件。
         # 判準＝局部 std（31×31）：泡內部是空白（實測 3.3），畫面的白附近有紋路（地板 24.0）。
-        quiet = local_std(g) < WHITE_SPLIT_STD
-        white = (white > 0) & quiet
-        white = white.astype(np.uint8)
+        sd = local_std(g)
+        quiet = sd < WHITE_SPLIT_STD
+        _NOISY_WHITE[0] = (white > 0) & ~quiet     # 「有紋路的白」＝畫面的一部分（地板/牆面）
+        # 連續權重：二值門檻會讓壓暗量在門檻兩側跳變 ⇒ 地板出現深淺不一的灰斑塊（目檢可見）。
+        # 改用 std 的平滑映射，門檻附近漸進過渡。
+        _NOISY_W[0] = np.clip((sd - WHITE_SPLIT_STD) / max(1e-3, WHITE_SPLIT_STD * NOISY_SOFT), 0.0, 1.0)
+        white = ((white > 0) & quiet).astype(np.uint8)
     n, lab, stats, _ = cv2.connectedComponentsWithStats(white, 8)
     dist = cv2.distanceTransform(white, cv2.DIST_L2, 5)   # 白內距最近非白（元件間互不影響）
     deep_px = max(64, int(round(DEEP_EDGE_FRAC * min(W, H))))
@@ -1530,6 +1542,14 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
             if TEXT_KNEE > 0:
                 a3 = np.clip((a3 - TEXT_KNEE) / (1.0 - TEXT_KNEE), 0.0, 1.0)
             out[txt] = np.maximum(out[txt], BG + a3[txt] * (INK - BG))
+    if NOISY_DIM > 0 and _NOISY_WHITE[0] is not None and _NOISY_WHITE[0].any():
+        # 畫面的白壓暗：lerp 到 BG，不是硬填 ⇒ 紋路與線稿都保留、邊界不會憑空產生（無撕裂）。
+        nw = _NOISY_WHITE[0] & ~bubble
+        if charmask is not None:
+            nw = nw & ~charmask          # 人物的白維持場景調
+        wgt = (_NOISY_W[0] * NOISY_DIM) if _NOISY_W[0] is not None else NOISY_DIM
+        wn = wgt[nw] if isinstance(wgt, np.ndarray) else wgt
+        out[nw] = out[nw] * (1.0 - wn) + BG * wn
     if bubble_rest is not None and bubble_rest.any():
         out[bubble_rest] = BG
         kk = np.ones((STROKE * 2 + 1,) * 2, np.uint8)
