@@ -77,9 +77,8 @@ class PageParityTest {
         )
         val expected = readGray("${page}_expected.png")
 
-        NightRead.debug = { k, v -> println("  [debug] $k = $v") }
         val t0 = System.currentTimeMillis()
-        val result = NightRead.render(input)
+        val result = NightRead.render(input, debug = { k, v -> println("  [debug] $k = $v") })
         val ms = System.currentTimeMillis() - t0
         val got = result.out
 

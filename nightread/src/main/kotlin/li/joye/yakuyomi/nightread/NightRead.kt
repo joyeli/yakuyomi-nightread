@@ -13,10 +13,10 @@ import kotlin.math.roundToInt
  *
  * 分區的待遇與各階段在判斷什麼，見 `docs/ARCHITECTURE.md`。
  */
-object NightRead {
+/** 各階段的中間量（遮罩面積等），parity 除錯用。正式路徑傳 null。 */
+typealias NightReadDebug = (stage: String, value: Int) -> Unit
 
-    /** parity 除錯用的回呼：階段名稱 → 數值。正式跑不設。 */
-    var debug: ((String, Int) -> Unit)? = null
+object NightRead {
 
     /**
      * 重繪一頁。
@@ -24,7 +24,11 @@ object NightRead {
      * 前半是分析（頁型、白元件、氣泡、貼紙計畫），後半是合成（場景曲線 → 留白 → 貼紙 →
      * 氣泡 → 偽泡 → 人頭一致化 → 剩餘填色 → 人物還原）。
      */
-    fun render(input: NightReadInput, p: NightReadParams = NightReadParams()): NightReadResult {
+    fun render(
+        input: NightReadInput,
+        p: NightReadParams = NightReadParams(),
+        debug: NightReadDebug? = null,
+    ): NightReadResult {
         val g = Regions.normalizePaper(input.gray, input.chroma, p)
         val seg = input.seg
         val w = g.w
@@ -86,7 +90,7 @@ object NightRead {
 
         // ── 合成 ──────────────────────────────────────────────────────
         val out = compose(g, seg, gutter, bubble, frameless, wc, plan, frame,
-            input.regions, charMask, charRaw, bubbleRest, lost, p)
+            input.regions, charMask, charRaw, bubbleRest, lost, p, debug)
         return NightReadResult(out, gutter, bubble, charMask, frameless, plan.accept, plan.promoted)
     }
 
@@ -468,7 +472,7 @@ object NightRead {
         g: Gray, seg: Mask, gutterIn: Mask, bubble: Mask, frameless: Boolean,
         wc: Regions.WhiteComponents, plan: Sticker.Plan, frame: Mask,
         regions: List<TextRegion>, charMask: Mask, charRaw: Mask,
-        bubbleRest: Mask?, lost: Mask, p: NightReadParams,
+        bubbleRest: Mask?, lost: Mask, p: NightReadParams, debug: NightReadDebug?,
     ): Gray {
         val w = g.w
         val h = g.h
