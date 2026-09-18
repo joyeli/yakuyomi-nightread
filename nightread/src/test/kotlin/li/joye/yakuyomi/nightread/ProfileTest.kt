@@ -100,6 +100,11 @@ class ProfileTest {
         ms("frameLineMask") { val r = Regions.frameLineMask(g, p); lh = r.first; lv = r.second }
         var wc: Regions.WhiteComponents? = null
         ms("classifyWhiteComponents") { wc = Regions.classifyWhiteComponents(g, p) }
+        // 拆開看 classifyWhite 的 210 ms 在哪
+        val whiteM = g.ge(p.whiteTh)
+        ms("  ├ ge(whiteTh)") { g.ge(p.whiteTh) }
+        ms("  ├ ccStats(white)") { Cv.ccStats(whiteM, 8) }
+        ms("  └ distanceL2(white)") { Cv.distanceL2(whiteM) }
         val comps = wc!!
         var bubble: Regions.BubbleResult? = null
         ms("buildBubbleMask") {

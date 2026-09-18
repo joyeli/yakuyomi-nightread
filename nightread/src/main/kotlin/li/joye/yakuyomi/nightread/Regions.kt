@@ -128,24 +128,29 @@ internal object Regions {
         if (cands.isEmpty()) return WhiteComponents(cc, gutter, panel)
         val dist = Cv.distanceL2(white)
 
+        // ⚠️ 逐元件掃各自的 bbox 會重複掃描：留白元件的 bbox 常常涵蓋整頁（格溝從頁頂連到頁底），
+        // 候選有 n 顆就掃 n 次全頁。改成**掃一次全頁、按標號累計到各自的計數器**。
+        val coreCnt = IntArray(cc.n)
+        val deepCnt = IntArray(cc.n)
+        val wanted = BooleanArray(cc.n)
+        for (i in cands) wanted[i] = true
+        for (yy in 0 until h) {
+            val base = yy * w
+            val edY = min(yy, h - 1 - yy)
+            for (xx in 0 until w) {
+                val idx = base + xx
+                val l = cc.labels[idx]
+                if (l == 0 || !wanted[l]) continue
+                if (dist.data[idx] <= p.coreR) continue
+                coreCnt[l]++
+                if (min(min(xx, w - 1 - xx), edY) > deepPx) deepCnt[l]++
+            }
+        }
+
         for (i in cands) {
             val a = cc.area[i]
-            val x = cc.left[i]
-            val y = cc.top[i]
-            val cw = cc.width[i]
-            val ch = cc.height[i]
-            var coreCount = 0
-            var coreDeep = 0
-            for (yy in y until y + ch) {
-                val base = yy * w
-                for (xx in x until x + cw) {
-                    if (cc.labels[base + xx] != i) continue
-                    if (dist.data[base + xx] <= p.coreR) continue
-                    coreCount++
-                    val ed = min(min(xx, w - 1 - xx), min(yy, h - 1 - yy))
-                    if (ed > deepPx) coreDeep++
-                }
-            }
+            val coreCount = coreCnt[i]
+            val coreDeep = deepCnt[i]
             val coreFrac = coreCount.toDouble() / a
             val deepFrac = if (coreCount > 0) coreDeep.toDouble() / coreCount else 0.0
 

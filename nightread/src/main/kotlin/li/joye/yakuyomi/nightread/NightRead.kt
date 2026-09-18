@@ -631,6 +631,8 @@ object NightRead {
             }
         }
         if (includeFrame && frame.any()) {
+            // ⚠️ 這裡的距離變換試過半解析度：只省 10 ms 但 MAE 0.57→0.59。距離門檻雖然有餘裕，
+            // 但 `bd` 同時決定留白填色的邊界，那是逐像素的視覺邊界，±1 px 會沿著整條格溝顯現。
             val fd = Cv.distanceL2(frame.not())
             for (i in bd.indices) if (fd.data[i] < bd[i]) bd[i] = fd.data[i]
         }

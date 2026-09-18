@@ -563,23 +563,31 @@ object Cv {
         val inf = 1e20f
         val f = FloatArray(w * h) { if (m.data[it]) inf else 0f }
 
-        // 逐行
-        val tmp = FloatArray(max(w, h))
-        val d = FloatArray(max(w, h))
-        val v = IntArray(max(w, h))
-        val z = FloatArray(max(w, h) + 1)
+        val n = max(w, h)
+        val tmp = FloatArray(n)
+        val d = FloatArray(n)
+        val v = IntArray(n)
+        val z = FloatArray(n + 1)
+
+        // 逐行：資料本來就連續，用 arraycopy 進出，不逐格搬
         for (y in 0 until h) {
-            for (x in 0 until w) tmp[x] = f[y * w + x]
+            val base = y * w
+            System.arraycopy(f, base, tmp, 0, w)
             edt1d(tmp, w, d, v, z)
-            for (x in 0 until w) f[y * w + x] = d[x]
+            System.arraycopy(d, 0, f, base, w)
         }
-        // 逐列
+        // 逐列：跨列存取無法連續，只能逐格（這趟是快取不友善的那一半）
         for (x in 0 until w) {
-            for (y in 0 until h) tmp[y] = f[y * w + x]
+            var i = x
+            for (y in 0 until h) { tmp[y] = f[i]; i += w }
             edt1d(tmp, h, d, v, z)
-            for (y in 0 until h) f[y * w + x] = d[y]
+            i = x
+            for (y in 0 until h) { f[i] = d[y]; i += w }
         }
-        return FImg(w, h, FloatArray(w * h) { sqrt(f[it].toDouble()).toFloat() })
+        // 就地開平方，省一次 2.6 MPx 的配置；用 Float 版 sqrt 不繞 Double
+        val out = FloatArray(w * h)
+        for (i in out.indices) out[i] = kotlin.math.sqrt(f[i])
+        return FImg(w, h, out)
     }
 
     /** Felzenszwalb & Huttenlocher 的一維平方距離變換（拋物線下包絡）。 */
