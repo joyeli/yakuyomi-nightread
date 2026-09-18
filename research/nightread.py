@@ -156,6 +156,12 @@ FRAME_HUG_DILATE = 5    # 元件外擴後與格線遮罩取交集算「貼框」
 FRAME_HUG_THICK = 3.0   # 格線名目厚度（交集像素數 → 貼框長度的除數）
 FRAME_HUG_MIN = 0.25    # 貼框長度／bbox 周長 下限
 FRAME_HUG_STRONG = 0.4  # 強貼框：背景證據夠強 ⇒ 走放寬門
+# 截斷偵測：貼框若只發生在**一對相對邊**（另一對的兩邊都不貼），代表元件是被格框
+# **截斷**的，不是沿著格框跑——真格背景會轉過格的角落，至少有相鄰的兩邊貼。扁格裡
+# 的前景物件正是這型：ch34_011 第 2 格高只有 147 px，那片白布簾上下必然整條貼框
+# （上 0.89／下 0.51）、左右幾乎不貼（0.24／0.28），hug 因此爆到 0.42 走放寬門，
+# 跳過小面積門 ⇒ 被當格背景填黑。設計註記「前景白只點狀碰框 ⇒ hug 低」在扁格不成立。
+HUG_SIDE_MIN = 0.5      # 每邊的貼框覆蓋門檻（低於此＝該邊不算貼）
 PROMOTED_TEXTON_MAX = 0.3   # 強貼框仍拒的文字覆蓋上限（真旁白框填黑會糊字）
 
 # 核心填色（從格框種子出發、不擠過窄頸的寬闊背景）
@@ -707,6 +713,7 @@ def sticker_plan(g, img_bgr, lab, stats, gutter_ids, panel_ids, frameless, regio
         cand = {i for i in (gutter_ids | panel_ids)
                 if stats[i, cv2.CC_STAT_AREA] >= STICKER_MIN_FRAC * g.size}
         hug = {}
+        hug_cut = {}
     else:
         cand = set(panel_ids)
         # 修法5：閉合格背景擢升——未列管（非 gutter 非 panel）的大白元件，若「貼格線長度 /
@@ -717,6 +724,7 @@ def sticker_plan(g, img_bgr, lab, stats, gutter_ids, panel_ids, frameless, regio
         frame = (lh | lv).astype(np.uint8)
         kd = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (FRAME_HUG_DILATE * 2 + 1,) * 2)
         hug = {}
+        hug_cut = {}
         min_area = GUTTER_MIN_AREA_FRAC * g.size
         listed = gutter_ids | panel_ids
         for i in range(1, stats.shape[0]):
@@ -728,10 +736,20 @@ def sticker_plan(g, img_bgr, lab, stats, gutter_ids, panel_ids, frameless, regio
             x0, y0 = max(0, x - pad), max(0, y - pad)
             x1, y1 = min(g.shape[1], x + w_ + pad), min(g.shape[0], y + h_ + pad)
             comp = (lab[y0:y1, x0:x1] == i).astype(np.uint8)
-            contact = int((cv2.dilate(comp, kd) & frame[y0:y1, x0:x1]).sum())
+            touch = (cv2.dilate(comp, kd) & frame[y0:y1, x0:x1]) > 0
+            contact = int(touch.sum())
             hug_len = contact / FRAME_HUG_THICK
             frac = hug_len / max(1.0, 2.0 * (w_ + h_))
             hug[i] = round(float(frac), 3)
+            if True:                    # 四邊各自的貼框覆蓋（用來認出「被格框截斷」）
+                cy, cx = np.nonzero(touch)
+                ry = (cy + y0 - y) / max(1, h_)
+                rx = (cx + x0 - x) / max(1, w_)
+                t = float((ry < 0.15).sum()) / FRAME_HUG_THICK / max(1, w_)
+                bt = float((ry > 0.85).sum()) / FRAME_HUG_THICK / max(1, w_)
+                lf = float((rx < 0.15).sum()) / FRAME_HUG_THICK / max(1, h_)
+                rt = float((rx > 0.85).sum()) / FRAME_HUG_THICK / max(1, h_)
+                hug_cut[i] = (max(t, bt) < HUG_SIDE_MIN or max(lf, rt) < HUG_SIDE_MIN)
             if frac >= FRAME_HUG_MIN:
                 cand.add(i)
     accept, audit, promoted = set(), [], set()
@@ -756,7 +774,12 @@ def sticker_plan(g, img_bgr, lab, stats, gutter_ids, panel_ids, frameless, regio
                   and met["chroma"] <= STICKER_CHROMA_MAX
                   and met["eatenFrac"] <= STICKER_EATEN_HARD
                   and met["textOn"] <= PROMOTED_TEXTON_MAX
-                  and met["faintOfF"] <= FAINT_OF_F_MAX)
+                  and met["faintOfF"] <= FAINT_OF_F_MAX
+                  # 截斷型（只貼一對相對邊）的小元件＝被格框切斷的前景物件，不是格背景
+                  and not (hug_cut.get(i, False)
+                           and met["areaFrac"] < STICKER_SMALL_AREA
+                           and met["textOn"] < STICKER_TEXT_BG_MIN)
+                  )
             if ok:
                 promoted.add(i)
         else:
