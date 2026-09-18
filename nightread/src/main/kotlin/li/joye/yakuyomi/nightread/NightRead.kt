@@ -73,16 +73,32 @@ object NightRead {
         if (removed.any()) {
             // 只扣「從泡邊緣伸進來的人物」：遮罩誤蓋到泡中央時粗暴地扣會把泡挖出洞＝白泡
             val rcc = Cv.ccStats(removed, 8)
-            val outside = bubble.not()
-            val touching = HashSet<Int>()
-            val grownOutside = Cv.dilate(outside, Cv.rect(3, 3))
-            for (i in removed.data.indices) {
-                if (removed.data[i] && grownOutside.data[i]) touching.add(rcc.labels[i])
+            // 「碰到泡外緣」＝自己在泡內、但四鄰有一個在泡外。直接看鄰居就好——
+            // 原本是 `dilate(bubble.not(), 3×3)`，那會對整頁取反再膨脹兩趟全頁運算。
+            val touching = BooleanArray(rcc.n)
+            val bw = bubble.w
+            val bh = bubble.h
+            for (y in 0 until bh) {
+                val base = y * bw
+                for (x in 0 until bw) {
+                    val i = base + x
+                    if (!removed.data[i]) continue
+                    val l = rcc.labels[i]
+                    if (l == 0 || touching[l]) continue
+                    val edge = x == 0 || y == 0 || x == bw - 1 || y == bh - 1 ||
+                        !bubble.data[i - 1] || !bubble.data[i + 1] ||
+                        !bubble.data[i - bw] || !bubble.data[i + bw]
+                    if (edge) touching[l] = true
+                }
             }
-            touching.remove(0)
-            if (touching.isNotEmpty()) {
+            var anyTouch = false
+            for (l in 1 until rcc.n) if (touching[l]) { anyTouch = true; break }
+            if (anyTouch) {
                 val b2 = bubble.copy()
-                for (i in b2.data.indices) if (rcc.labels[i] in touching) b2.data[i] = false
+                for (i in b2.data.indices) {
+                    val l = rcc.labels[i]
+                    if (l > 0 && touching[l]) b2.data[i] = false
+                }
                 bubble = b2
             }
         }
@@ -94,10 +110,21 @@ object NightRead {
         return NightReadResult(out, gutter, bubble, charMask, frameless, plan.accept, plan.promoted)
     }
 
+    /**
+     * 把一組元件 id 攤成遮罩。
+     *
+     * ⚠️ 用 BooleanArray 查表而不是 `cc.labels[i] in ids`：後者每個像素都做一次 HashSet 查詢
+     * 並把 Int 裝箱，2.6 MPx 上是實打實的成本，而這個函式在合成階段被呼叫數次。
+     */
     private fun maskOfIds(cc: CC, ids: Set<Int>, w: Int, h: Int): Mask {
         val m = Mask(w, h)
         if (ids.isEmpty()) return m
-        for (i in m.data.indices) if (cc.labels[i] in ids) m.data[i] = true
+        val want = BooleanArray(cc.n)
+        for (id in ids) if (id in 0 until cc.n) want[id] = true
+        for (i in m.data.indices) {
+            val l = cc.labels[i]
+            if (l > 0 && want[l]) m.data[i] = true
+        }
         return m
     }
 
@@ -235,23 +262,33 @@ object NightRead {
     ): Mask {
         val w = g.w
         val h = g.h
-        val white = g.ge(p.whiteTh)
-        var wCut = Cv.open(white, Cv.ellipse(2 * p.pbNeckR + 1))
-        wCut = Cv.geodesicGrow(wCut, white, p.pbNeckR, step = 3)
-        wCut = wCut.andNot(Regions.thickInkAura(g, seg, p))
-        val pb = Mask(w, h)
-        for (r in regions) {
+        // 先看有沒有區需要偽泡：泡遮罩蓋率夠高的區直接跳過。全部都夠高就完全不必算 wCut，
+        // 而 wCut 是三個重活（21px 開運算、測地生長、厚墨灰暈的距離變換+連通元件+25px 膨脹）。
+        val needs = regions.filter { r ->
             val x0 = max(0, r.x0)
             val y0 = max(0, r.y0)
             val x1 = min(w, r.x1)
             val y1 = min(h, r.y1)
-            if (x1 <= x0 || y1 <= y0) continue
+            if (x1 <= x0 || y1 <= y0) return@filter false
             var cov = 0
             for (y in y0 until y1) {
                 val base = y * w
                 for (x in x0 until x1) if (bubble.data[base + x]) cov++
             }
-            if (cov.toDouble() / ((x1 - x0) * (y1 - y0)) >= p.pbCovMax) continue
+            cov.toDouble() / ((x1 - x0) * (y1 - y0)) < p.pbCovMax
+        }
+        if (needs.isEmpty()) return Mask(w, h)
+
+        val white = g.ge(p.whiteTh)
+        var wCut = Cv.open(white, Cv.ellipse(2 * p.pbNeckR + 1))
+        wCut = Cv.geodesicGrow(wCut, white, p.pbNeckR, step = 3)
+        wCut = wCut.andNot(Regions.thickInkAura(g, seg, p))
+        val pb = Mask(w, h)
+        for (r in needs) {
+            val x0 = max(0, r.x0)
+            val y0 = max(0, r.y0)
+            val x1 = min(w, r.x1)
+            val y1 = min(h, r.y1)
             val ref = max(x1 - x0, y1 - y0)
             val cap = (p.pbGrowFrac * ref).toInt()
             val pad = cap + p.pbNeckR + 2

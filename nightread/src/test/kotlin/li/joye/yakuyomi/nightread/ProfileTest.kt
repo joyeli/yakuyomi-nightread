@@ -111,7 +111,33 @@ class ProfileTest {
         ms("plan(sticker)") {
             Sticker.plan(g, input.chroma, comps, false, input.regions, lh or lv, p)
         }
-        println("  ── 以上是分析，以下整條 render 一次 ──")
-        ms("render（完整）") { NightRead.render(input) }
+        // bubbleRest 那段的三個嫌疑：maskOfIds、41px 膨脹、andNot
+        val cc = comps.cc
+        val ids = bubble!!.cored
+        ms("  maskOfIds(cored)") {
+            val m = Mask(g.w, g.h)
+            val want = BooleanArray(cc.n)
+            for (id in ids) if (id in 0 until cc.n) want[id] = true
+            for (i in m.data.indices) { val l = cc.labels[i]; if (l > 0 && want[l]) m.data[i] = true }
+        }
+        ms("  dilate(bubble, 41px)") { Cv.dilate(bubble!!.bubble, Cv.ellipse(p.bubbleRestNear * 2 + 1)) }
+        println("  ── 分析小計以上；以下是合成階段 ──")
+        val marks = ArrayList<Pair<String, Long>>()
+        val t0 = System.currentTimeMillis()
+        NightRead.render(input) { stage, _ -> marks.add(stage to System.currentTimeMillis()) }
+        var prev = t0
+        for ((stage, at) in marks) {
+            println("  ${"→ $stage".padEnd(34)} 本段 ${at - prev} ms")
+            prev = at
+        }
+
+        // 單次計時在 JIT 與 GC 下跳動很大（實測同一份程式碼 1300–1500 ms），取中位數才看得出效果
+        val runs = LongArray(7) {
+            val t = System.currentTimeMillis()
+            NightRead.render(input)
+            System.currentTimeMillis() - t
+        }
+        runs.sort()
+        println("  render 七次：${runs.joinToString(" ")} ⇒ 中位數 ${runs[3]} ms")
     }
 }

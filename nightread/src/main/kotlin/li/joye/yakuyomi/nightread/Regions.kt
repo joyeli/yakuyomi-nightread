@@ -314,7 +314,14 @@ internal object Regions {
                     cored.add(i)
                     continue
                 } else {
-                    for (idx in bubble.data.indices) if (cc.labels[idx] == i) bubble.data[idx] = true
+                    // ⚠️ 只掃該元件的 bbox，不掃全頁：這條路徑每顆小泡走一次，
+                    // 掃全頁的話成本是「泡數 × 2.6 MPx」
+                    for (yy in cc.top[i] until cc.top[i] + cc.height[i]) {
+                        val base = yy * w
+                        for (xx in cc.left[i] until cc.left[i] + cc.width[i]) {
+                            if (cc.labels[base + xx] == i) bubble.data[base + xx] = true
+                        }
+                    }
                 }
                 merged.add(i)
             }
