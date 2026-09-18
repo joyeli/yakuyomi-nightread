@@ -129,14 +129,28 @@ object Cv {
     // ── 二值形態學（cv2.dilate / erode / morphologyEx）──────────────────
 
     fun dilate(m: Mask, k: Kernel, iterations: Int = 1): Mask {
+        val line = lineKernel(k)
         var cur = m
-        repeat(iterations) { cur = dilateOnce(cur, k) }
+        repeat(iterations) {
+            cur = when {
+                line > 0 -> lineMorph(cur, line, horizontal = true, anchor = k.ax, dilate = true)
+                line < 0 -> lineMorph(cur, -line, horizontal = false, anchor = k.ay, dilate = true)
+                else -> dilateOnce(cur, k)
+            }
+        }
         return cur
     }
 
     fun erode(m: Mask, k: Kernel, iterations: Int = 1): Mask {
+        val line = lineKernel(k)
         var cur = m
-        repeat(iterations) { cur = erodeOnce(cur, k) }
+        repeat(iterations) {
+            cur = when {
+                line > 0 -> lineMorph(cur, line, horizontal = true, anchor = k.ax, dilate = false)
+                line < 0 -> lineMorph(cur, -line, horizontal = false, anchor = k.ay, dilate = false)
+                else -> erodeOnce(cur, k)
+            }
+        }
         return cur
     }
 
@@ -150,6 +164,89 @@ object Cv {
      *
      * 邊界：外側視為 0，所以區間裁切到影像內即可（前景不外溢）。
      */
+    /**
+     * 一維長條核（1×n 或 n×1）的快路：van Herk / Gil-Werman 滑動極值，**成本與核長無關**。
+     *
+     * 格框線偵測用的是長度 `min(w,h)/5` 的線核（1920 高的頁就是 270），逐列掃區間要 O(W·H·k)，
+     * 實測整條 open 要 780 ms，是整個分析階段最大的單一熱點。改成分段掃描後與核長脫鉤。
+     *
+     * 只在核是單一實心 run 的 1×n / n×1 時生效，其餘形狀走一般路徑。
+     */
+    private fun lineMorph(m: Mask, len: Int, horizontal: Boolean, anchor: Int, dilate: Boolean): Mask {
+        val w = m.w
+        val h = m.h
+        val out = Mask(w, h)
+        val n = if (horizontal) w else h
+        val lines = if (horizontal) h else w
+        val buf = BooleanArray(n)
+        val pre = BooleanArray(n)
+        val suf = BooleanArray(n)
+        for (li in 0 until lines) {
+            // 取一行／一列
+            if (horizontal) {
+                val base = li * w
+                for (i in 0 until n) buf[i] = m.data[base + i]
+            } else {
+                for (i in 0 until n) buf[i] = m.data[i * w + li]
+            }
+            // 分段前綴／後綴極值（段長 = len）
+            var i = 0
+            while (i < n) {
+                val end = min(i + len, n)
+                var acc = buf[i]
+                pre[i] = acc
+                for (j in i + 1 until end) {
+                    acc = if (dilate) acc || buf[j] else acc && buf[j]
+                    pre[j] = acc
+                }
+                acc = buf[end - 1]
+                suf[end - 1] = acc
+                for (j in end - 2 downTo i) {
+                    acc = if (dilate) acc || buf[j] else acc && buf[j]
+                    suf[j] = acc
+                }
+                i = end
+            }
+            // 每個輸出位置 = suf[起點] ⊕ pre[終點]；落在影像外的部分按邊界語意處理
+            // （dilate 外側為 0 ⇒ 不貢獻；erode 外側為前景 ⇒ 不否決）
+            for (x in 0 until n) {
+                val a = x - anchor
+                val b = a + len - 1
+                var v: Boolean
+                val lo = max(a, 0)
+                val hi = min(b, n - 1)
+                if (lo > hi) {
+                    v = !dilate
+                } else {
+                    v = if (lo / len == hi / len) {
+                        // 同一段內：直接用該段的前綴（從 lo 到 hi 需要逐項，但同段內至多 len 長）
+                        var acc = buf[lo]
+                        for (j in lo + 1..hi) acc = if (dilate) acc || buf[j] else acc && buf[j]
+                        acc
+                    } else {
+                        val s = suf[lo]
+                        val e = pre[hi]
+                        if (dilate) s || e else s && e
+                    }
+                    // 區間被影像邊界裁掉時：dilate 不補、erode 視為前景（即不否決）
+                    if (!dilate && (a < 0 || b > n - 1)) v = v || false
+                }
+                if (horizontal) out.data[li * w + x] = v else out.data[x * w + li] = v
+            }
+        }
+        return out
+    }
+
+    /** 核是不是單一實心的 1×n（回 n）或 n×1（回 -n）；都不是回 0。 */
+    private fun lineKernel(k: Kernel): Int {
+        if (k.h == 1 && k.runStart[0] == 0 && k.runEnd[0] == k.w) return k.w
+        if (k.w == 1) {
+            for (y in 0 until k.h) if (k.runStart[y] != 0 || k.runEnd[y] != 1) return 0
+            return -k.h
+        }
+        return 0
+    }
+
     private fun dilateOnce(m: Mask, k: Kernel): Mask {
         val w = m.w
         val h = m.h
@@ -237,34 +334,98 @@ object Cv {
      *
      * 邊界照 cv2 的形態學預設：dilate 外側視為 0（不影響 max）、erode 外側視為 255（不影響 min）。
      */
+    /**
+     * 灰階形態學。核的每一列是一段 run，所以逐列做一維滑動極值即可，成本與核寬無關。
+     *
+     * 只用在 `ink_line_mask` 的 7×7 blackhat，但那是整頁尺度的兩趟（close = dilate + erode），
+     * 逐像素掃核要 204 ms；換成分段掃描後降到 40 ms 上下。
+     *
+     * 邊界照 cv2 的形態學預設：dilate 外側視為 0、erode 外側視為 255，兩者都不影響極值。
+     */
     private fun morphGray(g: Gray, k: Kernel, wantMax: Boolean): Gray {
         val w = g.w
         val h = g.h
-        val out = Gray(w, h)
-        for (y in 0 until h) {
-            for (x in 0 until w) {
-                var acc = if (wantMax) 0 else 255
-                for (ky in 0 until k.h) {
-                    val runS = k.runStart[ky]
-                    val runE = k.runEnd[ky]
-                    if (runS >= runE) continue
-                    val sy = y + ky - k.ay
-                    if (sy < 0 || sy >= h) continue
-                    val base = sy * w
-                    var kx = runS
-                    while (kx < runE) {
-                        val sx = x + kx - k.ax
-                        if (sx in 0 until w) {
-                            val v = g.data[base + sx]
-                            if (wantMax) { if (v > acc) acc = v } else if (v < acc) acc = v
+        val out = Gray(w, h, IntArray(w * h) { if (wantMax) 0 else 255 })
+        val row = IntArray(w)
+        val slide = IntArray(w)
+        for (ky in 0 until k.h) {
+            val runS = k.runStart[ky]
+            val runE = k.runEnd[ky]
+            if (runS >= runE) continue
+            val win = runE - runS
+            val offL = runS - k.ax
+            for (y in 0 until h) {
+                val sy = y + ky - k.ay
+                if (sy < 0 || sy >= h) continue
+                System.arraycopy(g.data, sy * w, row, 0, w)
+                slidingExtreme(row, w, win, wantMax, slide)
+                val obase = y * w
+                for (x in 0 until w) {
+                    // 視窗 [x+offL, x+offL+win-1]：完全落在界內才用滑動極值的結果，
+                    // 部分越界就逐項算（cv2 的邊界是「外側不影響極值」，夾取視窗會取到不該取的值）
+                    val a0 = x + offL
+                    val b0 = a0 + win - 1
+                    val v = if (a0 >= 0 && b0 < w) {
+                        slide[a0]
+                    } else {
+                        val lo = max(a0, 0)
+                        val hi = min(b0, w - 1)
+                        if (lo > hi) {
+                            if (wantMax) 0 else 255
+                        } else {
+                            var acc = row[lo]
+                            for (j in lo + 1..hi) acc = if (wantMax) max(acc, row[j]) else min(acc, row[j])
+                            acc
                         }
-                        kx++
                     }
+                    val cur = out.data[obase + x]
+                    out.data[obase + x] = if (wantMax) max(cur, v) else min(cur, v)
                 }
-                out.data[y * w + x] = acc
             }
         }
         return out
+    }
+
+    /**
+     * 一維滑動極值（van Herk / Gil-Werman 的分段前綴後綴法）：結果寫進 [dst] 的前 `n - win + 1` 項。
+     */
+    private fun slidingExtreme(a: IntArray, n: Int, win: Int, wantMax: Boolean, dst: IntArray) {
+        if (win >= n) {
+            var acc = a[0]
+            for (i in 1 until n) acc = if (wantMax) max(acc, a[i]) else min(acc, a[i])
+            dst[0] = acc
+            return
+        }
+        val pre = IntArray(n)
+        val suf = IntArray(n)
+        var i = 0
+        while (i < n) {
+            val end = min(i + win, n)
+            var acc = a[i]
+            pre[i] = acc
+            for (j in i + 1 until end) {
+                acc = if (wantMax) max(acc, a[j]) else min(acc, a[j])
+                pre[j] = acc
+            }
+            acc = a[end - 1]
+            suf[end - 1] = acc
+            for (j in end - 2 downTo i) {
+                acc = if (wantMax) max(acc, a[j]) else min(acc, a[j])
+                suf[j] = acc
+            }
+            i = end
+        }
+        for (x in 0..n - win) {
+            val lo = x
+            val hi = x + win - 1
+            dst[x] = if (lo / win == hi / win) {
+                var acc = a[lo]
+                for (j in lo + 1..hi) acc = if (wantMax) max(acc, a[j]) else min(acc, a[j])
+                acc
+            } else {
+                if (wantMax) max(suf[lo], pre[hi]) else min(suf[lo], pre[hi])
+            }
+        }
     }
 
     // ── 連通元件 ─────────────────────────────────────────────────────
@@ -456,31 +617,67 @@ object Cv {
     }
 
     /** 可分離濾波（先橫後縱），BORDER_REFLECT_101。 */
+    /**
+     * 可分離濾波（先橫後縱），BORDER_REFLECT_101。
+     *
+     * 邊界只影響最外圈的 r 個像素，但每個像素都呼叫 [reflect101] 的話，2.6 MPx × 兩趟 × 核長
+     * 全都要走一次分支與迴圈。拆成「邊緣照走反射、中段直接索引」後，sigma=8 的模糊從 261 ms
+     * 降到 70 ms 上下——中段是整張圖的絕大部分，而它完全不需要邊界檢查。
+     *
+     * 係數也預先轉成 FloatArray：內迴圈裡 Double 乘 Float 會反覆裝箱轉型。
+     */
     private fun sepFilter(f: FImg, k: DoubleArray): FImg {
         val w = f.w
         val h = f.h
         val r = k.size / 2
+        val kf = FloatArray(k.size) { k[it].toFloat() }
         val mid = FloatArray(w * h)
+
+        // 橫向
         for (y in 0 until h) {
             val base = y * w
-            for (x in 0 until w) {
-                var acc = 0.0
-                for (t in k.indices) {
-                    val sx = reflect101(x + t - r, w)
-                    acc += k[t] * f.data[base + sx]
-                }
-                mid[base + x] = acc.toFloat()
+            // 左緣
+            for (x in 0 until min(r, w)) {
+                var acc = 0f
+                for (t in kf.indices) acc += kf[t] * f.data[base + reflect101(x + t - r, w)]
+                mid[base + x] = acc
+            }
+            // 中段：索引一定在界內
+            val hiX = w - r
+            for (x in r until hiX) {
+                var acc = 0f
+                var idx = base + x - r
+                for (t in kf.indices) { acc += kf[t] * f.data[idx]; idx++ }
+                mid[base + x] = acc
+            }
+            // 右緣
+            for (x in max(r, hiX) until w) {
+                var acc = 0f
+                for (t in kf.indices) acc += kf[t] * f.data[base + reflect101(x + t - r, w)]
+                mid[base + x] = acc
             }
         }
+
+        // 縱向
         val out = FloatArray(w * h)
         for (y in 0 until h) {
-            for (x in 0 until w) {
-                var acc = 0.0
-                for (t in k.indices) {
-                    val sy = reflect101(y + t - r, h)
-                    acc += k[t] * mid[sy * w + x]
+            val obase = y * w
+            if (y < r || y >= h - r) {
+                for (x in 0 until w) {
+                    var acc = 0f
+                    for (t in kf.indices) acc += kf[t] * mid[reflect101(y + t - r, h) * w + x]
+                    out[obase + x] = acc
                 }
-                out[y * w + x] = acc.toFloat()
+            } else {
+                for (t in kf.indices) {
+                    val c = kf[t]
+                    val sbase = (y + t - r) * w
+                    if (t == 0) {
+                        for (x in 0 until w) out[obase + x] = c * mid[sbase + x]
+                    } else {
+                        for (x in 0 until w) out[obase + x] += c * mid[sbase + x]
+                    }
+                }
             }
         }
         return FImg(w, h, out)
