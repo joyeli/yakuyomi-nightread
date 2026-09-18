@@ -45,6 +45,8 @@ data class NightReadParams(
     val deepInkRatio: Double = 0.02,
     val holeMaxFrac: Double = 0.01,
     val safeGutterDepth: Double = 0.12,
+    val gfcDilate: Int = 4,
+    val gfcCloseFrac: Double = 0.30,
 
     // 氣泡
     val bubbleCompMaxFrac: Double = 0.07,

@@ -232,10 +232,21 @@ object Cv {
                     v = !dilate
                 } else {
                     v = if (lo / len == hi / len) {
-                        // 同一段內：直接用該段的前綴（從 lo 到 hi 需要逐項，但同段內至多 len 長）
-                        var acc = buf[lo]
-                        for (j in lo + 1..hi) acc = if (dilate) acc || buf[j] else acc && buf[j]
-                        acc
+                        // 同一段內：窗只有被影像邊界裁掉時才短於 len，此時必有一端貼齊段邊界
+                        // （左裁 ⇒ lo 是段 0 起點、右裁 ⇒ hi 是末段終點；沒裁則 lo 必為段起點）
+                        // ⇒ 用該段的前綴／後綴 O(1) 取得。逐項那條是防呆，理論上進不去——
+                        // 留著是因為它慢得致命：核長 405 時邊界區每行要掃 len²/2 次（實測 229 ms）。
+                        val segStart = (lo / len) * len
+                        val segEnd = min(segStart + len, n) - 1
+                        when {
+                            lo == segStart -> pre[hi]
+                            hi == segEnd -> suf[lo]
+                            else -> {
+                                var acc = buf[lo]
+                                for (j in lo + 1..hi) acc = if (dilate) acc || buf[j] else acc && buf[j]
+                                acc
+                            }
+                        }
                     } else {
                         val s = suf[lo]
                         val e = pre[hi]

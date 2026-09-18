@@ -109,7 +109,7 @@ object NightRead {
         val lost = bubbleBeforeTrim.andNot(bubble)
 
         // ── 合成 ──────────────────────────────────────────────────────
-        val out = compose(g, seg, gutter, bubble, frameless, wc, plan, frame,
+        val out = compose(g, seg, gutter, bubble, frameless, wc, plan, frame, lh, lv,
             input.regions, charMask, charRaw, bubbleRest, lost, p, debug)
         return NightReadResult(out, gutter, bubble, charMask, frameless, plan.accept, plan.promoted)
     }
@@ -521,7 +521,7 @@ object NightRead {
 
     private fun compose(
         g: Gray, seg: Mask, gutterIn: Mask, bubble: Mask, frameless: Boolean,
-        wc: Regions.WhiteComponents, plan: Sticker.Plan, frame: Mask,
+        wc: Regions.WhiteComponents, plan: Sticker.Plan, frame: Mask, lh: Mask, lv: Mask,
         regions: List<TextRegion>, charMask: Mask, charRaw: Mask,
         bubbleRest: Mask?, lost: Mask, p: NightReadParams, debug: NightReadDebug?,
     ): Gray {
@@ -550,8 +550,10 @@ object NightRead {
                 if (keep.any()) paintGutter(out, g, keep, p)
             } else {
                 val lim = p.safeGutterDepth * min(h, w)
+                // 格內背景與頁邊留白在像素層連通 ⇒ 先沿格框線切開，只留真的留白
+                val cut = Regions.gutterFrameCut(gutterIn, lh, lv, p)
                 val band = Mask(w, h)
-                for (i in band.data.indices) band.data[i] = gutterIn.data[i] && bd[i] <= lim
+                for (i in band.data.indices) band.data[i] = cut.data[i] && bd[i] <= lim
                 debug?.invoke("gutterBand", band.count())
                 if (band.any()) paintGutter(out, g, band, p)
             }

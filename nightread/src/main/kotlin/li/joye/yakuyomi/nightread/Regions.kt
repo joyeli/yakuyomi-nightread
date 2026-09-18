@@ -93,6 +93,86 @@ internal object Regions {
         return !(min(hk, vk) >= p.frameMinEach && hk + vk >= p.frameMinSum)
     }
 
+    /**
+     * 格框線切割：把留白遮罩沿格框線斷開，只留真的是留白的塊。
+     *
+     * 病根：格內的淺色背景（牆面／窗／地板）與頁邊留白在像素層**連通成同一個白元件**
+     * ⇒ 整塊被判留白填黑。元件級別救不了——「深入頁內」量的是距頁邊的距離，緊貼頁面
+     * 上下緣的橫幅格永遠算不上深入（ch34_011 那顆白元件橫跨 y870..1920、深入只有 0.9%）。
+     * 這裡逐像素切：用框線斷開遮罩，只保留「仍碰得到頁邊」或「細得像真格溝」的塊。
+     */
+    fun gutterFrameCut(gutter: Mask, lhIn: Mask, lvIn: Mask, p: NightReadParams): Mask {
+        if (!gutter.any()) return gutter
+        val w = gutter.w
+        val h = gutter.h
+        var lh = lhIn
+        var lv = lvIn
+        val raw = lh or lv                       // 真的偵測到的框線
+        if (p.gfcCloseFrac > 0) {                // 沿線方向閉合＝補上被出血人物打斷的框線
+            val c = max(3, (p.gfcCloseFrac * min(w, h)).roundToInt())
+            lh = Cv.close(lh, Cv.rect(c, 1))
+            lv = Cv.close(lv, Cv.rect(1, c))
+        }
+        val bridge = (lh or lv).andNot(raw)      // 閉合補出來的橋
+        if (!raw.any() && !bridge.any()) return gutter
+        // 真框線要膨脹（補缺口），橋不膨脹：橋本來就是實心線、切開就夠；跟著膨脹會吃掉它
+        // 順著跑的那條留白（長線開運算在黑髮團裡會誤判出假框線，閉合再把假線接成長橋）。
+        val fr = Cv.dilate(raw, Cv.ellipse(p.gfcDilate * 2 + 1)) or bridge
+        val cut = gutter.andNot(fr)
+        val cc = Cv.ccStats(cut, 8)
+        if (cc.n <= 1) return gutter
+        // 「碰得到頁邊」的容差要涵蓋框線膨脹：頁緣本身常是一條長暗線（掃描邊／最外格框），
+        // 膨脹後會把貼邊那幾 px 白吃掉 ⇒ 2px 判定會把整片頁邊留白誤判成不碰邊。
+        val etol = p.gfcDilate + 3
+        val keepId = BooleanArray(cc.n)
+        val thin = ArrayList<Int>()
+        for (i in 1 until cc.n) {
+            val touches = cc.left[i] <= etol || cc.top[i] <= etol ||
+                cc.left[i] + cc.width[i] >= w - etol || cc.top[i] + cc.height[i] >= h - etol
+            if (touches) keepId[i] = true else thin.add(i)   // 碰得到頁邊＝真留白
+        }
+        // 只有不碰邊的塊要看粗細：細長（半寬遠小於 coreR）＝真格溝，也留著，防閉合把格溝
+        // 橫切成孤島 ⇒ 該填的反而留灰。距離變換整頁算要 52 ms，而這裡只問「max 有沒有超過
+        // coreR」，所以逐塊在 bbox 外擴 coreR+8 的視窗內算——視窗邊界只會**低估**距離，而
+        // pad 大於門檻，所以「是否 ≤ coreR」的答案與整頁算完全相同。
+        for (i in thin) {
+            val pad = p.coreR + 8
+            val x0 = max(0, cc.left[i] - pad)
+            val y0 = max(0, cc.top[i] - pad)
+            val x1 = min(w, cc.left[i] + cc.width[i] + pad)
+            val y1 = min(h, cc.top[i] + cc.height[i] + pad)
+            val sw = x1 - x0
+            val sub = Mask(sw, y1 - y0)
+            for (y in y0 until y1) {
+                val src = y * w
+                val dst = (y - y0) * sw - x0
+                for (x in x0 until x1) sub.data[dst + x] = cut.data[src + x]
+            }
+            val sd = Cv.distanceL2(sub)
+            var mx = 0f
+            for (y in cc.top[i] until cc.top[i] + cc.height[i]) {
+                val src = y * w
+                val dst = (y - y0) * sw - x0
+                for (x in cc.left[i] until cc.left[i] + cc.width[i]) {
+                    if (cc.labels[src + x] == i && sd.data[dst + x] > mx) mx = sd.data[dst + x]
+                }
+            }
+            keepId[i] = mx <= p.coreR
+        }
+        val keep = Mask(w, h)
+        for (i in keep.data.indices) {
+            val l = cc.labels[i]
+            if (l > 0 && keepId[l]) keep.data[i] = true
+        }
+        if (!keep.any()) return gutter           // 全切光＝框線偵測異常，退回不切
+        // 框線帶回填：否則格框旁留一圈白
+        val near = Cv.dilate(keep, Cv.ellipse((p.gfcDilate + 2) * 2 + 1))
+        for (i in keep.data.indices) {
+            if (gutter.data[i] && fr.data[i] && near.data[i]) keep.data[i] = true
+        }
+        return keep
+    }
+
     // ── 白元件分類 ───────────────────────────────────────────────────
 
     /** 白元件分類的結果：留白（填深）與格內白（當畫面壓暗）。 */
