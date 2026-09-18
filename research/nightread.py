@@ -102,6 +102,8 @@ DEEP_INK_DEEP = 0.5     # 規則B：厚芯深入 ≥ 此
 DEEP_INK_RATIO = 0.02   #        且小洞內墨/面積 ≥ 此 ⇒ 白包畫，改判畫面
 HOLE_MAX_FRAC = 0.01    # 「小洞」整頁佔比上限（大洞＝整格，不算包線稿）
 SAFE_GUTTER_DEPTH = 0.12    # 有框頁的留白只填深入 ≤ 短邊×此 的部分
+GFC_DILATE = 4          # 格框線切割：框線膨脹半徑（補線稿造成的細缺口）
+GFC_CLOSE_FRAC = 0.30   #   沿線方向閉合長度（佔短邊）：橋接被出血人物打斷的框線
 
 # 氣泡
 BUBBLE_COMP_MAX_FRAC = 0.07 # 泡元件整頁佔比上限
@@ -331,6 +333,54 @@ def frame_line_mask(g):
     lh = cv2.morphologyEx(dark, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (L, 1)))
     lv = cv2.morphologyEx(dark, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (1, L)))
     return lh, lv
+
+
+def gutter_frame_cut(g, gutter):
+    """格框線切割：把留白遮罩沿格框線斷開，只留真的是留白的塊。
+
+    病根：格內的淺色背景（牆面／窗／地板）與頁邊留白在像素層連通成**同一個白元件**
+    ⇒ 整塊被判留白填黑。元件級別救不了——「深入頁內」量的是距頁邊的距離，緊貼頁面
+    上下緣的橫幅格永遠算不上深入（ch34_011 那顆白元件橫跨 y870..1920、深入只有 0.9%）。
+    這裡逐像素切：用框線斷開遮罩，只保留「仍碰得到頁邊」或「細得像真格溝」的塊。
+    """
+    if not gutter.any():
+        return gutter
+    H, W = gutter.shape
+    lh, lv = frame_line_mask(g)
+    raw = ((lh | lv) > 0).astype(np.uint8)       # 真的偵測到的框線
+    if GFC_CLOSE_FRAC > 0:                       # 沿線方向閉合＝補上被出血人物打斷的框線
+        c = max(3, int(round(GFC_CLOSE_FRAC * min(W, H))))
+        lh = cv2.morphologyEx(lh, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (c, 1)))
+        lv = cv2.morphologyEx(lv, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (1, c)))
+    bridge = ((lh | lv) > 0).astype(np.uint8) & (raw == 0)     # 閉合補出來的橋
+    if not (raw.any() or bridge.any()):
+        return gutter
+    # 真框線要膨脹（補缺口），橋不膨脹：橋本來就是實心線、切開就夠；跟著膨脹會吃掉它
+    # 順著跑的那條留白（長線開運算在黑髮團裡會誤判出假框線，閉合再把假線接成長橋）。
+    kd = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (GFC_DILATE * 2 + 1,) * 2)
+    fr = cv2.dilate(raw, kd) | bridge
+    cutm = (gutter & (fr == 0)).astype(np.uint8)
+    n, lb, st, _ = cv2.connectedComponentsWithStats(cutm, 8)
+    if n <= 1:
+        return gutter
+    dist = cv2.distanceTransform(cutm, cv2.DIST_L2, 5)
+    keep = np.zeros((H, W), bool)
+    # 「碰得到頁邊」的容差要涵蓋框線膨脹：頁緣本身常是一條長暗線（掃描邊／最外格框），
+    # 膨脹後會把貼邊那幾 px 白吃掉 ⇒ 2px 判定會把整片頁邊留白誤判成不碰邊。
+    etol = GFC_DILATE + 3
+    for i in range(1, n):
+        x, y, w, h = st[i, 0], st[i, 1], st[i, 2], st[i, 3]
+        if x <= etol or y <= etol or x + w >= W - etol or y + h >= H - etol:
+            keep |= (lb == i)                    # 仍碰得到頁邊＝真留白
+        else:
+            m = lb == i
+            if float(dist[m].max()) <= CORE_R:   # 細長＝真格溝（半寬遠小於 CORE_R）
+                keep |= m                        # 防閉合把格溝橫切成孤島 ⇒ 該填的反而留灰
+    if not keep.any():
+        return gutter                            # 全切光＝框線偵測異常，退回不切
+    kb = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, ((GFC_DILATE + 2) * 2 + 1,) * 2)
+    keep |= gutter & (fr > 0) & (cv2.dilate(keep.astype(np.uint8), kb) > 0)  # 框線帶回填
+    return keep
 
 
 def page_is_frameless(g):
@@ -1063,7 +1113,7 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
             fd = cv2.distanceTransform((frame == 0).astype(np.uint8), cv2.DIST_L2, 3)
             bd = np.minimum(bd, fd)
         lim = SAFE_GUTTER_DEPTH * min(H2, W2)
-        band = gutter & (bd <= lim)
+        band = gutter_frame_cut(g, gutter) & (bd <= lim)   # 先沿格框線切開再取頁邊帶
         if band.any():
             out = paint_gutter(out, g, band, frame=frame, bubble=bubble)
     elif gutter.any():
