@@ -113,21 +113,27 @@ internal object Regions {
         val h = g.h
         val white = g.ge(p.whiteTh)
         val cc = Cv.ccStats(white, 8)
-        val dist = Cv.distanceL2(white)
         val deepPx = max(64, (p.deepEdgeFrac * min(w, h)).roundToInt())
         val minArea = (g.data.size * p.gutterMinAreaFrac).toInt()
 
+        // 先挑出真正要判斷的元件：夠大、且貼頁邊。距離變換是整頁的重活（60 ms），
+        // 沒有候選就完全不必算。
+        val cands = (1 until cc.n).filter { i ->
+            cc.area[i] >= minArea &&
+                (cc.left[i] <= 2 || cc.top[i] <= 2 ||
+                    cc.left[i] + cc.width[i] >= w - 2 || cc.top[i] + cc.height[i] >= h - 2)
+        }
         val gutter = HashSet<Int>()
         val panel = HashSet<Int>()
-        for (i in 1 until cc.n) {
+        if (cands.isEmpty()) return WhiteComponents(cc, gutter, panel)
+        val dist = Cv.distanceL2(white)
+
+        for (i in cands) {
             val a = cc.area[i]
-            if (a < minArea) continue
             val x = cc.left[i]
             val y = cc.top[i]
             val cw = cc.width[i]
             val ch = cc.height[i]
-            if (!(x <= 2 || y <= 2 || x + cw >= w - 2 || y + ch >= h - 2)) continue
-
             var coreCount = 0
             var coreDeep = 0
             for (yy in y until y + ch) {

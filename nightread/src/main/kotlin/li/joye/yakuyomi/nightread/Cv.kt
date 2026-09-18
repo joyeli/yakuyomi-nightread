@@ -762,6 +762,35 @@ object Cv {
         return FImg(nw, nh, out)
     }
 
+    /**
+     * 雙線性放大（`cv2.resize(..., INTER_LINEAR)` 的幾何：來源座標 `(dst + 0.5) * scale - 0.5`）。
+     *
+     * 給「在半解析度算、放大回來用」的平滑場用：大 sigma 的模糊本來就沒有高頻，降採樣再放大
+     * 的誤差遠小於它的平滑尺度。
+     */
+    fun resizeBilinear(f: FImg, nw: Int, nh: Int): FImg {
+        if (nw == f.w && nh == f.h) return f.copy()
+        val out = FloatArray(nw * nh)
+        val sx = f.w.toDouble() / nw
+        val sy = f.h.toDouble() / nh
+        for (y in 0 until nh) {
+            val fy = ((y + 0.5) * sy - 0.5).coerceIn(0.0, (f.h - 1).toDouble())
+            val y0 = fy.toInt()
+            val y1 = min(y0 + 1, f.h - 1)
+            val wy = (fy - y0).toFloat()
+            for (x in 0 until nw) {
+                val fx = ((x + 0.5) * sx - 0.5).coerceIn(0.0, (f.w - 1).toDouble())
+                val x0 = fx.toInt()
+                val x1 = min(x0 + 1, f.w - 1)
+                val wx = (fx - x0).toFloat()
+                val a = f.data[y0 * f.w + x0] * (1 - wx) + f.data[y0 * f.w + x1] * wx
+                val b = f.data[y1 * f.w + x0] * (1 - wx) + f.data[y1 * f.w + x1] * wx
+                out[y * nw + x] = a * (1 - wy) + b * wy
+            }
+        }
+        return FImg(nw, nh, out)
+    }
+
     /** `cv2.resize(m, (nw, nh), INTER_NEAREST)`（cv2 取 `floor(dst * scale)`）。 */
     fun resizeNearest(m: Mask, nw: Int, nh: Int): Mask {
         val w = m.w
@@ -910,15 +939,45 @@ object Cv {
      */
     fun geodesicGrow(seed: Mask, within: Mask, iters: Int, step: Int = 5): Mask {
         if (iters <= 0) return seed and within
-        val k = rect(3, 3)
-        var cur = seed and within
+        val w = seed.w
+        val h = seed.h
+        var cur = (seed and within).data
+        var next = BooleanArray(w * h)
+        // 3×3 膨脹 + 與 within 取交集，就地做：原本每次迭代都走通用 dilate（走核的 run 分解、
+        // 配置新陣列），十次迭代就是十次全頁配置。3×3 直接看八鄰居更短也不配置。
+        //
+        // ⚠️ within 的交集要照 Python 的節奏：它是 `dilate(cur, k, iterations=n) & within`，
+        // 也就是**連做 n 次膨脹後才交集一次**。每次都交集會讓生長被 within 的細縫擋住，
+        // 結果完全不同（實測 MAE 0.57→0.93、紅線 0.09→0.36%）。
         var done = 0
         while (done < iters) {
             val n = min(step, iters - done)
-            cur = dilate(cur, k, iterations = n) and within
+            var changed = false
+            repeat(n) { sub ->
+                val last = sub == n - 1
+                for (y in 0 until h) {
+                    val base = y * w
+                    val up = base - w
+                    val dn = base + w
+                    for (x in 0 until w) {
+                        val i = base + x
+                        if (last && !within.data[i]) { next[i] = false; continue }
+                        if (cur[i]) { next[i] = true; continue }
+                        val l = x > 0
+                        val r = x < w - 1
+                        val hit = (l && cur[i - 1]) || (r && cur[i + 1]) ||
+                            (y > 0 && (cur[up + x] || (l && cur[up + x - 1]) || (r && cur[up + x + 1]))) ||
+                            (y < h - 1 && (cur[dn + x] || (l && cur[dn + x - 1]) || (r && cur[dn + x + 1])))
+                        next[i] = hit
+                        if (hit) changed = true
+                    }
+                }
+                val t = cur; cur = next; next = t
+            }
             done += n
+            if (!changed) return Mask(w, h, cur)   // 長不動了就停
         }
-        return cur
+        return Mask(w, h, cur)
     }
 
     /**

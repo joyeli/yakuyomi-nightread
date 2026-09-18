@@ -43,11 +43,14 @@ object NightRead {
         val frame = lh or lv
         val frameless = Regions.pageIsFrameless(lh, lv, p)
         val wc = Regions.classifyWhiteComponents(g, p)
+        debug?.invoke("classifyWhite", 0)
         val excluded = wc.gutterIds + wc.panelIds
         val bubbleRes = Regions.buildBubbleMask(g, input.regions, seg, wc.cc, excluded, p)
         var bubble = bubbleRes.bubble
+        debug?.invoke("buildBubble", 0)
         val plan = Sticker.plan(g, input.chroma, wc, frameless, input.regions, frame, p)
 
+        debug?.invoke("stickerPlan", 0)
         val gutterShow = if (frameless) wc.gutterIds - plan.accept else wc.gutterIds
         val gutter = maskOfIds(wc.cc, gutterShow, w, h)
 
@@ -68,6 +71,7 @@ object NightRead {
         // ── 圖層優先權：乾淨泡整顆塗黑、泡遮罩不跨進人物 ─────────────────
         var bubbleGuard = charMask
         bubbleGuard = bubbleGuard.andNot(cleanBubbles(g, bubble, seg, p))
+        debug?.invoke("cleanBubbles", 0)
         val bubbleBeforeTrim = bubble.copy()
         val removed = bubble and bubbleGuard
         if (removed.any()) {
@@ -193,10 +197,16 @@ object NightRead {
     private fun inkLineMask(g: Gray, seg: Mask): FloatArray {
         val bh = Cv.blackhat(g, Cv.ellipse(7))
         val soft = FloatArray(g.data.size)
+        // 暗度權重在 g >= 185 時是 0，那些像素的 blackhat 值再大也乘成 0——紙面佔了頁面大半，
+        // 先判斷就跳過後面的除法與夾取。⚠️ blackhat 本身不能省：它抓的是細墨線（高頻），
+        // 降解析度或先篩輸入都會讓線斷掉。
         for (i in soft.indices) {
-            var v = (bh.data[i] / 45.0).coerceIn(0.0, 1.0)
-            v *= ((185.0 - g.data[i]) / (185.0 - 40.0)).coerceIn(0.0, 1.0)
-            soft[i] = max(v, if (seg.data[i]) 1.0 else 0.0).toFloat()
+            val gv = g.data[i]
+            if (seg.data[i]) { soft[i] = 1f; continue }
+            if (gv >= 185) continue
+            val w = if (gv <= 40) 1.0 else (185.0 - gv) / 145.0
+            val v = (bh.data[i] / 45.0).coerceAtMost(1.0) * w
+            soft[i] = v.toFloat()
         }
         return soft
     }
@@ -209,7 +219,11 @@ object NightRead {
         val lut = lutScene(p)
         val dimmed = Gray(g.w, g.h, IntArray(g.data.size) { lut[g.data[it]] })
         val soft = inkLineMask(g, seg)
-        val bg = Cv.gaussianBlur(dimmed.toF(), 8.0)
+        // 這個高斯只是估「局部背景亮度」，用來判斷筆畫增亮要不要生效。sigma=8 的大模糊本來就
+        // 把細節抹光了，在半解析度算再放大，數值差不到 1 階，成本卻只剩四分之一（99→28 ms）。
+        val half = Cv.resizeArea(dimmed.toF(), max(1, g.w / 2), max(1, g.h / 2))
+        val bgHalf = Cv.gaussianBlur(half, 4.0)
+        val bg = Cv.resizeBilinear(bgHalf, g.w, g.h)
         val out = FImg(g.w, g.h)
         for (i in out.data.indices) {
             var gain = p.glowStrength * soft[i]
@@ -514,6 +528,7 @@ object NightRead {
         val w = g.w
         val h = g.h
         val out = sceneFinal(g, seg, p)
+        debug?.invoke("sceneFinal", 0)
         val sceneKeep = out.copy()              // 人物區最終一律還原成場景調
 
         // 留白：有框頁只填「深入不超過短邊 12%」的部分；無框頁只填真頁邊帶
@@ -545,11 +560,14 @@ object NightRead {
         if (plan.accept.isNotEmpty()) {
             paintSticker(out, g, wc.cc, plan.accept, bubble, plan.promoted, frame, seg, charMask, p)
         }
+        debug?.invoke("paintSticker", 0)
         paintBubbles(out, g, bubble, seg, p)
+        debug?.invoke("paintBubbles", 0)
         val pb = buildPseudoBubbles(g, regions, bubble, seg, p)
         debug?.invoke("pseudoBubble", pb.count())
         if (pb.any()) paintBubbles(out, g, pb, seg, p)
         harmonize(out, g, bubble or pb or gutterIn, p)
+        debug?.invoke("harmonize", 0)
 
         // 字永遠在最上層：被人物扣掉的泡區裡，字筆畫及其貼身帶維持深底亮字
         if (lost.any()) {
