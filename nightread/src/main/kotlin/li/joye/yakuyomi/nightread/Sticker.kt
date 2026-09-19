@@ -224,6 +224,9 @@ internal object Sticker {
 
         val cand = HashSet<Int>()
         val hug = HashMap<Int, Double>()
+        // 貼框只發生在一對相對邊（另一對兩邊都不貼）＝元件被格框**截斷**，不是沿格框跑。
+        // 扁格（高 147 px 的橫幅格）裡的前景衣料白正是這型：上下必然整條貼框、左右不貼。
+        val hugCut = HashMap<Int, Boolean>()
         if (frameless) {
             for (i in wc.gutterIds + wc.panelIds) {
                 if (cc.area[i] >= p.stickerMinFrac * g.data.size) cand.add(i)
@@ -241,12 +244,30 @@ internal object Sticker {
                 val win = window(g, cc, i, pad)
                 val grown = Cv.dilate(win.comp, kd)
                 var contact = 0
+                var topC = 0
+                var botC = 0
+                var lefC = 0
+                var rigC = 0
+                val bw = max(1, cc.width[i]).toDouble()
+                val bh = max(1, cc.height[i]).toDouble()
                 for (y in 0 until win.h) {
                     val src = (win.y0 + y) * g.w + win.x0
+                    val ry = (win.y0 + y - cc.top[i]) / bh
                     for (x in 0 until win.w) {
-                        if (grown.data[y * win.w + x] && frame.data[src + x]) contact++
+                        if (grown.data[y * win.w + x] && frame.data[src + x]) {
+                            contact++
+                            if (ry < 0.15) topC++ else if (ry > 0.85) botC++
+                            val rx = (win.x0 + x - cc.left[i]) / bw
+                            if (rx < 0.15) lefC++ else if (rx > 0.85) rigC++
+                        }
                     }
                 }
+                // 每邊的覆蓋＝該邊的接觸像素 ÷ 名目線厚 ÷ 邊長（會 >1：膨脹後的接觸帶較厚）
+                val tc = topC / p.frameHugThick / bw
+                val bc = botC / p.frameHugThick / bw
+                val lc = lefC / p.frameHugThick / bh
+                val rc = rigC / p.frameHugThick / bh
+                hugCut[i] = max(tc, bc) < p.hugSideMin || max(lc, rc) < p.hugSideMin
                 val hugLen = contact / p.frameHugThick
                 val frac = hugLen / max(1.0, 2.0 * (cc.width[i] + cc.height[i]))
                 hug[i] = frac
@@ -266,7 +287,11 @@ internal object Sticker {
                     met.chroma <= p.stickerChromaMax &&
                     met.eatenFrac <= p.stickerEatenHard &&
                     met.textOn <= p.promotedTextOnMax &&
-                    met.faintOfF <= p.faintOfFMax
+                    met.faintOfF <= p.faintOfFMax &&
+                    // 截斷型的小元件＝被格框切斷的前景物件，不是格背景
+                    !(hugCut[i] == true &&
+                        met.areaFrac < p.stickerSmallArea &&
+                        met.textOn < p.stickerTextBgMin)
                 if (ok) promoted.add(i)
             } else {
                 val textCovOk = met.textCov <= p.stickerTextMax || met.areaFrac >= 0.02

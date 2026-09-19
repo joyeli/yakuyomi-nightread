@@ -98,6 +98,7 @@ data class NightReadParams(
     val frameHugThick: Double = 3.0,
     val frameHugMin: Double = 0.25,
     val frameHugStrong: Double = 0.4,
+    val hugSideMin: Double = 0.5,
     val promotedTextOnMax: Double = 0.3,
 
     // 核心填色
