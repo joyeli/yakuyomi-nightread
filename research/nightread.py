@@ -1075,14 +1075,16 @@ def texture_veto2(fill, g, frame, seg, bubble):
         big = [j for j in range(1, nv) if int(vst[j, cv2.CC_STAT_AREA]) >= GT2_MIN and mean[j] >= GT2_HI]
         veto = np.isin(vlab, big) if big else np.zeros_like(veto)
         if veto.any():
-            kc = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (GT2_CLOSE * 2 + 1,) * 2)
+            # 方形核（不用橢圓）：這三個核只是補洞／外擴／跟隨，形狀沒有語意；方形可拆成橫線＋直線，
+            # Kotlin 端走 van Herk 快路，橢圓核要 O(W·H·kh)——實測差 200 ms。
+            kc = np.ones((GT2_CLOSE * 2 + 1,) * 2, np.uint8)
             veto = (cv2.morphologyEx(veto.astype(np.uint8), cv2.MORPH_CLOSE, kc) > 0) & cands
     if veto.any():
-        kk = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (GT2_PAD * 2 + 1,) * 2)
+        kk = np.ones((GT2_PAD * 2 + 1,) * 2, np.uint8)
         veto = (cv2.dilate(veto.astype(np.uint8), kk) > 0) & ~bubnear[ry0:ry1, rx0:rx1]
         # 泡附近不算密度（泡輪廓會污染），但要**跟著外圈走**：外圈被否決就一起否決，
         # 外圈留黑就一起留黑——否則背景變灰時那 25px 會浮成一圈黑環。
-        kb = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (GT2_BUBDIL * 2 + 1,) * 2)
+        kb = np.ones((GT2_BUBDIL * 2 + 1,) * 2, np.uint8)
         veto |= (cv2.dilate(veto.astype(np.uint8), kb) > 0) & bubnear[ry0:ry1, rx0:rx1] & fill[ry0:ry1, rx0:rx1]
     out = fill.copy()
     out[ry0:ry1, rx0:rx1] &= ~veto
