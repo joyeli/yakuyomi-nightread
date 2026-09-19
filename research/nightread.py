@@ -991,6 +991,104 @@ def ink_alpha(g, gain):
     return np.clip((1.0 - g.astype(np.float32) / 255.0) * gain, 0.0, 1.0)
 
 
+# ── 線稿密度否決：有線稿的白不是留白 ───────────────────────────────────────
+# 判準＝真留白是空的，格內背景有窗格線／牆面陰影／網點；這是唯一能分開「頁邊白」與「有畫的
+# 背景剛好連到頁邊」的訊號（幾何方法對 demo01 第 1 格拱門 53.3% → 53.3%，一個像素動不了）。
+# 與第一版（experiments/fixes_ABC_20260918.patch）的差別，三條都是衝著它的病來的：
+#   ① 只在「要填的像素」外擴一個窗的範圍內算，不掃全頁（第一版 +1s/頁）；
+#   ② 離氣泡 GT2_BUBDIL 內的像素**永不否決**（第一版是把泡從線稿裡扣掉，仍有三處灰暈殘留）；
+#   ③ 每個格框區域只在（區 ∩ 要填像素）的 bbox 內算，不是整個區域的 bbox。
+GT2_TH = 0.10       # 逐像素密度 ≥ 此進候選塊
+GT2_WIN = 31        # 量測窗邊長
+GT2_PAD = 4         # 否決區外擴（密度在紋路邊緣先衰減，不外擴會沿線稿殘留黑條）
+GT2_MIN = 1500      # 否決塊最小面積（碎塊不否決）
+GT2_FRDIL = 9       # 格框線外擴（框線本身不算線稿）
+GT2_SEGDIL = 21     # 文字筆畫外擴（字不算線稿）
+GT2_BUBDIL = 25     # 泡外這麼多 px 內永不否決
+GT2_REGMIN = 0.002  # 參與量測的格框區域最小頁佔比
+GT2_HI = 0.15       # 候選塊的平均密度 ≥ 此才整塊否決（逐像素會在門檻附近斑掉）
+GT2_CLOSE = 15      # 否決塊閉合半徑（補洞，去斑）
+GT2_BUBCONTENT = 8  # 泡輪廓外擴這麼多 px 不算線稿，且泡當區域隔板
+
+
+def texture_veto2(fill, g, frame, seg, bubble):
+    """把「有線稿」的塊從留白填色裡剔掉。回傳新的 fill。"""
+    if not np.any(fill):
+        return fill
+    H, W = g.shape
+    k = GT2_WIN
+    fr = np.zeros((H, W), np.uint8) if frame is None else (np.asarray(frame) > 0).astype(np.uint8)
+    if fr.any():
+        fr = cv2.dilate(fr, np.ones((GT2_FRDIL,) * 2, np.uint8))
+    # 候選＝要填、且離泡夠遠。泡附近永不否決 ⇒ 泡輪廓的密度再高也製造不出灰暈。
+    bubnear = np.zeros((H, W), bool)
+    if bubble is not None and np.any(bubble):
+        bubnear = cv2.dilate(np.asarray(bubble).astype(np.uint8), np.ones((GT2_BUBDIL,) * 2, np.uint8)) > 0
+    cand = fill & ~bubnear
+    if not cand.any():
+        return fill
+    ys, xs = np.nonzero(cand)
+    ry0, ry1 = max(0, int(ys.min()) - k), min(H, int(ys.max()) + k + 1)
+    rx0, rx1 = max(0, int(xs.min()) - k), min(W, int(xs.max()) + k + 1)
+    # ── 以下全在 ROI 內 ──
+    gs = g[ry0:ry1, rx0:rx1]
+    frbs = fr[ry0:ry1, rx0:rx1] > 0
+    cands = cand[ry0:ry1, rx0:rx1]
+    content = (gs < WHITE_TH) & ~frbs
+    if seg is not None:
+        content &= ~(cv2.dilate(seg[ry0:ry1, rx0:rx1].astype(np.uint8),
+                                np.ones((GT2_SEGDIL,) * 2, np.uint8)) > 0)
+    barrier = frbs
+    if bubble is not None and np.any(bubble):
+        # 泡的輪廓線不算線稿：不扣的話它會從泡外 25～40px 的窗裡被看到，把頁邊窄條／泡尾旁的
+        # 空白判成「有畫」——ch34_014 左頁邊那條灰帶、右下大泡尾巴的灰楔都是它。
+        bub_d = cv2.dilate(np.asarray(bubble)[ry0:ry1, rx0:rx1].astype(np.uint8),
+                           np.ones((GT2_BUBCONTENT * 2 + 1,) * 2, np.uint8)) > 0
+        content &= ~bub_d
+        # 泡壓在框線上會把框線斷開一個泡那麼寬的缺口，頁邊條和格子內部就連成同一區，格內
+        # 網點的密度滲到頁邊條上（ch34_014 右下泡尾下方那塊）。泡裡沒有線稿，當隔板無損。
+        barrier = frbs | bub_d
+    cf = content.astype(np.float32)
+    n, rlab, rst, _ = cv2.connectedComponentsWithStats((~barrier).astype(np.uint8), 8)
+    dens = np.zeros(cands.shape, np.float32)
+    cy, cx = np.nonzero(cands)
+    cl = rlab[cy, cx]
+    min_area = GT2_REGMIN * g.size
+    for i in np.unique(cl):
+        if i == 0 or int(rst[i, cv2.CC_STAT_AREA]) < min_area:
+            continue
+        sel = cl == i
+        y0, y1 = max(0, int(cy[sel].min()) - k), min(dens.shape[0], int(cy[sel].max()) + k + 1)
+        x0, x1 = max(0, int(cx[sel].min()) - k), min(dens.shape[1], int(cx[sel].max()) + k + 1)
+        reg = (rlab[y0:y1, x0:x1] == i).astype(np.float32)
+        num = cv2.boxFilter(cf[y0:y1, x0:x1] * reg, -1, (k, k), normalize=True,
+                            borderType=cv2.BORDER_CONSTANT)
+        den = cv2.boxFilter(reg, -1, (k, k), normalize=True, borderType=cv2.BORDER_CONSTANT)
+        np.copyto(dens[y0:y1, x0:x1], num / np.maximum(den, 1e-3), where=reg > 0)
+    veto = cands & (dens >= GT2_TH)
+    if veto.any():
+        nv, vlab, vst, _ = cv2.connectedComponentsWithStats(veto.astype(np.uint8), 8)
+        # 塊級決定：低門檻抓出候選塊，整塊平均密度過高門檻才否決——逐像素會在門檻附近斑掉
+        lab_px = vlab[veto]; d_px = dens[veto]
+        ssum = np.bincount(lab_px, weights=d_px, minlength=nv); cnt = np.bincount(lab_px, minlength=nv)
+        mean = ssum / np.maximum(cnt, 1)
+        big = [j for j in range(1, nv) if int(vst[j, cv2.CC_STAT_AREA]) >= GT2_MIN and mean[j] >= GT2_HI]
+        veto = np.isin(vlab, big) if big else np.zeros_like(veto)
+        if veto.any():
+            kc = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (GT2_CLOSE * 2 + 1,) * 2)
+            veto = (cv2.morphologyEx(veto.astype(np.uint8), cv2.MORPH_CLOSE, kc) > 0) & cands
+    if veto.any():
+        kk = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (GT2_PAD * 2 + 1,) * 2)
+        veto = (cv2.dilate(veto.astype(np.uint8), kk) > 0) & ~bubnear[ry0:ry1, rx0:rx1]
+        # 泡附近不算密度（泡輪廓會污染），但要**跟著外圈走**：外圈被否決就一起否決，
+        # 外圈留黑就一起留黑——否則背景變灰時那 25px 會浮成一圈黑環。
+        kb = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (GT2_BUBDIL * 2 + 1,) * 2)
+        veto |= (cv2.dilate(veto.astype(np.uint8), kb) > 0) & bubnear[ry0:ry1, rx0:rx1] & fill[ry0:ry1, rx0:rx1]
+    out = fill.copy()
+    out[ry0:ry1, rx0:rx1] &= ~veto
+    return out
+
+
 def paint_gutter(out, g, gutter, frame=None, bubble=None):
     """留白（頁邊距／格溝）填深 + 邊界描亮。"""
     fill = gutter.copy()
@@ -1123,6 +1221,7 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
             m = lb_ == i
             if bd[m].max() <= lim:
                 keep |= m
+        keep = texture_veto2(keep, g, frame, seg, bubble)   # 有線稿的白不是留白
         if keep.any():
             out = paint_gutter(out, g, keep, frame=frame, bubble=bubble)
     elif not frameless and gutter.any():
@@ -1137,6 +1236,7 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
             bd = np.minimum(bd, fd)
         lim = SAFE_GUTTER_DEPTH * min(H2, W2)
         band = gutter_frame_cut(g, gutter) & (bd <= lim)   # 先沿格框線切開再取頁邊帶
+        band = texture_veto2(band, g, frame, seg, bubble)   # 有線稿的白不是留白
         if band.any():
             out = paint_gutter(out, g, band, frame=frame, bubble=bubble)
     elif gutter.any():
