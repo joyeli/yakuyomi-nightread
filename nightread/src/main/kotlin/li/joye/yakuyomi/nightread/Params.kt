@@ -48,6 +48,19 @@ data class NightReadParams(
     val gfcDilate: Int = 4,
     val gfcCloseFrac: Double = 0.30,
 
+    // 線稿密度否決（Texture）：有線稿的白不是留白
+    val textureTh: Double = 0.10,
+    val textureHi: Double = 0.15,
+    val textureWin: Int = 31,
+    val texturePad: Int = 4,
+    val textureMinArea: Int = 1500,
+    val textureFrameDil: Int = 9,
+    val textureSegDil: Int = 21,
+    val textureBubbleNear: Int = 25,
+    val textureBubbleOutline: Int = 8,
+    val textureClose: Int = 15,
+    val textureRegionMin: Double = 0.002,
+
     // 氣泡
     val bubbleCompMaxFrac: Double = 0.07,
     val bubbleLocalK: Double = 4.0,

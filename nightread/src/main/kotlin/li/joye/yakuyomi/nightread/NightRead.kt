@@ -547,15 +547,17 @@ object NightRead {
                     val l = cc.labels[i]
                     if (l > 0 && maxDepth[l] <= lim) keep.data[i] = true
                 }
-                if (keep.any()) paintGutter(out, g, keep, p)
+                val keep2 = Texture.veto(keep, g, frame, seg, bubble, p)   // 有線稿的白不是留白
+                if (keep2.any()) paintGutter(out, g, keep2, p)
             } else {
                 val lim = p.safeGutterDepth * min(h, w)
                 // 格內背景與頁邊留白在像素層連通 ⇒ 先沿格框線切開，只留真的留白
                 val cut = Regions.gutterFrameCut(gutterIn, lh, lv, p)
                 val band = Mask(w, h)
                 for (i in band.data.indices) band.data[i] = cut.data[i] && bd[i] <= lim
-                debug?.invoke("gutterBand", band.count())
-                if (band.any()) paintGutter(out, g, band, p)
+                val band2 = Texture.veto(band, g, frame, seg, bubble, p)   // 有線稿的白不是留白
+                debug?.invoke("gutterBand", band2.count())
+                if (band2.any()) paintGutter(out, g, band2, p)
             }
         }
 
