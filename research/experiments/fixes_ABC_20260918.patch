@@ -1,0 +1,258 @@
+# 三個修法方案（A 格框線切割／B 深入基準改框線／C 線稿密度否決）的完整實驗 patch
+# 基準 commit：a9d2a88（v11）。A 已常數化採用（81c5fe5）、B 已否決、C 擱置——決策見 docs/DECISIONS.md
+# 「格內背景被當留白填黑」一節。要撿回 C：git checkout a9d2a88 -- research/nightread.py && git apply 本檔
+# （或只挑 GUTTER_TEXTURE_* / line_art_density / texture_veto 那幾段手動套到現行版）。
+
+diff --git a/research/nightread.py b/research/nightread.py
+index 83a51c9..f748a6e 100644
+--- a/research/nightread.py
++++ b/research/nightread.py
+@@ -103,6 +103,17 @@ DEEP_INK_RATIO = 0.02   #        且小洞內墨/面積 ≥ 此 ⇒ 白包畫，
+ HOLE_MAX_FRAC = 0.01    # 「小洞」整頁佔比上限（大洞＝整格，不算包線稿）
+ SAFE_GUTTER_DEPTH = 0.12    # 有框頁的留白只填深入 ≤ 短邊×此 的部分
+ 
++# ── 方案B（實驗，環境變數；預設 off＝維持現況）─────────────────────────────
++# 「厚芯深入頁內」的基準：現況只量到頁邊的距離，貼頁邊的橫幅格（格內背景與頁邊留白連通成
++# 同一個白元件）永遠算不上「深入」⇒ 被判 gutter 整片填黑。改成也量到最近格框線的距離：
++#   off   ＝ 只用頁邊距（現況）
++#   min   ＝ min(頁邊距, 框線距)（提案原文）
++#   frame ＝ 只用框線距
++#   max   ＝ max(頁邊距, 框線距)
++# FRAME_DEPTH_K 縮放框線距（1.0＝原值），仍與同一個 deep_px 比較。
++FRAME_DEPTH_MODE = os.environ.get("NIGHTREAD_FRAME_DEPTH", "off").lower()
++FRAME_DEPTH_K = float(os.environ.get("NIGHTREAD_FRAME_DEPTH_K", "1.0"))
++
+ # 氣泡
+ BUBBLE_COMP_MAX_FRAC = 0.07 # 泡元件整頁佔比上限
+ BUBBLE_LOCAL_K = 4.0        # 泡元件面積 ≤ 此×文字搜尋窗（局部性）
+@@ -333,6 +344,71 @@ def frame_line_mask(g):
+     return lh, lv
+ 
+ 
++# ── 方案A：格框線切割（實驗，環境變數；預設 off＝維持現況）─────────────────────
++# 病根：格內的淺色背景與頁邊留白在像素層連通成同一個白元件 ⇒ 整塊被判 gutter ⇒ 填黑。
++# 作法：用格框線把留白遮罩「切開」，只保留仍碰得到頁邊（或細得像真格溝）的塊。
++#   NIGHTREAD_GFC=1        總開關
++#   NIGHTREAD_GFC_DILATE   框線膨脹半徑（補線稿缺口）；切完把貼著保留塊的框線帶回填
++#   NIGHTREAD_GFC_CLOSE    沿線方向的閉合長度（佔短邊比例）：橋接「出血人物跨格」造成的
++#                          框線斷口——ch34_011 中間橫幅格的牆面就是從這個斷口流到頁腳留白
++#   NIGHTREAD_GFC_KEEP_THIN 切出來的細長塊（距離變換 ≤ CORE_R＝真格溝半寬）即使不碰頁邊也留
++#                          （防閉合把格溝橫切成孤島 ⇒ 該填的格溝反而留灰）
++#   NIGHTREAD_GFC_BRIDGE_DILATE 閉合補出來的「橋」另外算的膨脹半徑，預設 0＝不膨脹。
++#                          真框線要膨脹（補線稿缺口），橋不用（它本來就是實心線，切開就夠）；
++#                          橋跟著膨脹會吃掉它「順著跑」的那條留白 ⇒ demo03 右緣被誤刪 27882px
++#                          （長線開運算在黑髮團裡會誤判出假框線，閉合再把假線接成長橋）。
++GFC_ON = os.environ.get("NIGHTREAD_GFC", "0") == "1"
++GFC_DILATE = int(os.environ.get("NIGHTREAD_GFC_DILATE", "4"))
++GFC_CLOSE_FRAC = float(os.environ.get("NIGHTREAD_GFC_CLOSE", "0.30"))
++GFC_KEEP_THIN = os.environ.get("NIGHTREAD_GFC_KEEP_THIN", "1") == "1"
++GFC_BRIDGE_DILATE = int(os.environ.get("NIGHTREAD_GFC_BRIDGE_DILATE", "0"))
++
++
++def gutter_frame_cut(g, gutter, frame=None):
++    """方案A：格框線切割。回傳切完的 gutter 遮罩（GFC_ON 為假時原樣回）。"""
++    if not GFC_ON or not gutter.any():
++        return gutter
++    H, W = gutter.shape
++    lh, lv = frame_line_mask(g)
++    raw = ((lh | lv) > 0).astype(np.uint8)       # 真的偵測到的框線
++    if GFC_CLOSE_FRAC > 0:                       # 沿線方向閉合＝補上被出血人物打斷的框線
++        c = max(3, int(round(GFC_CLOSE_FRAC * min(W, H))))
++        lh = cv2.morphologyEx(lh, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (c, 1)))
++        lv = cv2.morphologyEx(lv, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (1, c)))
++    bridge = (((lh | lv) > 0).astype(np.uint8) & (raw == 0))   # 閉合補出來的橋
++    if not (raw.any() or bridge.any()):
++        return gutter
++
++    def _dil(m, r):
++        return cv2.dilate(m, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (r * 2 + 1,) * 2)) if r > 0 else m
++
++    fr = _dil(raw, GFC_DILATE) | _dil(bridge, GFC_BRIDGE_DILATE)   # 真線膨脹、橋不膨脹
++    cutm = (gutter & (fr == 0)).astype(np.uint8)
++    n_, lb_, st_, _ = cv2.connectedComponentsWithStats(cutm, 8)
++    if n_ <= 1:
++        return gutter
++    dist = cv2.distanceTransform(cutm, cv2.DIST_L2, 5) if GFC_KEEP_THIN else None
++    keep = np.zeros((H, W), bool)
++    # 「碰得到頁邊」的容差要涵蓋框線膨脹：頁緣本身常是一條長暗線（掃描邊/最外格框），
++    # 膨脹後會把貼邊那幾 px 白吃掉 ⇒ 用 2px 判定會把整片頁邊留白誤判成不碰邊（demo02 頂緣實測）。
++    etol = GFC_DILATE + 3
++    for i in range(1, n_):
++        x, y, w_, h_ = st_[i, 0], st_[i, 1], st_[i, 2], st_[i, 3]
++        if x <= etol or y <= etol or x + w_ >= W - etol or y + h_ >= H - etol:
++            keep |= (lb_ == i)                   # 仍碰得到頁邊＝真留白
++            continue
++        if GFC_KEEP_THIN:
++            m = (lb_ == i)
++            if float(dist[m].max()) <= CORE_R:   # 細長＝真格溝（半寬遠小於 CORE_R）
++                keep |= m
++    if not keep.any():
++        return gutter                            # 全切光＝框線偵測異常，退回現況
++    if GFC_DILATE > 0:                           # 框線帶回填：否則格框旁留一圈白
++        kd = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, ((GFC_DILATE + 2) * 2 + 1,) * 2)
++        keep |= gutter & (fr > 0) & (cv2.dilate(keep.astype(np.uint8), kd) > 0)
++    return keep
++
++
+ def page_is_frameless(g):
+     """修法2：長直格框線存在性。回傳 (frameless, h_px_per_k, v_px_per_k)。
+     無框/白背景頁（demo04/05 型）兩向都近零。"""
+@@ -366,12 +442,14 @@ def _hole_ink_ratio(comp_u8, g):
+ #   純背景白（留白/格內背景）→ BG 16 ｜ 畫面的白（地板/牆面）→ 中間調 ｜ 人物的白 → 場景灰 140
+ 
+ 
+-def classify_white_components(g):
++def classify_white_components(g, frame=None):
+     """整頁白（>=WHITE_TH）連通元件一次算完，供留白與氣泡共用。
+ 
+     回傳 (lab, stats, gutter_ids, panel_ids)：
+       gutter_ids＝判定為留白（頁邊距/格溝）的元件 → 填深；
+       panel_ids ＝貼頁邊但屬「格內白」的元件（修法3）→ 當畫面壓暗、氣泡也不併。
++
++    frame＝格框線遮罩（lh|lv）；只在方案B（FRAME_DEPTH_MODE != off）用到，None 時自算。
+     """
+     H, W = g.shape
+     white = (g >= WHITE_TH).astype(np.uint8)
+@@ -379,6 +457,16 @@ def classify_white_components(g):
+     dist = cv2.distanceTransform(white, cv2.DIST_L2, 5)   # 白內距最近非白（元件間互不影響）
+     deep_px = max(64, int(round(DEEP_EDGE_FRAC * min(W, H))))
+     min_area = int(g.size * GUTTER_MIN_AREA_FRAC)
++    # 方案B：每點到最近格框線的距離（預設 off ⇒ fdist=None ⇒ 完全維持現況）
++    fdist = None
++    if FRAME_DEPTH_MODE != "off":
++        if frame is None:
++            lh, lv = frame_line_mask(g)
++            frame = lh | lv
++        fr = (np.asarray(frame) > 0).astype(np.uint8)
++        if fr.any():
++            fdist = cv2.distanceTransform((fr == 0).astype(np.uint8),
++                                          cv2.DIST_L2, 3) * FRAME_DEPTH_K
+ 
+     gutter_ids, panel_ids = set(), set()
+     for i in range(1, n):
+@@ -394,7 +482,12 @@ def classify_white_components(g):
+         core_frac = core.sum() / a
+         if core.any():
+             ys, xs = np.nonzero(core)
+-            edge_d = np.minimum(np.minimum(xs, W - 1 - xs), np.minimum(ys, H - 1 - ys))
++            edge_d = np.minimum(np.minimum(xs, W - 1 - xs),
++                                np.minimum(ys, H - 1 - ys)).astype(np.float32)
++            if fdist is not None:                       # 方案B：基準改成（也）看格框線
++                fd = fdist[ys, xs]
++                edge_d = {"min": np.minimum(edge_d, fd), "frame": fd,
++                          "max": np.maximum(edge_d, fd)}.get(FRAME_DEPTH_MODE, edge_d)
+             core_deep = float((edge_d > deep_px).mean())  # 厚芯深入頁內（非頁邊距帶）比例
+         else:
+             core_deep = 0.0
+@@ -918,6 +1011,86 @@ def ink_alpha(g, gain):
+     return np.clip((1.0 - g.astype(np.float32) / 255.0) * gain, 0.0, 1.0)
+ 
+ 
++# ── ★ 方案C（實驗，環境變數；預設 0＝關＝維持現況）：線稿密度否決 ──────────────
++# 病根：格內的淺色背景（牆面／窗／地板）與頁邊留白在像素層連通成**同一個白元件**，而
++# 「深入頁內」量的是**距頁邊的距離** ⇒ 緊貼頁面上下緣的橫幅格永遠算不上深入（demo01 0.0%、
++# ch34_011 0.9%），整片牆面被判留白填黑。**元件級別救不了**：demo01 那顆 comp57 的 bbox
++# 就是整頁 (0,0,1115,1600)、ch34_011 comp1383 橫跨 y870..1920，把整顆改判「格內白」等於連
++# 真頁邊距一起不填 ⇒ 只能逐像素。
++# 判準（方案C）＝**真留白是空的**：紙白裡沒有任何線稿；格內背景有窗格線、牆面陰影、網點。
++# ⚠️ 直接量窗內非白比例會**誤殺窄格溝**（demo01 格溝只有 20px 寬，31px 窗會看到框線另一側的
++# 畫面 ⇒ 格溝中位 0.128 比病灶還高）⇒ 密度**分「格框線圍出的區域」各算各的**：窗內只算同一
++# 區域的內容、也只對同區域的面積正規化（跨框的畫面不計）。分完 demo01 格溝降到 0.000。
++# ⚠️ 與被否決的 WHITE_SPLIT_STD（docs/DECISIONS.md「源頭切分」「三段式」）的差別：那個在
++# **最源頭**用局部 std 切開白元件 ⇒ 改變整條下游拓樸（泡/貼紙/panel 全受影響）、所有有紋路的
++# 白一律不填 ⇒ 亮 10pt 被看圖否決。這裡①只動**留白填色這一步**的像素、不碰白元件與下游；
++# ②訊號是「同格框區域內的線稿密度」不是原始局部 std（std 在網點/漸層上照樣爆表）；
++# ③只否決夠大的塊（碎塊不動）。但方向同源＝「有紋路的白不填會變亮」的風險一樣在，看數字。
++GUTTER_TEXTURE_TH = float(os.environ.get("NIGHTREAD_GUTTER_TEXTURE", "0"))       # 密度 ≥ 此不填；0＝關
++GUTTER_TEXTURE_WIN = int(os.environ.get("NIGHTREAD_GUTTER_TEXTURE_WIN", "31"))   # 量測窗邊長
++GUTTER_TEXTURE_PAD = int(os.environ.get("NIGHTREAD_GUTTER_TEXTURE_PAD", "4"))    # 否決區外擴（填色離線稿遠一點；密度在紋路邊緣會先衰減，不外擴會殘留黑條）
++GUTTER_TEXTURE_MIN = int(os.environ.get("NIGHTREAD_GUTTER_TEXTURE_MIN", "1500"))  # 否決塊最小面積（碎塊不否決）
++GUTTER_TEXTURE_FRDIL = int(os.environ.get("NIGHTREAD_GUTTER_TEXTURE_FRDIL", "9"))  # 格框線外擴（框線本身不算線稿）
++GUTTER_TEXTURE_SEGDIL = int(os.environ.get("NIGHTREAD_GUTTER_TEXTURE_SEGDIL", "21"))  # 文字筆畫外擴（字不算線稿）
++GUTTER_TEXTURE_BUBDIL = int(os.environ.get("NIGHTREAD_GUTTER_TEXTURE_BUBDIL", "0"))  # 泡輪廓外擴（泡邊框不算線稿；0＝關）
++GUTTER_TEXTURE_REGMIN = float(os.environ.get("NIGHTREAD_GUTTER_TEXTURE_REGMIN", "0.002"))  # 參與量測的格框區域最小頁佔比
++
++
++def line_art_density(g, frame, seg=None, k=None, bubble=None):
++    """逐「格框線圍出的區域」量線稿密度：窗內**同區域**的非白比例（跨框的內容不計）。
++
++    回傳 float32 密度圖；沒被任何夠大區域涵蓋的像素＝0（當成空白、不否決）。
++    """
++    k = GUTTER_TEXTURE_WIN if k is None else k
++    H, W = g.shape
++    fr = np.zeros((H, W), np.uint8) if frame is None else (np.asarray(frame) > 0).astype(np.uint8)
++    if GUTTER_TEXTURE_FRDIL > 0 and fr.any():
++        fr = cv2.dilate(fr, np.ones((GUTTER_TEXTURE_FRDIL,) * 2, np.uint8))
++    frb = fr > 0
++    content = (g < WHITE_TH) & ~frb
++    if seg is not None and GUTTER_TEXTURE_SEGDIL > 0:
++        # 文字筆畫不算線稿：泡外旁白/狀聲詞的白底若被當成畫面就不填 ⇒ 白泡指標惡化
++        content &= ~(cv2.dilate(seg.astype(np.uint8),
++                                np.ones((GUTTER_TEXTURE_SEGDIL,) * 2, np.uint8)) > 0)
++    if bubble is not None and GUTTER_TEXTURE_BUBDIL > 0 and np.any(bubble):
++        # 泡的輪廓線不算線稿：否則泡外那圈白的密度爆表 ⇒ 不填 ⇒ 成品出現沿泡邊的灰暈
++        content &= ~(cv2.dilate(np.asarray(bubble).astype(np.uint8),
++                                np.ones((GUTTER_TEXTURE_BUBDIL,) * 2, np.uint8)) > 0)
++    cf = content.astype(np.float32)
++    n, rlab, rst, _ = cv2.connectedComponentsWithStats((~frb).astype(np.uint8), 8)
++    dens = np.zeros((H, W), np.float32)
++    for i in range(1, n):
++        if int(rst[i, cv2.CC_STAT_AREA]) < GUTTER_TEXTURE_REGMIN * g.size:
++            continue
++        x, y, cw, ch = rst[i, 0], rst[i, 1], rst[i, 2], rst[i, 3]
++        x0, y0 = max(0, x - k), max(0, y - k)
++        x1, y1 = min(W, x + cw + k), min(H, y + ch + k)
++        reg = (rlab[y0:y1, x0:x1] == i).astype(np.float32)
++        num = cv2.boxFilter(cf[y0:y1, x0:x1] * reg, -1, (k, k), normalize=True,
++                            borderType=cv2.BORDER_CONSTANT)
++        den = cv2.boxFilter(reg, -1, (k, k), normalize=True, borderType=cv2.BORDER_CONSTANT)
++        m = reg > 0
++        dens[y0:y1, x0:x1][m] = (num / np.maximum(den, 1e-3))[m]
++    return dens
++
++
++def texture_veto(fill, g, frame, seg=None, dens=None, bubble=None):
++    """方案C：把「線稿密度 ≥ GUTTER_TEXTURE_TH」的像素從留白填色裡剔掉（預設關）。"""
++    if GUTTER_TEXTURE_TH <= 0 or not np.any(fill):
++        return fill
++    if dens is None:
++        dens = line_art_density(g, frame, seg, bubble=bubble)
++    veto = fill & (dens >= GUTTER_TEXTURE_TH)
++    if GUTTER_TEXTURE_MIN > 0 and veto.any():
++        n, vlab, vst, _ = cv2.connectedComponentsWithStats(veto.astype(np.uint8), 8)
++        ids = [i for i in range(1, n) if int(vst[i, cv2.CC_STAT_AREA]) >= GUTTER_TEXTURE_MIN]
++        veto = np.isin(vlab, ids) if ids else np.zeros_like(veto)
++    if GUTTER_TEXTURE_PAD > 0 and veto.any():
++        kk = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (GUTTER_TEXTURE_PAD * 2 + 1,) * 2)
++        veto = cv2.dilate(veto.astype(np.uint8), kk) > 0
++    return fill & ~veto
++
++
+ def paint_gutter(out, g, gutter, frame=None, bubble=None):
+     """留白（頁邊距／格溝）填深 + 邊界描亮。"""
+     fill = gutter.copy()
+@@ -1050,6 +1223,7 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
+             m = lb_ == i
+             if bd[m].max() <= lim:
+                 keep |= m
++        keep = texture_veto(keep, g, frame, seg, bubble=bubble)   # ★方案C：線稿密度否決（GUTTER_TEXTURE_TH=0 ⇒ 原樣）
+         if keep.any():
+             out = paint_gutter(out, g, keep, frame=frame, bubble=bubble)
+     elif not frameless and gutter.any():
+@@ -1057,13 +1231,15 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
+         # 沒有墨團可觸發灰暈（demo01 臉頰 98% 黑、ch34_015 肩、demo02 貼頁緣的臉皆此型）。
+         # 頁邊帶（距頁邊/格線 ≤ 短邊×SAFE_GUTTER_DEPTH）照填；更深處留灰＝失敗方向安全。
+         H2, W2 = g.shape
++        gut_fill = gutter_frame_cut(g, gutter)   # 方案A（GFC_ON 才作用）：格框線切割
+         yy, xx = np.mgrid[0:H2, 0:W2]
+         bd = np.minimum(np.minimum(yy, H2 - 1 - yy), np.minimum(xx, W2 - 1 - xx)).astype(np.float32)
+         if frame is not None and frame.any():
+             fd = cv2.distanceTransform((frame == 0).astype(np.uint8), cv2.DIST_L2, 3)
+             bd = np.minimum(bd, fd)
+         lim = SAFE_GUTTER_DEPTH * min(H2, W2)
+-        band = gutter & (bd <= lim)
++        band = gut_fill & (bd <= lim)
++        band = texture_veto(band, g, frame, seg, bubble=bubble)   # ★方案C：線稿密度否決（GUTTER_TEXTURE_TH=0 ⇒ 原樣）
+         if band.any():
+             out = paint_gutter(out, g, band, frame=frame, bubble=bubble)
+     elif gutter.any():
