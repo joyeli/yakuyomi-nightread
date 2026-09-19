@@ -178,86 +178,60 @@ object Cv {
      * 邊界：外側視為 0，所以區間裁切到影像內即可（前景不外溢）。
      */
     /**
-     * 一維長條核（1×n 或 n×1）的快路：van Herk / Gil-Werman 滑動極值，**成本與核長無關**。
+     * 一維長條核（1×n 或 n×1）的快路：**最近目標像素距離**兩趟掃描，成本與核長無關。
      *
-     * 格框線偵測用的是長度 `min(w,h)/5` 的線核（1920 高的頁就是 270），逐列掃區間要 O(W·H·k)，
-     * 實測整條 open 要 780 ms，是整個分析階段最大的單一熱點。改成分段掃描後與核長脫鉤。
+     * 二值遮罩的線膨脹＝「窗內有沒有 true」、線侵蝕＝「窗內有沒有 false」（影像外：膨脹視為 0 不貢獻、
+     * 侵蝕視為前景不否決——都等於「只看影像內」）。所以只要知道每個位置往前、往後最近一個目標像素
+     * 有多遠：正向一趟記「最近的目標在左／上多遠」、反向一趟記「在右／下多遠」，任一在窗內就中。
      *
-     * 只在核是單一實心 run 的 1×n / n×1 時生效，其餘形狀走一般路徑。
+     * 取代 van Herk 分段極值的原因：那版每個像素要兩次整數除法（分段索引）、每行還要搬一次緩衝；
+     * 垂直方向更是逐欄跨行取值、快取全失。這版兩趟都是 row-major、垂直方向只帶一個寬度大小的
+     * 狀態陣列。格框線偵測／格框線切割／線稿密度否決加起來十幾趟線掃描，全走這裡。
      */
     private fun lineMorph(m: Mask, len: Int, horizontal: Boolean, anchor: Int, dilate: Boolean): Mask {
         val w = m.w
         val h = m.h
         val out = Mask(w, h)
-        val n = if (horizontal) w else h
-        val lines = if (horizontal) h else w
-        val buf = BooleanArray(n)
-        val pre = BooleanArray(n)
-        val suf = BooleanArray(n)
-        for (li in 0 until lines) {
-            // 取一行／一列
-            if (horizontal) {
-                val base = li * w
-                for (i in 0 until n) buf[i] = m.data[base + i]
-            } else {
-                for (i in 0 until n) buf[i] = m.data[i * w + li]
+        val src = m.data
+        val dst = out.data
+        val a = anchor                 // 窗往左／上伸 a
+        val b = len - 1 - anchor       // 窗往右／下伸 b
+        val target = dilate            // 膨脹找 true，侵蝕找 false
+        val far = Int.MIN_VALUE / 2
+        if (horizontal) {
+            for (y in 0 until h) {
+                val base = y * w
+                var prev = far
+                for (x in 0 until w) {
+                    if (src[base + x] == target) prev = x
+                    dst[base + x] = x - prev <= a
+                }
+                var next = -far
+                for (x in w - 1 downTo 0) {
+                    if (src[base + x] == target) next = x
+                    if (next - x <= b) dst[base + x] = true
+                }
             }
-            // 分段前綴／後綴極值（段長 = len）
-            var i = 0
-            while (i < n) {
-                val end = min(i + len, n)
-                var acc = buf[i]
-                pre[i] = acc
-                for (j in i + 1 until end) {
-                    acc = if (dilate) acc || buf[j] else acc && buf[j]
-                    pre[j] = acc
+        } else {
+            val prev = IntArray(w) { far }
+            for (y in 0 until h) {
+                val base = y * w
+                for (x in 0 until w) {
+                    if (src[base + x] == target) prev[x] = y
+                    dst[base + x] = y - prev[x] <= a
                 }
-                acc = buf[end - 1]
-                suf[end - 1] = acc
-                for (j in end - 2 downTo i) {
-                    acc = if (dilate) acc || buf[j] else acc && buf[j]
-                    suf[j] = acc
-                }
-                i = end
             }
-            // 每個輸出位置 = suf[起點] ⊕ pre[終點]；落在影像外的部分按邊界語意處理
-            // （dilate 外側為 0 ⇒ 不貢獻；erode 外側為前景 ⇒ 不否決）
-            for (x in 0 until n) {
-                val a = x - anchor
-                val b = a + len - 1
-                var v: Boolean
-                val lo = max(a, 0)
-                val hi = min(b, n - 1)
-                if (lo > hi) {
-                    v = !dilate
-                } else {
-                    v = if (lo / len == hi / len) {
-                        // 同一段內：窗只有被影像邊界裁掉時才短於 len，此時必有一端貼齊段邊界
-                        // （左裁 ⇒ lo 是段 0 起點、右裁 ⇒ hi 是末段終點；沒裁則 lo 必為段起點）
-                        // ⇒ 用該段的前綴／後綴 O(1) 取得。逐項那條是防呆，理論上進不去——
-                        // 留著是因為它慢得致命：核長 405 時邊界區每行要掃 len²/2 次（實測 229 ms）。
-                        val segStart = (lo / len) * len
-                        val segEnd = min(segStart + len, n) - 1
-                        when {
-                            lo == segStart -> pre[hi]
-                            hi == segEnd -> suf[lo]
-                            else -> {
-                                var acc = buf[lo]
-                                for (j in lo + 1..hi) acc = if (dilate) acc || buf[j] else acc && buf[j]
-                                acc
-                            }
-                        }
-                    } else {
-                        val s = suf[lo]
-                        val e = pre[hi]
-                        if (dilate) s || e else s && e
-                    }
-                    // 區間被影像邊界裁掉時：dilate 不補、erode 視為前景（即不否決）
-                    if (!dilate && (a < 0 || b > n - 1)) v = v || false
+            val next = IntArray(w) { -far }
+            for (y in h - 1 downTo 0) {
+                val base = y * w
+                for (x in 0 until w) {
+                    if (src[base + x] == target) next[x] = y
+                    if (next[x] - y <= b) dst[base + x] = true
                 }
-                if (horizontal) out.data[li * w + x] = v else out.data[x * w + li] = v
             }
         }
+        // dst 現在＝「窗內有目標」。膨脹就是答案；侵蝕是「窗內有 false ⇒ 輸出 false」，取反。
+        if (!dilate) for (i in dst.indices) dst[i] = !dst[i]
         return out
     }
 

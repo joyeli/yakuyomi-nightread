@@ -40,10 +40,14 @@ internal object Texture {
         val rh = ry1 - ry0
 
         // ── 以下全在 ROI 內 ──
-        val gs = cropGray(g, rx0, ry0, rw, rh)
         val frs = cropMask(fr, rx0, ry0, rw, rh)
         val cands = cropMask(cand, rx0, ry0, rw, rh)
-        val content = Mask(rw, rh, BooleanArray(rw * rh) { gs.data[it] < p.whiteTh && !frs.data[it] })
+        val content = Mask(rw, rh)
+        for (y in 0 until rh) {
+            val src = (ry0 + y) * w + rx0
+            val dst = y * rw
+            for (x in 0 until rw) content.data[dst + x] = g.data[src + x] < p.whiteTh && !frs.data[dst + x]
+        }
         if (seg.any()) {
             val segD = dilateSquare(cropMask(seg, rx0, ry0, rw, rh), p.textureSegDil)
             for (i in content.data.indices) if (segD.data[i]) content.data[i] = false
@@ -84,35 +88,39 @@ internal object Texture {
             val y1 = min(rh, maxY[l] + k + 1)
             val bw = x1 - x0
             val bh = y1 - y0
-            // 積分影像：reg 與 content∧reg 的零填充視窗和（＝cv2.boxFilter BORDER_CONSTANT）
-            val iw = bw + 1
-            val ir = IntArray(iw * (bh + 1))
-            val ic = IntArray(iw * (bh + 1))
-            for (y in 0 until bh) {
-                var sr = 0
-                var sc = 0
+            // 零填充視窗和（＝cv2.boxFilter BORDER_CONSTANT）：直向用逐欄的滑動累計、橫向用前綴和，
+            // 記憶體只要幾條 bw 長的陣列——積分影像要兩張 (bw+1)×(bh+1) 的 IntArray，整頁級的區域
+            // 一次就是 14 MB，第一頁的 GC 全落在這。
+            val colR = IntArray(bw)
+            val colC = IntArray(bw)
+            val preR = IntArray(bw + 1)
+            val preC = IntArray(bw + 1)
+            fun addRow(y: Int, sign: Int) {
                 val src = (y0 + y) * rw + x0
-                val row = (y + 1) * iw
-                val prev = y * iw
                 for (x in 0 until bw) {
                     if (cc.labels[src + x] == l) {
-                        sr++
-                        if (content.data[src + x]) sc++
+                        colR[x] += sign
+                        if (content.data[src + x]) colC[x] += sign
                     }
-                    ir[row + x + 1] = ir[prev + x + 1] + sr
-                    ic[row + x + 1] = ic[prev + x + 1] + sc
                 }
             }
+            for (y in 0 until min(r + 1, bh)) addRow(y, 1)
             for (y in 0 until bh) {
-                val ya = max(0, y - r)
-                val yb = min(bh - 1, y + r) + 1
+                if (y > 0) {
+                    if (y + r < bh) addRow(y + r, 1)
+                    if (y - r - 1 >= 0) addRow(y - r - 1, -1)
+                }
+                for (x in 0 until bw) {
+                    preR[x + 1] = preR[x] + colR[x]
+                    preC[x + 1] = preC[x] + colC[x]
+                }
                 val src = (y0 + y) * rw + x0
                 for (x in 0 until bw) {
                     if (cc.labels[src + x] != l) continue
                     val xa = max(0, x - r)
                     val xb = min(bw - 1, x + r) + 1
-                    val s2 = ir[yb * iw + xb] - ir[ya * iw + xb] - ir[yb * iw + xa] + ir[ya * iw + xa]
-                    val s1 = ic[yb * iw + xb] - ic[ya * iw + xb] - ic[yb * iw + xa] + ic[ya * iw + xa]
+                    val s2 = preR[xb] - preR[xa]
+                    val s1 = preC[xb] - preC[xa]
                     // 照 Python 的算法走：num/k² ÷ max(den/k², 1e-3)，保持同樣的浮點路徑
                     val num = s1 / kk
                     val den = s2 / kk
@@ -197,9 +205,4 @@ internal object Texture {
         return out
     }
 
-    private fun cropGray(g: Gray, x0: Int, y0: Int, cw: Int, ch: Int): Gray {
-        val out = Gray(cw, ch, IntArray(cw * ch))
-        for (y in 0 until ch) System.arraycopy(g.data, (y0 + y) * g.w + x0, out.data, y * cw, cw)
-        return out
-    }
 }
