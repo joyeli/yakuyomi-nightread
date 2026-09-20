@@ -24,8 +24,14 @@
 | 真機兩欄像素差 | — | 0.0～0.3%（demo01 1.3%，遮罩邊緣 fp16 抖動） |
 
 轉檔腳本 `yakuyomi-engine/parity/export_cseg_ncnn.py`（blob 契約、前處理、後處理規格都在檔頭）；
-引擎 `NcnnBackend.extract`（通用多輸出抽取）、`CharSeg.kt`。**yoloseg 照同一條路走**（ultralytics
-`format=ncnn` 一鍵匯出，對 ONNX 候選 337/338 一致）；NCNN int8（ncnn2int8）等 fp16 落地後當獨立實驗。
+引擎 `NcnnBackend.extract`（通用多輸出抽取）、`CharSeg.kt`。
+
+**yoloseg 也完成**（同日）：`parity/export_yoloseg_ncnn.py`（ultralytics `format=ncnn`，20.4MB fp16），
+對 ONNX 12 頁實例數完全一致、聯集 IoU 0.996～0.9999；後處理照 research `run_yoloseg_onnx`（桌面守護框
+數字的來源），JVM parity IoU 1.00000。真機第三輪 mask（ms，9 頁平均）：yolo int8 ORT 619 →
+**yolo NCNN fp16 462**；**yolo+cseg NCNN 聯集 1353**。夜讀專屬模型 249MB（ORT）→ **146MB**（NCNN）。
+⚠️ ORT 版 yoloseg 在裝置上是最近鄰取樣的簡化版，NCNN 版照桌面的雙線性，遮罩邊緣像素差 0.03～1.7%。
+NCNN int8（ncnn2int8）等配方定案後當獨立實驗。
 ⚠️ 上一輪「cseg 有／無」的 ORT 時間表（mask 2.2～3.2 s）含 yoloseg 與熱晶片；cseg 單顆 ORT 是 1.7 s。
 
 ## ★★★ cseg 有／無的真機 A/B（2026-09-21，整合前的配方驗證）
