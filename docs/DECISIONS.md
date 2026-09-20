@@ -8,6 +8,26 @@
 數學結論（實驗確立、別再挑戰）：漫畫的紙白參與構圖（臉的亮部、留白都用紙白畫）⇒「白→暗」的全域函式無解；
 只有**分區重繪**（氣泡深底亮字、背景填黑、前景白描邊）拿得到夜讀效果——這是 Yakuyomi 的護城河，濾鏡永遠做不到。
 
+## ★★★ 人物遮罩模型搬到 NCNN（2026-09-21）：cseg 完成，mask 2.1× 快、模型砍半
+
+使用者拍板「能轉 NCNN 的都轉」（翻譯那邊 DBNet／AOT 都是這樣做的：ckpt → trace → pnnx → fp16、
+一模型一個 JNI 原生函式、models.json role）。cseg（RTMDet-Ins）的 ONNX 圖內含 NMS／TopK／逐實例動態
+卷積，NCNN 沒這些層 ⇒ **切在原始頭輸出之後**（cls／reg／kernel 三層 + mask_feat，10 個張量），剩下
+全是標準層，pnnx 一次轉過；後處理照 mmdet 3.3 `RTMDetInsHead` 用 Kotlin 重寫（引擎 `CsegPost`）。
+
+| | ORT fp32 | NCNN fp16 |
+|---|---|---|
+| 模型 | 239 MB | **126 MB** |
+| 真機 mask（9 頁平均） | 1.72 s | **0.83 s** |
+| 桌面驗證 | — | 十個原始輸出 fp16 容差內；numpy 後處理 vs 完整 ONNX 12 頁**逐像素同**（機率差 0.000）；聯集 IoU 0.9992～0.9998 |
+| Kotlin 後處理 JVM parity | — | IoU **1.00000**、不同像素 0 |
+| 真機兩欄像素差 | — | 0.0～0.3%（demo01 1.3%，遮罩邊緣 fp16 抖動） |
+
+轉檔腳本 `yakuyomi-engine/parity/export_cseg_ncnn.py`（blob 契約、前處理、後處理規格都在檔頭）；
+引擎 `NcnnBackend.extract`（通用多輸出抽取）、`CharSeg.kt`。**yoloseg 照同一條路走**（ultralytics
+`format=ncnn` 一鍵匯出，對 ONNX 候選 337/338 一致）；NCNN int8（ncnn2int8）等 fp16 落地後當獨立實驗。
+⚠️ 上一輪「cseg 有／無」的 ORT 時間表（mask 2.2～3.2 s）含 yoloseg 與熱晶片；cseg 單顆 ORT 是 1.7 s。
+
 ## ★★★ cseg 有／無的真機 A/B（2026-09-21，整合前的配方驗證）
 
 規劃整合時發現：**真機幾輪看的全是「只有 yoloseg int8」**——`Manga/yakuyomi/models/` 一直沒有
