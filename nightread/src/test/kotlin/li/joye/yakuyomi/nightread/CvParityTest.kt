@@ -224,6 +224,9 @@ class CvParityTest {
         val seed = mask("geodesic_seed.bin")
         val within = mask("mask_in.bin")
         assertMaskEquals("geodesicGrow", mask("geodesic.bin"), Cv.geodesicGrow(seed, within, 10, 4))
+        // 迭代與前沿 BFS 兩條實作都要對上 Python
+        assertMaskEquals("geodesicGrow(iter)", mask("geodesic.bin"), Cv.geodesicGrow(seed, within, 10, 4, bfs = false))
+        assertMaskEquals("geodesicGrow(bfs)", mask("geodesic.bin"), Cv.geodesicGrow(seed, within, 10, 4, bfs = true))
     }
 
     // ── 純量 ─────────────────────────────────────────────────────────

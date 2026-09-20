@@ -434,22 +434,10 @@ object NightRead {
                 val seeds = Cv.dilate(fr, Cv.ellipse(p.frameHugDilate * 2 + 1)) and win.comp
                 fill = Regions.broadCoreFill(win.comp, seeds, p.coreNeckR, p.coreRecoverR)
                 if (fill.any()) {
-                    // 測地比刪填：背景從格框直直就到（比值≈1），衣料與皮膚要繞過人物墨線（比值高）
-                    val geo = FloatArray(sw * sh) { 1e9f }
-                    var cur = seeds and win.comp
-                    for (idx in cur.data.indices) if (cur.data[idx]) geo[idx] = 0f
-                    var d = 0
-                    val k3 = Cv.rect(3, 3)
-                    while (cur.any() && d < 4000) {
-                        val grown = Cv.dilate(cur, k3, iterations = 6) and win.comp
-                        d += 6
-                        var added = false
-                        for (idx in grown.data.indices) {
-                            if (grown.data[idx] && geo[idx] == 1e9f) { geo[idx] = d.toFloat(); added = true }
-                        }
-                        if (!added) break
-                        cur = grown
-                    }
+                    // 測地比刪填：背景從格框直直就到（比值≈1），衣料與皮膚要繞過人物墨線（比值高）。
+                    // Python 是「膨脹 6 次才交集、d < 4000 才再跑一批」；BFS 版的批次節奏相同，
+                    // 上限 4002 = 最後一批在 d=3996 時整批跑完。未到達 = -1。
+                    val geo = Cv.geodesicDistance(seeds and win.comp, win.comp, 6, 4002)
                     val euc = Cv.distanceL2(fr.not())
                     val subSeg = Mask(sw, sh)
                     for (y in 0 until sh) {
@@ -459,8 +447,8 @@ object NightRead {
                     val aura = Regions.thickInkAura(win.sub, subSeg, p)
                     val strict = Mask(sw, sh)
                     for (idx in strict.data.indices) {
-                        strict.data[idx] = fill.data[idx] &&
-                            geo[idx] <= p.geoRatioMax * euc.data[idx] + p.geoSlack &&
+                        strict.data[idx] = fill.data[idx] && geo[idx] >= 0 &&
+                            geo[idx].toFloat() <= p.geoRatioMax * euc.data[idx] + p.geoSlack &&
                             !aura.data[idx]
                     }
                     // 語意放行：把人物遮罩外擴當安全邊界，非人物的核心區照填

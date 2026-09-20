@@ -930,8 +930,59 @@ object Cv {
      * 不是膨脹半徑。把它當半徑用會讓生長距離變成 step 倍——人物遮罩因此胖了 17%，
      * 連帶讓該填黑的背景被當成人物還原成灰。
      */
-    fun geodesicGrow(seed: Mask, within: Mask, iters: Int, step: Int = 5): Mask {
+    /**
+     * 前沿 BFS 版的測地生長：回傳每個像素**第一次被到達時的累計膨脹次數**（種子 0、未到達 -1）。
+     *
+     * 節奏與 [geodesicGrow] 相同——每批 n = min(step, maxIters − done) 次 3×3 膨脹後才與 within
+     * 交集一次（可跨過窄於 n 的縫）。但每批只把**上一批新到的像素**往外擴一個 (2n+1)² 的方塊：
+     * R_t = D_n(R_{t−1}) ∩ within，而 D_n(R_{t−2}) ∩ within ⊆ R_{t−1}，所以只擴新像素就夠，每個像素
+     * 一生只擴張一次 ⇒ O(到達面積 × (2·step+1)²)，與 iters 無關。迭代版是 O(iters × 面積)：貼紙的
+     * 測地比要走上千步、偽泡生長 cap 上百，demo06／demo02 的 2.4 s／3.7 s 全是這個。
+     */
+    fun geodesicDistance(seed: Mask, within: Mask, step: Int, maxIters: Int): IntArray {
+        val w = seed.w
+        val h = seed.h
+        val dist = IntArray(w * h) { -1 }
+        val queue = IntArray(w * h)          // 每個像素一生只進一次
+        var qEnd = 0
+        for (i in dist.indices) if (seed.data[i] && within.data[i]) { dist[i] = 0; queue[qEnd++] = i }
+        var qStart = 0
+        var done = 0
+        while (done < maxIters && qStart < qEnd) {
+            val n = min(step, maxIters - done)
+            done += n
+            val batchEnd = qEnd
+            while (qStart < batchEnd) {
+                val idx = queue[qStart++]
+                val cx = idx % w
+                val cy = idx / w
+                val y1 = min(h - 1, cy + n)
+                val x0 = max(0, cx - n)
+                val x1 = min(w - 1, cx + n)
+                for (yy in max(0, cy - n)..y1) {
+                    val base = yy * w
+                    for (xx in x0..x1) {
+                        val j = base + xx
+                        if (dist[j] < 0 && within.data[j]) { dist[j] = done; queue[qEnd++] = j }
+                    }
+                }
+            }
+        }
+        return dist
+    }
+
+    /**
+     * 兩種實作結果逐位元相同，按成本選（[bfs] 可強制）：迭代 O(iters × 面積)、BFS
+     * O(到達面積 × (2·step+1)²)；BFS 的隨機查表比迭代的循序掃描每次貴約 3 倍，門檻取 3·iters > (2·step+1)²。
+     */
+    fun geodesicGrow(seed: Mask, within: Mask, iters: Int, step: Int = 5, bfs: Boolean? = null): Mask {
         if (iters <= 0) return seed and within
+        // 實測 BFS 每次查表比迭代每像素貴 ~3×（隨機存取），門檻放 3 倍：iters > (2·step+1)²/3
+        val useBfs = bfs ?: (iters.toLong() * 3 > (2L * step + 1) * (2L * step + 1))
+        if (useBfs) {
+            val dist = geodesicDistance(seed, within, step, iters)
+            return Mask(seed.w, seed.h, BooleanArray(dist.size) { dist[it] >= 0 })
+        }
         val w = seed.w
         val h = seed.h
         var cur = (seed and within).data

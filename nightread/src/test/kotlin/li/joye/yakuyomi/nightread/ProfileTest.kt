@@ -77,7 +77,14 @@ class ProfileTest {
      */
     @Test
     fun stageCost() {
-        val page = "ch34_011"
+        // 有 fixture 的頁全跑：真機各頁差 8 倍（demo05 3.8s、demo06 31.6s），只量一頁看不到慢頁的病
+        for (page in listOf("ch34_011", "demo06", "demo02")) {
+            if (javaClass.classLoader!!.getResource("page/${page}_gray.png") == null) continue
+            stageCostOf(page)
+        }
+    }
+
+    private fun stageCostOf(page: String) {
         val input = NightReadInput(
             gray = readGray("${page}_gray.png"),
             seg = readMask("${page}_seg.png"),
