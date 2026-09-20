@@ -31,7 +31,21 @@
 數字的來源），JVM parity IoU 1.00000。真機第三輪 mask（ms，9 頁平均）：yolo int8 ORT 619 →
 **yolo NCNN fp16 462**；**yolo+cseg NCNN 聯集 1353**。夜讀專屬模型 249MB（ORT）→ **146MB**（NCNN）。
 ⚠️ ORT 版 yoloseg 在裝置上是最近鄰取樣的簡化版，NCNN 版照桌面的雙線性，遮罩邊緣像素差 0.03～1.7%。
-NCNN int8（ncnn2int8）等配方定案後當獨立實驗。
+
+**配方定案（2026-09-21 使用者拍板）：yolo ∪ cseg，全 NCNN**（146MB、真機 mask ~1.2～1.4 s）。
+
+**NCNN int8 實驗（同日）**：從 `D:\ncnn-build` 原始碼另編 x86 的 `ncnn2table`／`ncnn2int8`，fp32 來源
+（pnnx `fp16=0`／ultralytics `half=False`），校準圖＝12 張測試頁做成模型畫布（cseg 640 右下 pad、
+yolo 1024 letterbox）。
+- **cseg int8 判死**：kl／aciq 兩種校準都**零實例**（cls sigmoid 最大 0.02，正常 0.93），eq 校準
+  segfault；只量化前 60% backbone 仍零實例、只量化前 30% 輸出爆到 10⁶——不是校準品質，是工具鏈
+  在這張圖（CSPNeXt 的 SE 注意力 Split／BinaryOp 結構）上的 scale 對接壞了。**同 DBNet 當年
+  「int8 完全吐不出框」。別再拿 ncnn2int8 試 cseg，要 int8 只剩 QAT。**
+- **yolo int8（aciq）可用**：kl 校準實例砍半（38→17）、aciq 才對齊；模型級 IoU 0.69～0.97 看起來差，
+  但**管線級**（∪ cseg fp16）守護框 19/665 vs 18、白泡 189091 vs 190082——聯集裡 yolo 只負責密集小
+  人物，退化被 cseg 蓋掉。20.4 → 10.5MB。⚠️ 桌面是 x86 int8 kernel，真機 ARM 要再量一次。
+驗證鏈：`parity/export_*_ncnn.py --skip-export` 吃 `YAKU_*_NCNN_PARAM/BIN` env 指向任何 param/bin；
+`parity/charseg_ncnn_masks.py` 把 NCNN 推論的遮罩落成 `_char.png` 餵夜讀批次（**int8 一定要看管線級**）。
 ⚠️ 上一輪「cseg 有／無」的 ORT 時間表（mask 2.2～3.2 s）含 yoloseg 與熱晶片；cseg 單顆 ORT 是 1.7 s。
 
 ## ★★★ cseg 有／無的真機 A/B（2026-09-21，整合前的配方驗證）
