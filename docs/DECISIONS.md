@@ -44,6 +44,9 @@ yolo 1024 letterbox）。
 - **yolo int8（aciq）可用**：kl 校準實例砍半（38→17）、aciq 才對齊；模型級 IoU 0.69～0.97 看起來差，
   但**管線級**（∪ cseg fp16）守護框 19/665 vs 18、白泡 189091 vs 190082——聯集裡 yolo 只負責密集小
   人物，退化被 cseg 蓋掉。20.4 → 10.5MB。⚠️ 桌面是 x86 int8 kernel，真機 ARM 要再量一次。
+  **真機（2026-09-21 第四輪）**：yolo mask fp16 平均 404 ms → int8 376 ms（**−7%**），畫面差 0.01～0.74%。
+  模型這麼小時 int8 的收益被固定開銷吃掉。**結論：int8 不採用**（cseg 判死、yolo 沒賺頭），
+  **最終配方 = yolo fp16 ∪ cseg fp16，全 NCNN，146MB，真機 mask ~1.2～1.4 s。** 模型這條線收口。
 驗證鏈：`parity/export_*_ncnn.py --skip-export` 吃 `YAKU_*_NCNN_PARAM/BIN` env 指向任何 param/bin；
 `parity/charseg_ncnn_masks.py` 把 NCNN 推論的遮罩落成 `_char.png` 餵夜讀批次（**int8 一定要看管線級**）。
 ⚠️ 上一輪「cseg 有／無」的 ORT 時間表（mask 2.2～3.2 s）含 yoloseg 與熱晶片；cseg 單顆 ORT 是 1.7 s。
