@@ -66,6 +66,7 @@ OUT_DEFAULT = os.path.join(paths.OUT, "nightread")
 # 輸出位準
 BG = 16                 # 深底：留白／氣泡內部／背景填色都用它
 INK = 240               # 亮字：氣泡內的文字筆畫
+EDGE_INK = int(os.environ.get("NIGHTREAD_EDGE_INK", str(INK)))   # 描亮邊線（留白邊界／泡框／泡外圈）上限；預設＝INK
 STROKE = 1              # 邊界描亮半徑（泡框、填色區外緣）。3 會在泡外留 6px 白環
 STROKE_OBJ_V = 220      # 前景描邊亮度（略低於 INK，與字區分）
 SCENE_FLOOR = 8         # 場景曲線：黑 → 8（極暗保護，OLED 黑碎的最小抬升）
@@ -1098,7 +1099,7 @@ def paint_gutter(out, g, gutter, frame=None, bubble=None):
     k = np.ones((STROKE * 2 + 1,) * 2, np.uint8)
     band = (cv2.dilate(fill.astype(np.uint8), k) > 0) & ~fill
     a = ink_alpha(g, 1.6)
-    out[band] = np.maximum(out[band], BG + a[band] * (INK - BG))
+    out[band] = np.maximum(out[band], BG + a[band] * (EDGE_INK - BG))
     return out
 
 
@@ -1124,7 +1125,7 @@ def paint_bubbles(out, g, bubble, seg, text_pad=None):
     out[text] = np.maximum(out[text], BG + a[text] * (INK - BG))
     ko = np.ones((STROKE * 2 + 1,) * 2, np.uint8)
     band = (cv2.dilate(bubble.astype(np.uint8), ko) > 0) & ~bubble
-    out[band] = np.maximum(out[band], BG + ink_alpha(g, 1.6)[band] * (INK - BG))
+    out[band] = np.maximum(out[band], BG + ink_alpha(g, 1.6)[band] * (EDGE_INK - BG))
     return out
 
 
@@ -1278,7 +1279,7 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
         kk = np.ones((STROKE * 2 + 1,) * 2, np.uint8)
         band = (cv2.dilate(bubble_rest.astype(np.uint8), kk) > 0) & ~bubble_rest
         a2 = ink_alpha(g, 1.6)
-        out[band] = np.maximum(out[band], BG + a2[band] * (INK - BG))
+        out[band] = np.maximum(out[band], BG + a2[band] * (EDGE_INK - BG))
     # 語意禁填：人物區（含描邊外擴）一律還原場景調。放最後＝不必逐機制改，任何新填色
     # 機制自動受保護。**只扣氣泡/偽泡**（人物身上的對話框仍該深底亮字）——
     # ⚠️ 不能扣 gutter：白衣被塗黑正是 gutter 幹的（出血人物與頁白同元件），

@@ -11,6 +11,12 @@ data class NightReadParams(
     // 輸出位準
     val bg: Int = 16,
     val ink: Int = 240,
+    /**
+     * 描亮邊線（留白邊界、泡框、泡外那圈）的亮度上限；預設＝[ink]（與研究端輸出逐位元同）。
+     * 產品端可獨立調低：真機回報「純白到發亮的線條」就是這些 1px 描亮帶——場景墨線最多 glowCap=112，
+     * 這裡卻衝到 240，同一頁兩種亮度差太多（2026-09-26）。字的亮度另由 [ink] 管。
+     */
+    val edgeInk: Int = 240,
     val stroke: Int = 1,
     val strokeObjV: Int = 220,
     val sceneFloor: Int = 8,

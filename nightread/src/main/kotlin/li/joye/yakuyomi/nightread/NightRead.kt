@@ -243,7 +243,7 @@ object NightRead {
         val band = Cv.dilate(fill, Cv.rect(p.stroke * 2 + 1, p.stroke * 2 + 1)).andNot(fill)
         val a = inkAlpha(g, 1.6)
         for (i in band.data.indices) {
-            if (band.data[i]) out.data[i] = max(out.data[i], p.bg + a[i] * (p.ink - p.bg))
+            if (band.data[i]) out.data[i] = max(out.data[i], p.bg + a[i] * (p.edgeInk - p.bg))
         }
     }
 
@@ -263,7 +263,7 @@ object NightRead {
         val band = Cv.dilate(bubble, Cv.rect(p.stroke * 2 + 1, p.stroke * 2 + 1)).andNot(bubble)
         val a2 = inkAlpha(g, 1.6)
         for (i in band.data.indices) {
-            if (band.data[i]) out.data[i] = max(out.data[i], p.bg + a2[i] * (p.ink - p.bg))
+            if (band.data[i]) out.data[i] = max(out.data[i], p.bg + a2[i] * (p.edgeInk - p.bg))
         }
     }
 
@@ -580,7 +580,7 @@ object NightRead {
             val band = Cv.dilate(bubbleRest, Cv.rect(p.stroke * 2 + 1, p.stroke * 2 + 1)).andNot(bubbleRest)
             val a2 = inkAlpha(g, 1.6)
             for (i in band.data.indices) {
-                if (band.data[i]) out.data[i] = max(out.data[i], p.bg + a2[i] * (p.ink - p.bg))
+                if (band.data[i]) out.data[i] = max(out.data[i], p.bg + a2[i] * (p.edgeInk - p.bg))
             }
         }
 
