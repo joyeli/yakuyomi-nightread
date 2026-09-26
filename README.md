@@ -47,8 +47,8 @@ Night reading runs after translation: what it rebuilds is the finished page, wit
 already typeset into the bubbles. Computed before translation it would be looking at the original text, and
 the translation pasted in afterwards would land as black type on a dark bubble. So OCR, translation,
 inpainting and typesetting, the bulk of the translation cost, are all saved; the finished page only needs
-detection run again, plus a night-reading-only character mask (10.5 MB for the quantized YOLO11-seg
-alone, 238 MB with CartoonSegmentation alongside it). That detection cannot be saved was settled by
+detection run again, plus a night-reading-only character mask (two NCNN fp16 models in the engine, 146 MB
+together: YOLO11-seg 20.4 MB and CartoonSegmentation 126 MB). That detection cannot be saved was settled by
 measurement: skipping it as well and using the typesetter's own exact
 strokes scores best of the three recipes (text 239.3, contrast +223.2), and was then overturned by looking
 at the output. Exact strokes cannot seed the bubble core fill (on one bubble the detected text region
@@ -82,9 +82,16 @@ percentage points of light area; with the mask the same pipeline sits at 18.
 | `research/make_showcase.py` | The six-stage showcase sheets. |
 | `research/pipeline_diagram.py` | The pipeline-stage figure at the top of this file. |
 | `fixtures/pages/` | The 11 test pages. `fixtures/baseline/` holds reference outputs for regression. |
-| `nightread/` | The Kotlin library. The whole pipeline is ported and passes parity tests against the Python fixtures. Android library with **no `android.graphics` and no ONNX dependency**; `kotlin.math` is all the source imports, so the tests run on a plain JVM. Integration guide in [`nightread/README.md`](nightread/README.md). |
-| `nightread-ort/` | ONNX Runtime inference for the character mask (`CharMaskOrt`). The only module that depends on ONNX Runtime. |
+| `nightread/` | The Kotlin library. The whole pipeline is ported and passes parity tests against the Python fixtures. Android library with **no `android.graphics` and no inference framework**; `kotlin.math` is all the source imports, so the tests run on a plain JVM. Integration guide in [`nightread/README.md`](nightread/README.md). |
 | `docs/` | Architecture, parameter reference, decision log. |
+
+Character-mask inference is not in this repo. Yakuyomi computes it in
+[yakuyomi-engine](https://github.com/joyeli/yakuyomi-engine) with two NCNN segmenters, `CsegSegmenter`
+(CartoonSegmentation's RTMDet-Ins) and `YoloSegSegmenter` (YOLO11-seg `manga_seg_s`), and feeds the union of
+the two fp16 masks to the pipeline; int8 was measured on device and rejected. The former `nightread-ort`
+module, which ran the same two models through ONNX Runtime, went away with that move, so nothing here depends
+on ONNX Runtime any more. The research scripts still run the `.onnx` exports through Python `onnxruntime`;
+that is the desktop reference the NCNN ports are checked against, not the product.
 
 ## Running
 

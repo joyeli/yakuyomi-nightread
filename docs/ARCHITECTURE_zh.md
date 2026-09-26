@@ -229,14 +229,17 @@ flowchart LR
 | | 研究端（`research/`，Python） | 上機（`nightread/`，Kotlin） |
 |---|---|---|
 | 角色 | 規格與驗收 | 未來的產品 |
-| 技術棧 | numpy / cv2 / onnxruntime | Kotlin、ONNX Runtime、無 `android.graphics` |
+| 技術棧 | numpy / cv2 / onnxruntime | 純 Kotlin：不綁推論框架、無 `android.graphics` |
 | 現況 | 收斂，逐位元可重現 | 只有 `Cv.kt` 的 API 契約 |
 
 Python 是規格本。Kotlin 移植的驗收方式是對同一批 fixture 逐位元比對，這也是
 `nightread/` 刻意不依賴 `android.graphics` 的原因：JVM 測試才跑得起來。
 
-上機的模型配方已經定了。人物遮罩需要兩顆 ONNX 模型，合計 267MB：CartoonSegmentation（228MB，
-int8 可壓到 58MB）與 YOLO11-seg（38.9MB）。偵測沿用引擎既有的 DBNet，不另外花空間。
+上機的模型配方已經定了：人物遮罩＝兩顆 NCNN fp16 模型取聯集，合計 146MB——CartoonSegmentation 的
+RTMDet-Ins（`cartoonseg.ncnn`，126MB）與 YOLO11-seg（`manga_seg_s.ncnn`，20.4MB），測試機一頁約
+1.2～1.4 s。int8 量過、判死：cseg 過 `ncnn2int8` 後零實例（工具鏈問題、不是校準），YOLO11-seg int8
+只在本來就 0.4 s 的遮罩上省 7%。推論在 yakuyomi-engine（`CsegSegmenter`、`YoloSegSegmenter`），
+不在這裡：這個 library 只吃遮罩。偵測沿用引擎既有的 DBNet，不另外花空間。
 
 API 也已經對齊：`research/nightread.py` 的 `run_page` 新增 `regions` 與 `seg` 參數，外部提供就
 跳過偵測，與 Kotlin 端的 `NightReadInput` 同形狀。C 配方被否決不代表這個介面沒用，上機仍靠它

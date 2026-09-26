@@ -1,12 +1,9 @@
 [versions]
 agp = "9.3.1"
 kotlin = "2.4.10"
-# ORT 釘 1.20.0，與 yakuyomi-engine 同版：升級零收益且 .so 會暴肥（見 engine 的 memory）
-onnxruntime = "1.20.0"
 
 [libraries]
 junit = { group = "junit", name = "junit", version = "4.13.2" }
-onnxruntime-android = { group = "com.microsoft.onnxruntime", name = "onnxruntime-android", version.ref = "onnxruntime" }
 
 [plugins]
 android-library = { id = "com.android.library", version.ref = "agp" }

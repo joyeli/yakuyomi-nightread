@@ -18,28 +18,29 @@ requirement — see [Text detection is not in this repo](#text-detection-is-not-
 > [`docs/PARAMETERS.md`](../docs/PARAMETERS.md), and where each value came from — with the alternatives that
 > were measured and rejected — is in [`docs/DECISIONS.md`](../docs/DECISIONS.md).
 
-## Modules
+## Module
 
 | Module | Coordinates | Depends on | What it does |
 |---|---|---|---|
 | `:nightread` | `li.joye.yakuyomi:nightread:0.1.0` | nothing but `testImplementation junit` | the zoned rebuild pipeline |
-| `:nightread-ort` | `li.joye.yakuyomi:nightread-ort:0.1.0` | `api(project(":nightread"))` + `api(onnxruntime-android 1.20.0)` | ONNX Runtime inference for the character mask |
 
-Both are Android libraries, minSdk 26, compileSdk 37, Java 17, and both set a group and version, so a
-consumer can wire them in through a Gradle composite build (`includeBuild`), which is what the Yakuyomi fork
-does.
+It is an Android library, minSdk 26, compileSdk 37, Java 17, with a group and version set, so a consumer can
+wire it in through a Gradle composite build (`includeBuild`), which is what the Yakuyomi fork does.
 
-The split is deliberate. `:nightread` imports nothing but `kotlin.math`, not even `android.graphics`: that
-keeps the pipeline runnable under plain JVM unit tests (which is how it is checked against the Python
-fixtures) and lets any JVM project take it as is. `:nightread-ort` is the only module that pulls in ONNX
-Runtime, and it exists to compute the character mask.
+Keeping it to one module is deliberate. `:nightread` imports nothing but `kotlin.math`, not even
+`android.graphics`: that keeps the pipeline runnable under plain JVM unit tests (which is how it is checked
+against the Python fixtures) and lets any JVM project take it as is. The character mask is computed
+elsewhere: Yakuyomi runs the two segmentation models with NCNN inside
+[yakuyomi-engine](https://github.com/joyeli/yakuyomi-engine) (`CsegSegmenter` and `YoloSegSegmenter`, see
+[Character-mask models](#character-mask-models)), and this repo only consumes the resulting mask. There used
+to be a `:nightread-ort` module here running the same two models through ONNX Runtime; it went away with the
+move to NCNN.
 
 ## Quick start
 
 ```kotlin
 dependencies {
     implementation("li.joye.yakuyomi:nightread:0.1.0")
-    implementation("li.joye.yakuyomi:nightread-ort:0.1.0")
 }
 ```
 
@@ -64,8 +65,9 @@ for (i in argb.indices) {
 val seg: Mask = yourTextMask(w, h)                      // Mask(w, h), true = inside a text region
 val regions: List<TextRegion> = yourTextBoxes()         // TextRegion(x0, y0, x1, y1), page pixels
 
-// 4. Character mask. Build the ORT sessions once, reuse them, close them when done.
-val charMask: Mask = CharMaskOrt(yolosegPath, csegPath).use { it.detect(argb, w, h) }
+// 4. Character mask from your segmenter, the model's raw output (see Input format, rule 4). With
+//    yakuyomi-engine it is Mask(w, h, yolo.segment(pageBitmap)) OR-ed with the cseg one; see below.
+val charMask: Mask = yourCharacterMask(w, h)            // Mask(w, h), true = character
 
 // 5. Rebuild.
 val result: NightReadResult = NightRead.render(NightReadInput(gray, seg, regions, charMask, chroma))
@@ -89,8 +91,8 @@ fun render(
 ): NightReadResult
 ```
 
-`NightReadDebug` is a typealias for `(stage: String, value: Int) -> Unit`. The types are in
-`li.joye.yakuyomi.nightread`, and `CharMaskOrt` in `li.joye.yakuyomi.nightread.ort`.
+`NightReadDebug` is a typealias for `(stage: String, value: Int) -> Unit`. All the types are in
+`li.joye.yakuyomi.nightread`.
 
 ## Inputs
 
@@ -136,31 +138,41 @@ Four rules. Break one and the output degrades quietly rather than failing, so ch
 
 ## Character-mask models
 
-The character mask is a required input, and `:nightread-ort` is the module that computes it:
+The character mask is a required input, and this repo does not compute it. Yakuyomi computes it in
+yakuyomi-engine, where the two models run on NCNN, the same backend as the engine's detector and inpainter:
 
 ```kotlin
-CharMaskOrt(yolosegPath, csegPath).use { it.detect(argb, w, h) }
+// yakuyomi-engine; both implement CharSegmenter { fun segment(page: Bitmap): BooleanArray }
+val yolo = YoloSegSegmenter(yoloParamPath, yoloBinPath)
+val cseg = CsegSegmenter(csegParamPath, csegBinPath)
+val a = yolo.segment(pageBitmap)
+val b = cseg.segment(pageBitmap)
+val charMask = Mask(w, h, BooleanArray(w * h) { a[it] || b[it] })
 ```
 
-`detect` takes the `Bitmap.getPixels` style ARGB int array and returns a page-sized `Mask`. `CharMaskOrt`
-needs at least one of the two models — either path may be `null` — and takes the union when both are given.
+`segment` takes the page `Bitmap` and returns a page-sized boolean array, true for character pixels; the
+settled recipe is the union of the two. Each segmenter holds one NCNN net and is `AutoCloseable`.
 
-| Model | File | Size | Role | Licence |
+| Model | Files | Size (fp16) | Role | Licence |
 |---|---|---|---|---|
-| YOLO11-seg | `manga_seg_s.onnx` | 38.9 MB (int8: 10.5 MB) | the settled recipe's base, and the cheapest standalone option | **AGPL-3.0** (Ultralytics) |
-| CartoonSegmentation (RTMDet-Ins) | `cartoonseg.onnx` | 227.6 MB | optional, more accurate with it | MIT |
+| YOLO11-seg | `manga_seg_s.ncnn.param` + `.bin` | 20.4 MB | the settled recipe's base, and the cheapest standalone option | **AGPL-3.0** (Ultralytics) |
+| CartoonSegmentation (RTMDet-Ins) | `cartoonseg.ncnn.param` + `.bin` | 126 MB | optional, more accurate with it | MIT |
 
-Two things measurement settled:
+Three things measurement settled:
 
 - **Running YOLO11-seg alone works.** The cost is guard-box violations rising from 18 to 27.
-- **Do not use CartoonSegmentation's int8 build.** int8 needs the score threshold dropped far enough that the
-  mask over-covers, and bubbles then get eaten as characters.
+- **All fp16, no int8.** CartoonSegmentation comes out of `ncnn2int8` producing zero instances (a toolchain
+  failure on its graph, not a calibration problem), and YOLO11-seg int8 is 7% faster on a mask that already
+  takes 0.4 s. Both were measured on device. The earlier finding against the ONNX int8 build of
+  CartoonSegmentation (it over-covered and ate bubbles) is moot now that nothing runs ONNX on the device.
+- **The union costs 1.2–1.4 s per page** on the test device (Snapdragon 8 Gen 3), for 146 MB of weights.
+
+The `.onnx` exports of the same two models are still what `research/charmask.py` runs on the desktop through
+Python `onnxruntime`. That is the reference the NCNN ports are checked against (union IoU ≥ 0.996), not
+something the device uses.
 
 Anyone redistributing this should note the AGPL-3.0 on the YOLO11-seg weights: that licence is contagious.
 It is compatible with this project's GPL-3.0 (GPLv3 §13), which is not the same as being free of obligations.
-
-⚠️ Always build the ORT session from a **file path**. Do not `readBytes()` the weights into the JVM heap: an
-app's heap is capped around 512 MB regardless of physical RAM, and a 228 MB model OOMs on the way in.
 
 ## Result
 
@@ -178,8 +190,8 @@ without re-deriving them:
 
 - `NightRead` is an `object` and holds no state. The debug hook is a parameter (`NightReadDebug`), not a
   global field, so `render` can be called concurrently.
-- `CharMaskOrt` holds ORT sessions and is `AutoCloseable`. Build it once, reuse it across pages, close it
-  when you are done; the `use { }` above is the single-page shorthand.
+- The segmenters that produce `charMask` are not this module's concern. In yakuyomi-engine each holds one
+  NCNN net and is `AutoCloseable`: build once, reuse across pages, close when done.
 
 ## Parameters
 

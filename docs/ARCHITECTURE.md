@@ -278,14 +278,18 @@ Two implementations do work:
 | | Research (`research/`, Python) | Device (`nightread/`, Kotlin) |
 |---|---|---|
 | Role | the spec, and acceptance | the future product |
-| Stack | numpy / cv2 / onnxruntime | Kotlin, ONNX Runtime, no `android.graphics` |
+| Stack | numpy / cv2 / onnxruntime | Kotlin only: no inference framework, no `android.graphics` |
 | State | converged, bit-for-bit reproducible | only the API contract in `Cv.kt` |
 
 Python is the spec. The Kotlin port is accepted by comparing it bit for bit against the same fixtures, which
 is also why `nightread/` deliberately avoids `android.graphics`: JVM tests have to be able to run it.
 
-The model recipe for the device is settled. The character mask needs two ONNX models, 267MB together:
-CartoonSegmentation (228MB, 58MB once int8) and YOLO11-seg (38.9MB). Detection reuses the engine's existing
+The model recipe for the device is settled: the character mask is the union of two NCNN fp16 models, 146 MB
+together, CartoonSegmentation's RTMDet-Ins (`cartoonseg.ncnn`, 126 MB) and YOLO11-seg (`manga_seg_s.ncnn`,
+20.4 MB), at about 1.2–1.4 s per page on the test device. int8 was measured and rejected: the cseg graph comes
+out of `ncnn2int8` producing zero instances (a toolchain failure, not calibration), and YOLO11-seg int8 saves
+7% on a mask that already takes 0.4 s. The inference lives in yakuyomi-engine (`CsegSegmenter`,
+`YoloSegSegmenter`), not here: this library only consumes the mask. Detection reuses the engine's existing
 DBNet, so it costs nothing extra.
 
 The API is aligned too: `run_page` in `research/nightread.py` takes `regions` and `seg` parameters, and

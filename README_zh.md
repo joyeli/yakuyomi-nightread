@@ -37,8 +37,8 @@
 
 夜讀接在翻譯之後，吃的是已經貼好譯文的成品頁；在翻譯前算，夜讀看到的是原文，譯文貼上去就成了
 黑字壓在黑底上。因此 OCR、翻譯、去字、排版這些翻譯的大宗成本全部省掉，成品頁只要重跑偵測，
-再加一份夜讀專屬的人物遮罩（只用量化的 YOLO11-seg 是 10.5 MB，加上 CartoonSegmentation 則是
-238 MB）。偵測省不掉是量過才定的：連偵測一起省、改用排版器自己畫的精確筆畫，指標反而最好
+再加一份夜讀專屬的人物遮罩（引擎裡兩顆 NCNN fp16 模型，合計 146 MB：YOLO11-seg 20.4 MB 加
+CartoonSegmentation 126 MB）。偵測省不掉是量過才定的：連偵測一起省、改用排版器自己畫的精確筆畫，指標反而最好
 （字 239.3、對比 +223.2），卻被看圖否決。精確筆畫當不了氣泡核心
 填色的種子（某顆泡的偵測文字區覆蓋 90%，精確筆畫只有 32% 是黑），泡會填不滿、右下角留一塊灰；
 裝飾性的手寫字又完全不在任何文字區內，排版器只知道自己畫了什麼，看不到沒被翻譯的字，整顆泡會
@@ -68,9 +68,14 @@
 | `research/make_showcase.py` | 六階段成果展示圖。 |
 | `research/pipeline_diagram.py` | 本頁上方那張管線階段圖。 |
 | `fixtures/pages/` | 11 張測試頁。`fixtures/baseline/` 是回歸用的參考輸出。 |
-| `nightread/` | Kotlin library。整條管線已經移植完成，並通過對 Python fixture 的 parity 測試。Android library，**不依賴 `android.graphics`、也不依賴 ONNX**；原始碼只 import `kotlin.math`，所以測試在一般 JVM 上就跑得起來。接法見 [`nightread/README_zh.md`](nightread/README_zh.md)。 |
-| `nightread-ort/` | 人物遮罩的 ONNX Runtime 推論（`CharMaskOrt`）。只有這個模組依賴 ONNX Runtime。 |
+| `nightread/` | Kotlin library。整條管線已經移植完成，並通過對 Python fixture 的 parity 測試。Android library，**不依賴 `android.graphics`、也不綁任何推論框架**；原始碼只 import `kotlin.math`，所以測試在一般 JVM 上就跑得起來。接法見 [`nightread/README_zh.md`](nightread/README_zh.md)。 |
 | `docs/` | 架構、參數表、決策記錄。 |
+
+人物遮罩的推論不在這個 repo。Yakuyomi 是在 [yakuyomi-engine](https://github.com/joyeli/yakuyomi-engine)
+用兩顆 NCNN 分割器算的：`CsegSegmenter`（CartoonSegmentation 的 RTMDet-Ins）與 `YoloSegSegmenter`
+（YOLO11-seg `manga_seg_s`），兩顆 fp16 遮罩取聯集餵給管線；int8 真機量過、判死。原本用 ONNX Runtime
+跑同兩顆模型的 `nightread-ort` 模組已隨之移除，這裡不再有任何東西依賴 ONNX Runtime。研究腳本仍用
+Python `onnxruntime` 跑 `.onnx` 匯出檔，那是 NCNN 移植拿來對照的桌面參考實作，不是產品。
 
 ## 執行
 

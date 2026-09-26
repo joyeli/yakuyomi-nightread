@@ -8,23 +8,21 @@
 
 > **這頁是整合指南。** 演算法在每個分區判斷什麼見 [`docs/ARCHITECTURE_zh.md`](../docs/ARCHITECTURE_zh.md)，參數逐項見 [`docs/PARAMETERS_zh.md`](../docs/PARAMETERS_zh.md)，每個值的實測由來與被否決的替代方案見 [`docs/DECISIONS.md`](../docs/DECISIONS.md)。
 
-## 兩個模組
+## 模組
 
 | 模組 | Gradle 座標 | 依賴 | 做什麼 |
 |---|---|---|---|
 | `:nightread` | `li.joye.yakuyomi:nightread:0.1.0` | 只有一行 `testImplementation junit` | 分區重繪管線 |
-| `:nightread-ort` | `li.joye.yakuyomi:nightread-ort:0.1.0` | `api(project(":nightread"))` + `api(onnxruntime-android 1.20.0)` | 人物遮罩的 ONNX Runtime 推論 |
 
-兩個都是 Android library，minSdk 26、compileSdk 37、Java 17，也都設了 group 與 version，所以呼叫端用 Gradle composite build（`includeBuild`）就能接，Yakuyomi fork 就是這樣接的。
+Android library，minSdk 26、compileSdk 37、Java 17，也設了 group 與 version，所以呼叫端用 Gradle composite build（`includeBuild`）就能接，Yakuyomi fork 就是這樣接的。
 
-分成兩個模組是刻意的。`:nightread` 除了 `kotlin.math` 什麼都沒 import，連 `android.graphics` 都不碰：這樣管線才跑得起 JVM 單元測試（拿 Python fixture 對比就是這麼做的），也讓它可以被任何 JVM 專案直接拿走。綁 ONNX Runtime 的只有 `:nightread-ort` 一個模組，它存在的理由就是算人物遮罩。
+只留一個模組是刻意的。`:nightread` 除了 `kotlin.math` 什麼都沒 import，連 `android.graphics` 都不碰：這樣管線才跑得起 JVM 單元測試（拿 Python fixture 對比就是這麼做的），也讓它可以被任何 JVM 專案直接拿走。人物遮罩在別處算：Yakuyomi 是在 [yakuyomi-engine](https://github.com/joyeli/yakuyomi-engine) 用 NCNN 跑那兩顆分割模型（`CsegSegmenter` 與 `YoloSegSegmenter`，見[人物遮罩模型](#人物遮罩模型)），這個 repo 只吃算好的遮罩。這裡原本有個 `:nightread-ort` 模組用 ONNX Runtime 跑同兩顆模型，搬到 NCNN 後就拿掉了。
 
 ## 快速開始
 
 ```kotlin
 dependencies {
     implementation("li.joye.yakuyomi:nightread:0.1.0")
-    implementation("li.joye.yakuyomi:nightread-ort:0.1.0")
 }
 ```
 
@@ -49,8 +47,9 @@ for (i in argb.indices) {
 val seg: Mask = yourTextMask(w, h)                      // Mask(w, h)，true＝在文字區內
 val regions: List<TextRegion> = yourTextBoxes()         // TextRegion(x0, y0, x1, y1)，原圖像素
 
-// 4. 人物遮罩。ORT session 建一次、重複用、用完關掉。
-val charMask: Mask = CharMaskOrt(yolosegPath, csegPath).use { it.detect(argb, w, h) }
+// 4. 人物遮罩，來自你的分割器，要模型原輸出（見格式要求第 4 條）。
+//    接 yakuyomi-engine 的話是 Mask(w, h, yolo.segment(pageBitmap)) 再與 cseg 那份取 OR，見下。
+val charMask: Mask = yourCharacterMask(w, h)            // Mask(w, h)，true＝人物
 
 // 5. 重繪。
 val result: NightReadResult = NightRead.render(NightReadInput(gray, seg, regions, charMask, chroma))
@@ -74,7 +73,7 @@ fun render(
 ): NightReadResult
 ```
 
-`NightReadDebug` 是 `(stage: String, value: Int) -> Unit` 的 typealias。這些型別都在 `li.joye.yakuyomi.nightread`，`CharMaskOrt` 在 `li.joye.yakuyomi.nightread.ort`。
+`NightReadDebug` 是 `(stage: String, value: Int) -> Unit` 的 typealias。這些型別都在 `li.joye.yakuyomi.nightread`。
 
 ## 輸入
 
@@ -112,27 +111,33 @@ gray = (R * 299 + G * 587 + B * 114 + 500) / 1000
 
 ## 人物遮罩模型
 
-人物遮罩是必要輸入，算它的是 `:nightread-ort`：
+人物遮罩是必要輸入，但這個 repo 不算它。Yakuyomi 是在 yakuyomi-engine 算的，兩顆模型都跑 NCNN——與引擎的偵測、去字同一個後端：
 
 ```kotlin
-CharMaskOrt(yolosegPath, csegPath).use { it.detect(argb, w, h) }
+// yakuyomi-engine；兩個都實作 CharSegmenter { fun segment(page: Bitmap): BooleanArray }
+val yolo = YoloSegSegmenter(yoloParamPath, yoloBinPath)
+val cseg = CsegSegmenter(csegParamPath, csegBinPath)
+val a = yolo.segment(pageBitmap)
+val b = cseg.segment(pageBitmap)
+val charMask = Mask(w, h, BooleanArray(w * h) { a[it] || b[it] })
 ```
 
-`detect` 吃的是 `Bitmap.getPixels` 那種 ARGB int 陣列，回傳與頁面同尺寸的 `Mask`。`CharMaskOrt` 兩顆模型至少要給一顆（任一路徑都可以傳 `null`），兩顆都給就取聯集。
+`segment` 吃頁面 `Bitmap`，回傳與頁面同尺寸的布林陣列，true＝人物；定案配方是兩顆取聯集。每個分割器各持一個 NCNN net，都是 `AutoCloseable`。
 
-| 模型 | 檔名 | 大小 | 角色 | 授權 |
+| 模型 | 檔案 | 大小（fp16） | 角色 | 授權 |
 |---|---|---|---|---|
-| YOLO11-seg | `manga_seg_s.onnx` | 38.9 MB（int8 版 10.5 MB） | 定案配方的基底，也是單獨跑時最省的一顆 | **AGPL-3.0**（Ultralytics） |
-| CartoonSegmentation（RTMDet-Ins） | `cartoonseg.onnx` | 227.6 MB | 可選，加了更準 | MIT |
+| YOLO11-seg | `manga_seg_s.ncnn.param` + `.bin` | 20.4 MB | 定案配方的基底，也是單獨跑時最省的一顆 | **AGPL-3.0**（Ultralytics） |
+| CartoonSegmentation（RTMDet-Ins） | `cartoonseg.ncnn.param` + `.bin` | 126 MB | 可選，加了更準 | MIT |
 
-量測定了兩件事：
+量測定了三件事：
 
 - **只用 YOLO11-seg 也能跑**，代價是守護框違規從 18 升到 27。
-- **不要用 CartoonSegmentation 的 int8 版**：int8 要把分數門檻降到遮罩過度覆蓋，泡會被當成人物吃掉。
+- **全 fp16、不用 int8**：CartoonSegmentation 過 `ncnn2int8` 後零實例（是工具鏈在這張圖上壞掉，不是校準問題）；YOLO11-seg int8 只在本來就 0.4 s 的遮罩上快 7%。兩者都是真機量的。先前「CartoonSegmentation 的 ONNX int8 版會過度覆蓋、把泡吃掉」那條，在裝置上已不跑 ONNX 之後就無關了。
+- **聯集一頁 1.2～1.4 s**（測試機 Snapdragon 8 Gen 3），權重 146 MB。
+
+同兩顆模型的 `.onnx` 匯出檔仍是桌面 `research/charmask.py` 用 Python `onnxruntime` 跑的版本，那是 NCNN 移植的對照基準（聯集 IoU ≥ 0.996），不是裝置用的。
 
 要散布的人請注意 YOLO11-seg 權重的 AGPL-3.0，這條授權會傳染。它與本專案的 GPL-3.0 相容（GPLv3 §13），但相容不等於沒有義務。
-
-⚠️ 模型一律用**檔案路徑**建 session，不要 `readBytes()` 進 JVM heap。每個 app 的 heap 上限約 512 MB，與實體記憶體無關，228 MB 的模型讀進去就 OOM。
 
 ## 輸出
 
@@ -148,7 +153,7 @@ CharMaskOrt(yolosegPath, csegPath).use { it.detect(argb, w, h) }
 ## 生命週期與執行緒
 
 - `NightRead` 是 object 且不持有狀態。除錯回呼是傳入參數（`NightReadDebug`）而不是全域欄位，所以 `render` 可以並發呼叫。
-- `CharMaskOrt` 持有 ORT session 且是 `AutoCloseable`。建一次、跨頁重複用、用完 close；上面的 `use { }` 只是單頁寫法。
+- 產生 `charMask` 的分割器不歸這個模組管。在 yakuyomi-engine 裡它們各持一個 NCNN net、都是 `AutoCloseable`：建一次、跨頁重複用、用完 close。
 
 ## 參數
 
