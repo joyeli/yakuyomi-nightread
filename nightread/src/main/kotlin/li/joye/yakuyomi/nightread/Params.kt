@@ -66,7 +66,12 @@ data class NightReadParams(
     val bubbleLocalK: Double = 4.0,
     val bubbleCoreMinFrac: Double = 0.003,
     val bubbleNeckR: Int = 8,
-    val safeBubbleRatio: Double = 2.5,
+    /**
+     * 泡核心面積 ≤ 此 × 字框長邊²（擋「字壓臉」被當成泡）。2.5 → 6.0（2026-09-26）：譯後頁的中文比日文短很多
+     * （おはようございます → 早安），字框長邊² 縮 10–20 倍、真泡被拒收成「中間黑、內側一圈白」；6.0 在 fixture 守護框
+     * 18/665 不變、真機兩章多救回 13 顆泡（見 docs/DECISIONS.md）。
+     */
+    val safeBubbleRatio: Double = 6.0,
     val bubbleCleanWins: Double = 0.005,
     val bubbleCleanTextMax: Double = 0.8,
     val bubbleRestNear: Int = 20,
