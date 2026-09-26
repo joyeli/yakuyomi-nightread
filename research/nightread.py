@@ -41,6 +41,10 @@ detect-20241225.ckpt）torch 前向 ＋ m-i-t `SegDetectorRepresenter` 後處理
 
 用法：
     NIGHTREAD_CHARMASK=<遮罩夾> python3 nightread.py <頁圖> [-o 輸出夾]
+背景填黑三檔（產品檔位，見參數區「背景填黑三檔」與 docs/DECISIONS.md；不設＝完整管線＝library 預設、fixture 基線）：
+    L1  NIGHTREAD_STICKER_MODE=plain  NIGHTREAD_PB=0 NIGHTREAD_HM=0
+    L2  NIGHTREAD_STICKER_MODE=simple NIGHTREAD_STICKER_ROUGH=10 NIGHTREAD_STICKER_MINFRAC=0.005 NIGHTREAD_PB=0 NIGHTREAD_HM=0
+    L3  NIGHTREAD_STICKER_MODE=simple NIGHTREAD_STICKER_ROUGH=20 NIGHTREAD_STICKER_MINFRAC=0     NIGHTREAD_PB=0 NIGHTREAD_HM=0
 輸出（皆帶頁名前綴）：_final.png ／ _regions.json ／ _seg.png ／ _bubble.png ／
 _gutter.png ／ _cmp.png（三聯：原圖｜成品｜遮罩視覺化）。批次見 nightread_batch.py。
 
@@ -113,12 +117,21 @@ BUBBLE_CORE_MIN_FRAC = 0.003    # ≥ 此頁佔比走文字種子核心填色；
 BUBBLE_NECK_R = 8           # 泡的切頸半徑：泡框缺口／下巴縫都是窄頸
 SAFE_BUBBLE_RATIO = 6.0     # 泡核心面積 ≤ 此×字框長邊²（擋「字壓臉」被當成泡）；2.5→6.0 見 DECISIONS「譯後頁的泡」
 BUBBLE_CLEAN_WINS = 0.005   # 內部非字墨 < 此的泡＝乾淨容器 ⇒ 整顆塗黑、人物不扣
-BUBBLE_REQUIRE_CLEAN = os.environ.get("NIGHTREAD_REQUIRE_CLEAN", "0") == "1"   # 只收乾淨容器當泡
-# 「保護畫面」（產品端檔位，2026-09-27）：只動封閉氣泡與**貼頁邊**的留白帶——留白距離不算格線（出血格的背景會被當貼格線的
-# 留白填掉）、不做亮島填黑（harmonize）、泡只收乾淨容器。背景填黑／偽泡／泡外圈由各自參數關（fork 一起設）。
-PROTECT_ARTWORK = os.environ.get("NIGHTREAD_PROTECT", "0") == "1"
+BUBBLE_REQUIRE_CLEAN = os.environ.get("NIGHTREAD_REQUIRE_CLEAN", "0") == "1"   # 研究開關：收泡前就要求乾淨容器（非字墨 < BUBBLE_CLEAN_WINS）；預設關、三檔也不用（守護框零影響）
 BUBBLE_CLEAN_TEXT_MAX = 0.8 # 但文字佔比 > 此＝那不是泡（是被誤判的白髮／白手）
-BUBBLE_REST_NEAR = 20       # 泡元件的剩餘部分只在泡外此距離內填深
+BUBBLE_REST_NEAR = 20       # 泡元件的剩餘部分只在泡外此距離內填深（三檔皆同）
+# 字壓背景閘（2026-09-27）：泡核心（cored 分支的 core）的「非字邊界」（core 的 1px 內邊界、扣掉外擴筆畫 segd_c）要貼著墨線——
+# 真泡由自己的框線圍住 ⇒ 邊界幾乎全落在墨線 ≤ BUBBLE_OUTLINE_DIST px 內（19 頁 105 顆真泡：d=6 實測 ≥ 0.977，d=4 時 ≥ 0.959）；
+# 字直接寫在天空／牆面上的白，邊界是網點灰／雲線／別人的線稿 ⇒ 比例低（d=6）：c362_010「我想想」的天空白塊 0.076、
+# c371_008 建築 0.257、c362_013 天空 0.314、ch34_015 手寫字壓格內背景 0.614、demo01 臉 0.748。0.85 落在兩群中間，
+# 最窄處 demo01 距門檻 0.10；
+# 守護框標準 18/665、三檔 L1/L2/L3 12/12/16 不變。填洞後的 rough／solidity／ellipse-IoU 都試過分不開（字洞常與外界相通）。
+BUBBLE_OUTLINE_MIN = 0.85   # 非字邊界中「距墨線 ≤ BUBBLE_OUTLINE_DIST px」的比例下限；0＝關
+BUBBLE_OUTLINE_DIST = 6     # 「貼墨」距離（px），絕對像素。4→6（2026-09-27 審查的解析度探針）：d=4 在頁圖放大 1.5–2× 就破（2× 時 74–79 顆
+                            # 真泡跌破 0.85）；d=6 從 1× 到 2× 真泡全程 ≥ 0.94，字壓背景 1× 最高 0.748、放大後 ≤ 0.68，兩群仍分得開；
+                            # 1× 的 fixture 11 頁輸出逐像素不變
+BUBBLE_OUTLINE_MIN_PX = 100 # 非字邊界像素少於此不判（樣本不足 ⇒ 維持原行為）
+BUBBLE_OUTLINE_PAD = 8      # 量測窗外擴（距離變換要看得到元件 bbox 外的墨）
 
 # 偽泡（開口泡／字壓畫面）
 PB_COV_MAX = 0.85       # 泡遮罩蓋率低於此的文字區才啟動偽泡
@@ -168,6 +181,28 @@ FRAME_HUG_STRONG = 0.4  # 強貼框：背景證據夠強 ⇒ 走放寬門
 # 跳過小面積門 ⇒ 被當格背景填黑。設計註記「前景白只點狀碰框 ⇒ hug 低」在扁格不成立。
 HUG_SIDE_MIN = 0.5      # 每邊的貼框覆蓋門檻（低於此＝該邊不算貼）
 PROMOTED_TEXTON_MAX = 0.3   # 強貼框仍拒的文字覆蓋上限（真旁白框填黑會糊字）
+
+# 背景填黑三檔（產品檔位；2026-09-27 使用者定義「多少白該黑」，取代被打回的「保護畫面」旗標）
+#   L1 最低  ＝ 分鏡溝／頁邊帶（標準留白邏輯）＋ 封閉泡（標準泡邏輯，含泡外圈 BUBBLE_REST_NEAR）
+#              ＋「無畫面背景」貼紙：邊界只碰格線／頁邊、不碰線稿、不碰人物（STICKER_MODE=plain）
+#              ⚠️ 實測（19 頁）：過安全網的 55 顆元件外圈線稿佔比最低 0.110（泡框與字也算墨）> 0.05 ⇒ plain 零命中，L1 實際上＝留白＋泡、不填任何貼紙；「無畫面背景」要更寬的判準（外圈扣掉泡框／字）另案研究
+#   L2 進階  ＝ L1 ＋ 通過貼紙安全網、且 rough ≤ STICKER_ROUGH_MAX、整頁佔比 ≥ STICKER_SIMPLE_MIN_FRAC 的白（simple／10／0.005）
+#   L3 更進階＝ L1 ＋ rough ≤ 20、無面積下限（simple／20／0）
+#   三檔一律：無偽泡（PSEUDO_BUBBLES=0）、無亮島填黑（HARMONIZE=0）；泡外圈、留白深度、閘門都用標準值。
+#   舊的完整管線（所有貼紙＋偽泡＋亮島）仍是本檔／library 的**預設**（fixture 與守護框基線不動），但不再是產品檔位。
+# 消融結論：撕裂真凶＝碰到人物、內有線稿的大白元件——它過了貼紙安全網、核心填色卻停在人物邊界 ⇒ 沿人物一圈黑。
+#   rough＝周長²/(4π·面積) 分得開：正當大白 1.8–8.3 vs 撕裂元件 17.8–173。偽泡多 2 個守護框；harmonize 與乾淨容器閘
+#   對守護框零影響。守護框 L1 12／L2 12／L3 16 vs 標準 18（/665）；8 張撕裂頁亮區（≥110 像素佔比）L1 40.3%／L2 39.8%／
+#   L3 39.6% vs 標準 35.6%。
+STICKER_MODE = os.environ.get("NIGHTREAD_STICKER_MODE", "all")   # all｜simple｜plain（all＝預設完整管線；plain＝L1；simple＝L2/L3）
+assert STICKER_MODE in ("all", "simple", "plain"), f"NIGHTREAD_STICKER_MODE 只能是 all/simple/plain：{STICKER_MODE}"
+STICKER_ROUGH_MAX = float(os.environ.get("NIGHTREAD_STICKER_ROUGH", "10"))          # simple：rough 上限（L2 10、L3 20）
+STICKER_SIMPLE_MIN_FRAC = float(os.environ.get("NIGHTREAD_STICKER_MINFRAC", "0.005"))  # simple：整頁佔比下限（L2 0.005、L3 0）
+STICKER_PLAIN_RING_R = 7    # plain：元件外圈＝dilate(橢圓 (2r+1)²＝15×15) − 元件，量外圈碰到什麼
+STICKER_PLAIN_ART_MAX = 0.05    # plain：外圈上「非格線的墨」（g < INK_DARK_TH 且不在格線外擴內）佔比 < 此＝只碰格線／頁邊
+STICKER_PLAIN_FRAME_DIL = 7 # plain：格線遮罩外擴的方核邊長（7×7），框線本身不算線稿
+PSEUDO_BUBBLES = os.environ.get("NIGHTREAD_PB", "1") == "1"   # 偽泡開關（三檔＝0；偽泡沿字往背景長，是撕裂黑塊來源之一）
+HARMONIZE = os.environ.get("NIGHTREAD_HM", "1") == "1"        # 亮島填黑開關（三檔＝0；會把格內背景挖成黑塊）
 
 # 核心填色（從格框種子出發、不擠過窄頸的寬闊背景）
 CORE_NECK_R = 12        # 開運算半徑：切斷臉／白衣連進背景的線稿缺口
@@ -484,13 +519,14 @@ def _nontext_hole_ink_ratio(comp_u8, g, segd):
     return ink / max(int(comp_u8.sum()), 1)
 
 
-def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids, charmask=None):
+def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids, charmask=None, chroma=None):
     """氣泡內部遮罩（修法1）：每文字區 bbox+BUBBLE_PAD 窗內，找「貼著（外擴後）
     文字筆畫」的白色連通元件，通過守門則整顆併入（不裁窗 ⇒ 無截斷方塊，
     原型 regrow 補救移除）。守門（不併＝該區只保留筆畫，安全降級）：
       整頁佔比 ≤ BUBBLE_COMP_MAX_FRAC（格內背景白太大，不是氣泡）
       面積 ≤ BUBBLE_LOCAL_K × 搜尋窗（局部性：氣泡跟它的字同尺度）
       不在 excluded_ids（留白/格內白元件）
+      核心的非字邊界貼墨比例 ≥ BUBBLE_OUTLINE_MIN（字壓背景的白不是泡；外圈有彩不判）
     """
     H, W = g.shape
     seg_u8 = seg.astype(np.uint8) * 255
@@ -502,6 +538,11 @@ def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids, charmask=None):
     # 用單一字框當分母會讓比值假性超標（2.32/3.96 > 2.0）⇒ 兩顆泡都被拒收、內部留場景灰、
     # 只剩泡框被描亮成粗白環（使用者回報）。分母改成該元件**所有**命中字區的長邊²總和。
     comp_den = {}
+    # 泡局部性檢查（面積 ≤ BUBBLE_LOCAL_K × 搜尋窗）要用「該元件**所有**命中字區的最大窗」，不能用當下字區的窗：
+    # c362_011 右上雙泡的大泡白元件（102025 px）也被鄰近小字框「當然」（bbox [1153,219,1186,292]，窗 17289、
+    # K×窗 69156 < 102025）碰到、先被拒收，而 rejected 是黏的（下一個字區碰到同元件直接 continue），輪到它自己的
+    # 大字框（[931,202,1021,433]，K×窗 211480）時已救不回 ⇒ 純迭代順序決定收/拒、整顆泡留白。
+    comp_win = {}
     for r in regions:
         x0, y0, x1, y1 = r["bbox"]
         cx0, cy0 = max(0, x0 - BUBBLE_PAD), max(0, y0 - BUBBLE_PAD)
@@ -509,6 +550,7 @@ def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids, charmask=None):
         lab_c = lab[cy0:cy1, cx0:cx1]
         for i in np.unique(lab_c[(seg_dil[cy0:cy1, cx0:cx1] > 0) & (lab_c > 0)]):
             comp_den[int(i)] = comp_den.get(int(i), 0) + max(1, max(x1 - x0, y1 - y0) ** 2)
+            comp_win[int(i)] = max(comp_win.get(int(i), 0), (cx1 - cx0) * (cy1 - cy0))
     for r in regions:
         x0, y0, x1, y1 = r["bbox"]
         cx0, cy0 = max(0, x0 - BUBBLE_PAD), max(0, y0 - BUBBLE_PAD)
@@ -520,7 +562,7 @@ def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids, charmask=None):
             if (i in merged or int(i) in rejected) and i not in excluded_ids:
                 continue
             a = int(stats[i, cv2.CC_STAT_AREA])
-            if a > BUBBLE_COMP_MAX_FRAC * g.size or a > BUBBLE_LOCAL_K * win_area:
+            if a > BUBBLE_COMP_MAX_FRAC * g.size or a > BUBBLE_LOCAL_K * comp_win.get(int(i), win_area):
                 rejected.add(int(i))
                 continue
             if i in excluded_ids:
@@ -556,7 +598,27 @@ def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids, charmask=None):
                 if SAFE_BUBBLE_RATIO > 0 and int(core.sum()) > ratio_den:
                     rejected.add(int(i))
                     continue
-                if (BUBBLE_REQUIRE_CLEAN or PROTECT_ARTWORK) and _nontext_hole_ink_ratio(
+                if BUBBLE_OUTLINE_MIN > 0:
+                    # 字壓背景閘（2026-09-27）：core 是「字所在的白」，但字寫在天空／牆面上時那片白不是泡——
+                    # 泡由自己的框線圍住（非字邊界幾乎全貼墨），背景白的邊界是網點灰／雲線／別人的線稿。
+                    # 彩頁例外：泡框／底可能是淡彩（demo04 淡紫框、爆炸泡的斜線底），墨判準不成立 ⇒ 外圈有彩就不判。
+                    px0, py0 = max(0, bx - BUBBLE_OUTLINE_PAD), max(0, by - BUBBLE_OUTLINE_PAD)
+                    px1, py1 = min(W, bx + bw + BUBBLE_OUTLINE_PAD), min(H, by + bh + BUBBLE_OUTLINE_PAD)
+                    core_w = np.zeros((py1 - py0, px1 - px0), bool)
+                    core_w[by - py0:by - py0 + bh, bx - px0:bx - px0 + bw] = core
+                    sd_w = segd_c[py0:py1, px0:px1]
+                    bnd = core_w & ~(cv2.erode(core_w.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0) & ~sd_w
+                    if int(bnd.sum()) >= BUBBLE_OUTLINE_MIN_PX:
+                        achromatic = True
+                        if chroma is not None:
+                            ring = (cv2.dilate(core_w.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))) > 0) & ~core_w & ~sd_w
+                            achromatic = (not ring.any()) or float(chroma[py0:py1, px0:px1][ring].mean()) <= STICKER_CHROMA_MAX
+                        if achromatic:
+                            dd = cv2.distanceTransform((g[py0:py1, px0:px1] >= INK_DARK_TH).astype(np.uint8), cv2.DIST_L2, 3)
+                            if float((dd[bnd] <= BUBBLE_OUTLINE_DIST).mean()) < BUBBLE_OUTLINE_MIN:
+                                rejected.add(int(i))    # 邊界不貼墨＝沒有框線圍住＝字壓背景，不是泡
+                                continue
+                if BUBBLE_REQUIRE_CLEAN and _nontext_hole_ink_ratio(
                     core.astype(np.uint8), g[by:by + bh, bx:bx + bw], segd_c[by:by + bh, bx:bx + bw],
                 ) >= BUBBLE_CLEAN_WINS:
                     rejected.add(int(i))    # 核心裡除了字還有線稿＝不是容器（開口泡吃進的背景）
@@ -566,7 +628,7 @@ def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids, charmask=None):
                 cored.add(int(i))
                 continue
             else:
-                if BUBBLE_REQUIRE_CLEAN or PROTECT_ARTWORK:
+                if BUBBLE_REQUIRE_CLEAN:
                     bx, by, bw, bh = stats[i, :4]
                     comp_s = (lab[by:by + bh, bx:bx + bw] == i).astype(np.uint8)
                     if _nontext_hole_ink_ratio(comp_s, g[by:by + bh, bx:bx + bw], segd_c[by:by + bh, bx:bx + bw]) >= BUBBLE_CLEAN_WINS:
@@ -846,6 +908,45 @@ def sticker_plan(g, img_bgr, lab, stats, gutter_ids, panel_ids, frameless, regio
                 # 守護框歸因：貼紙單獨 12 框違規、7 是白髮＝整顆填把連進背景的髮絲白吃掉。
                 promoted.add(i)
     return accept, audit, promoted
+
+
+def filter_sticker_plan(g, lab, stats, accept, audit, promoted, char_raw, frame):
+    """背景填黑三檔（STICKER_MODE）：在 sticker_plan 的安全網之後再挑一次，決定哪些白元件真的填黑。
+    回傳 (accept, promoted)；promoted 只留仍在 accept 內的（擢升元件落選＝連核心填色也不做）。
+
+    plain(i)＝「無畫面背景」：元件不碰 char_raw（模型原輸出人物遮罩、未收邊——三檔實驗就是這樣量的）、且外圈
+    （dilate 橢圓 (2·STICKER_PLAIN_RING_R+1)² − 元件）非空、且外圈上「非格線的墨」（g < INK_DARK_TH 且不在格線
+    外擴 STICKER_PLAIN_FRAME_DIL² 內）的佔比 < STICKER_PLAIN_ART_MAX ⇒ 邊界只碰格線／頁邊、沒碰線稿。
+      all   ：keep＝accept（預設完整管線，不動）
+      plain ：keep＝{plain}（L1）
+      simple：keep＝{plain} ∪ {audit 的 rough ≤ STICKER_ROUGH_MAX 且 areaFrac ≥ STICKER_SIMPLE_MIN_FRAC}（L2／L3）
+    落選的元件回到 sticker_plan 落選時的待遇（有框頁 panel 白＝場景調壓暗；frameless＝背景保留），絕不會比原圖糟。
+    audit 每筆加 keep 欄（accept 是安全網的判定、keep 是檔位的最終決定）。
+    """
+    accept = set(accept)
+    if STICKER_MODE == "all":
+        keep = accept
+    else:
+        met = {int(a["comp"]): a for a in audit}
+        kr = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * STICKER_PLAIN_RING_R + 1,) * 2)
+        fd = cv2.dilate(np.asarray(frame).astype(np.uint8),
+                        np.ones((STICKER_PLAIN_FRAME_DIL,) * 2, np.uint8)) > 0
+        art = (g < INK_DARK_TH) & ~fd                       # 非格線的墨＝線稿
+        keep = set()
+        for i in accept:
+            comp = lab == i
+            if not comp[char_raw].any():                    # 不碰人物
+                ring = (cv2.dilate(comp.astype(np.uint8), kr) > 0) & ~comp
+                if ring.any() and float(art[ring].mean()) < STICKER_PLAIN_ART_MAX:
+                    keep.add(i)                             # plain：外圈只碰格線／頁邊
+                    continue
+            if STICKER_MODE == "simple":
+                a = met.get(int(i))
+                if a is not None and a["rough"] <= STICKER_ROUGH_MAX and a["areaFrac"] >= STICKER_SIMPLE_MIN_FRAC:
+                    keep.add(i)
+    for a in audit:
+        a["keep"] = int(a["comp"]) in keep
+    return keep, set(promoted) & keep
 
 
 def thick_ink_aura(g, r=PB_AURA_R, thick=PB_AURA_THICK, min_area=PB_AURA_MIN_AREA, seg=None):
@@ -1267,7 +1368,7 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
         H2, W2 = g.shape
         yy, xx = np.mgrid[0:H2, 0:W2]
         bd = np.minimum(np.minimum(yy, H2 - 1 - yy), np.minimum(xx, W2 - 1 - xx)).astype(np.float32)
-        if frame is not None and frame.any() and not PROTECT_ARTWORK:   # 保護畫面：留白只看頁邊距離、不看格線
+        if frame is not None and frame.any():
             fd = cv2.distanceTransform((frame == 0).astype(np.uint8), cv2.DIST_L2, 3)
             bd = np.minimum(bd, fd)
         lim = SAFE_GUTTER_DEPTH * min(H2, W2)
@@ -1294,10 +1395,11 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
         out = paint_sticker(out, g, lab, stats, sticker, bubble,
                             core_ids=core_ids, frame=frame, seg=seg, charmask=charmask)
     out = paint_bubbles(out, g, bubble, seg)
-    pb = build_pseudo_bubbles(g, regions, bubble, seg=seg)   # 偽泡：開口泡/字壓背景/字壓留白救回
+    # 偽泡：開口泡/字壓背景/字壓留白救回（三檔一律關：偽泡沿字往背景長，是撕裂黑塊來源之一，守護框 +2）
+    pb = build_pseudo_bubbles(g, regions, bubble, seg=seg) if PSEUDO_BUBBLES else np.zeros_like(bubble)
     if pb.any():
         out = paint_bubbles(out, g, pb, seg)
-    if not PROTECT_ARTWORK:   # 保護畫面：亮島填黑會把格內背景挖成黑塊，關
+    if HARMONIZE:   # 亮島填黑（三檔一律關：會把格內背景挖成黑塊；守護框對它零敏感）
         out = harmonize_enclosed_whites(out, g, lab, stats, bubble | pb | gutter)
     if lost_bubble.any():
         txt = (cv2.dilate((seg & lost_bubble).astype(np.uint8),
@@ -1417,17 +1519,18 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None):
     char_raw = load_charmask(page_path, g.shape)      # 模型原輸出（未收邊、未平滑）
     charmask = smooth_charmask(snap_charmask(char_raw, g), g)
     bubble, merged, rejected, cored = build_bubble_mask(
-        g, regions, seg, lab, stats, gutter_ids | panel_ids, charmask=charmask)
+        g, regions, seg, lab, stats, gutter_ids | panel_ids, charmask=charmask,
+        chroma=(img.max(axis=2).astype(np.int16) - img.min(axis=2).astype(np.int16)).astype(np.uint8))
     sticker, audit, promoted = sticker_plan(g, img, lab, stats, gutter_ids, panel_ids,
                                             frameless, regions)
-    if PROTECT_ARTWORK:   # 保護畫面：背景填黑（含貼框擢升）整段不做
-        sticker, audit, promoted = set(), [], set()
+    lhm, lvm = frame_line_mask(g)
+    sticker, promoted = filter_sticker_plan(g, lab, stats, sticker, audit, promoted,   # 三檔（STICKER_MODE）
+                                            char_raw, (lhm | lvm) > 0)
     gutter_show = gutter_ids - sticker if frameless else gutter_ids
     gutter = np.isin(lab, sorted(gutter_show)) if gutter_show else np.zeros((H, W), bool)
     panel_show = panel_ids - sticker
     panel_scene = np.isin(lab, sorted(panel_show)) if panel_show else np.zeros((H, W), bool)
     sticker_mask = np.isin(lab, sorted(sticker)) if sticker else np.zeros((H, W), bool)
-    lhm, lvm = frame_line_mask(g)
     rest_ids = set(cored) | set(promoted)
     if rest_ids:
         # 泡元件的**剩餘部分**（元件 − 核心）＝泡框外的背景白。它與泡是同一個白元件，核心填色只填
@@ -1557,7 +1660,8 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None):
               f"fig={a['figFrac']:.3f} thin={a['thinFrac']:.3f} chroma={a['chroma']:5.1f} "
               f"eaten={a['eatenFrac']:.4f} protect={a['protectFrac']:.4f} "
               f"textCov={a['textCov']:.3f} textOn={a['textOn']:.3f} rough={a['rough']:6.1f} "
-              f"-> {'ACCEPT' if a['accept'] else 'fallback'}", flush=True)
+              f"-> {'ACCEPT' if a['accept'] else 'fallback'}"
+              f"{'' if a.get('keep', a['accept']) == a['accept'] else ' (tier: dropped)'}", flush=True)
     return st
 
 

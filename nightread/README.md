@@ -195,15 +195,29 @@ without re-deriving them:
 
 ## Parameters
 
-`NightReadParams` is a `data class` holding the module's 91 parameters, and its defaults are the settled
-values. Per-item documentation is in [`docs/PARAMETERS.md`](../docs/PARAMETERS.md), which covers all 94 knobs
-of the pipeline; the three that are not in `NightReadParams` sit outside the module — the detector's
-binarisation threshold, a report-only white-area threshold, and the pseudo-bubble growth reference, which the
-Kotlin port fixes to the long edge.
+`NightReadParams` is a `data class` holding the module's 118 parameters, and its defaults are the settled
+values. Per-item documentation is in [`docs/PARAMETERS.md`](../docs/PARAMETERS.md), which covers the whole
+pipeline; the knobs that are not in `NightReadParams` sit outside the module — the detector's binarisation
+threshold, a report-only white-area threshold, the pseudo-bubble growth reference (which the Kotlin port fixes
+to the long edge) and the research-only toggle `BUBBLE_REQUIRE_CLEAN`.
 
 Changing them changes the algorithm, not a style setting. The thresholds are interlocked: the zoning scheme
 is built on the white-component decisions, so a value moved in one stage propagates through every stage after
 it.
+
+The one group meant to be set by the caller is the **fill tier** (how much white goes black; *Fill tiers* in
+`docs/PARAMETERS.md`): `stickerMode` (`StickerMode.ALL` / `SIMPLE` / `PLAIN`), `stickerRoughMax`,
+`stickerSimpleMinFrac`, `stickerPlainRingR`, `stickerPlainArtMax`, `stickerPlainFrameDil`, `pseudoBubbles`
+and `harmonize`. The defaults (`ALL`, both switches on) are the full research pipeline, which the fixtures and
+the guard baselines are pinned to; the three product levels are parameter sets the caller passes in:
+
+| Level | `NightReadParams(...)` |
+|---|---|
+| L1 | `stickerMode = StickerMode.PLAIN, pseudoBubbles = false, harmonize = false` |
+| L2 | `stickerMode = StickerMode.SIMPLE, stickerRoughMax = 10.0, stickerSimpleMinFrac = 0.005, pseudoBubbles = false, harmonize = false` |
+| L3 | `stickerMode = StickerMode.SIMPLE, stickerRoughMax = 20.0, stickerSimpleMinFrac = 0.0, pseudoBubbles = false, harmonize = false` |
+
+`TierParityTest` runs the two fixture pages through all three against `fixtures/baseline/tiers/`.
 
 ## The red line
 

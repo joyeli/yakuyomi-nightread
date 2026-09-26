@@ -244,28 +244,6 @@ internal object Regions {
     }
 
     /**
-     * 「容器裡除了字還有什麼」：[comp]（頁面座標 [ox],[oy] 起的子遮罩）小洞內、不在外擴筆畫 [segClean] 上的墨
-     * 除以元件面積。真泡是空白容器（0.0–0.3%）；開口泡吃進來的格內背景、字壓在臉上的皮膚白，洞裡有線稿／五官（>1%）。
-     * 與 compose 的 clean 判準同式，但在**收泡之前**用（[NightReadParams.protectArtwork]）。
-     */
-    private fun nonTextHoleInkRatio(comp: Mask, ox: Int, oy: Int, g: Gray, segClean: Mask, p: NightReadParams): Double {
-        val holes = Cv.holes(comp)
-        if (!holes.any()) return 0.0
-        val hcc = Cv.ccStats(holes, 8)
-        val limit = p.holeMaxFrac * g.data.size
-        var ink = 0
-        for (yy in 0 until comp.h) {
-            val src = (oy + yy) * g.w + ox
-            for (xx in 0 until comp.w) {
-                val j = hcc.labels[yy * comp.w + xx]
-                if (j == 0 || hcc.area[j] >= limit) continue
-                if (!segClean.data[src + xx] && g.data[src + xx] < p.inkDarkTh) ink++
-            }
-        }
-        return ink.toDouble() / max(1, comp.count())
-    }
-
-    /**
      * 元件包住的線稿量：「小洞內的墨」除以元件面積。只計小洞——大洞是被留白環住的整格，
      * 不是包線稿。
      */
@@ -330,6 +308,10 @@ internal object Regions {
      * 兩道守門擋掉整片背景被當成泡：整頁佔比上限，以及「面積不得超過搜尋窗的四倍」的局部性。
      * 夠大的泡不整顆填，改走文字種子核心填色。還有一道面積比：泡核心不得超過字框長邊平方的
      * `safeBubbleRatio` 倍——分母用長邊平方而不是字框面積，否則單行直排的字框會讓比值假性爆表。
+     * 核心再過一道字壓背景閘：非字邊界貼墨比例 ≥ [NightReadParams.bubbleOutlineMin]（字寫在天空／牆面上的白
+     * 不是泡；外圈有彩不判）。
+     *
+     * [chroma] 每像素彩度（max−min 通道），閘門的彩頁豁免用；null＝不豁免、全判。
      */
     fun buildBubbleMask(
         g: Gray,
@@ -338,12 +320,14 @@ internal object Regions {
         cc: CC,
         excluded: Set<Int>,
         p: NightReadParams,
+        chroma: Gray? = null,
+        debug: NightReadDebug? = null,
     ): BubbleResult {
         val w = g.w
         val h = g.h
         val segDil = Cv.dilate(seg, Cv.rect(9, 9))
-        // 保護畫面的「乾淨容器」判準用（同 compose 的 clean 判準：外擴 7 的筆畫不算墨）
-        val segClean = if (p.protectArtwork) Cv.dilate(seg, Cv.ellipse(7)) else null
+        // 外擴 7 的筆畫＝「字附近」：字壓背景閘的非字邊界要扣掉它（同 compose 的 clean 判準）
+        val segClean = Cv.dilate(seg, Cv.ellipse(7))
         val bubble = Mask(w, h)
         val merged = HashSet<Int>()
         val rejected = HashSet<Int>()
@@ -352,6 +336,10 @@ internal object Regions {
         // 相連的雙泡是同一個白元件，用單一字框當分母會讓比值假性超標 ⇒ 分母是該元件所有
         // 命中字區的長邊平方總和
         val compDen = HashMap<Int, Long>()
+        // 局部性檢查（面積 ≤ bubbleLocalK × 搜尋窗）用該元件所有命中字區的最大窗，不用當下字區的窗：
+        // c362_011 雙泡的大泡白元件也被鄰近小字框「當然」碰到（K×窗 69156 < 元件 102025）先被拒收，
+        // rejected 又是黏的，輪到它自己的大字框（K×窗 211480）時已救不回 ⇒ 迭代順序決定收拒、整顆泡留白
+        val compWin = HashMap<Int, Long>()
         for (r in regions) {
             val cx0 = max(0, r.x0 - p.bubblePad)
             val cy0 = max(0, r.y0 - p.bubblePad)
@@ -359,6 +347,7 @@ internal object Regions {
             val cy1 = min(h, r.y1 + p.bubblePad)
             val long = max(1, max(r.x1 - r.x0, r.y1 - r.y0))
             val add = long.toLong() * long
+            val winArea = (cx1 - cx0).toLong() * (cy1 - cy0)
             val seen = HashSet<Int>()
             for (y in cy0 until cy1) {
                 val base = y * w
@@ -368,7 +357,10 @@ internal object Regions {
                     if (l > 0) seen.add(l)
                 }
             }
-            for (l in seen) compDen[l] = (compDen[l] ?: 0L) + add
+            for (l in seen) {
+                compDen[l] = (compDen[l] ?: 0L) + add
+                compWin[l] = max(compWin[l] ?: 0L, winArea)
+            }
         }
 
         for (r in regions) {
@@ -390,7 +382,7 @@ internal object Regions {
             for (i in touch) {
                 if ((i in merged || i in rejected) && i !in excluded) continue
                 val a = cc.area[i]
-                if (a > p.bubbleCompMaxFrac * g.data.size || a > p.bubbleLocalK * winArea) {
+                if (a > p.bubbleCompMaxFrac * g.data.size || a > p.bubbleLocalK * (compWin[i] ?: winArea)) {
                     rejected.add(i); continue
                 }
                 if (i in excluded) continue      // 留白/格內白元件不當泡（字交偽泡貼身填色）
@@ -421,10 +413,67 @@ internal object Regions {
                     val core = broadCoreFill(comp, comp and seed, p.bubbleNeckR, p.bubbleNeckR)
                     if (!core.any()) { rejected.add(i); continue }
                     if (core.count() > ratioDen) { rejected.add(i); continue }
-                    if (segClean != null &&
-                        nonTextHoleInkRatio(core, bx, by, g, segClean, p) >= p.bubbleCleanWins
-                    ) {
-                        rejected.add(i); continue   // 核心裡除了字還有線稿＝不是容器（開口泡吃進的背景）
+                    if (p.bubbleOutlineMin > 0) {
+                        // 字壓背景閘（2026-09-27）：core 是「字所在的白」，但字寫在天空／牆面上時那片白不是泡——
+                        // 泡由自己的框線圍住（非字邊界幾乎全貼墨），背景白的邊界是網點灰／雲線／別人的線稿。
+                        // 彩頁例外：泡框／底可能是淡彩（demo04 淡紫框、爆炸泡的斜線底），墨判準不成立 ⇒ 外圈有彩就不判。
+                        // 量測窗＝元件 bbox 外擴 bubbleOutlinePad（距離變換要看得到 bbox 外的墨），核心貼進窗內座標。
+                        val px0 = max(0, bx - p.bubbleOutlinePad)
+                        val py0 = max(0, by - p.bubbleOutlinePad)
+                        val px1 = min(w, bx + bw + p.bubbleOutlinePad)
+                        val py1 = min(h, by + bh + p.bubbleOutlinePad)
+                        val ww = px1 - px0
+                        val wh = py1 - py0
+                        val coreW = Mask(ww, wh)
+                        for (yy in 0 until bh) {
+                            val dst = (by - py0 + yy) * ww + (bx - px0)
+                            for (xx in 0 until bw) if (core.data[yy * bw + xx]) coreW.data[dst + xx] = true
+                        }
+                        // 非字邊界＝core 的 1 px 內邊界（3×3 腐蝕的差；影像外側視為前景，與 cv2 同）扣掉外擴筆畫
+                        val eroded = Cv.erode(coreW, Cv.rect(3, 3))
+                        val bnd = Mask(ww, wh)
+                        var nb = 0
+                        for (yy in 0 until wh) {
+                            val src = (py0 + yy) * w + px0
+                            for (xx in 0 until ww) {
+                                val k = yy * ww + xx
+                                if (coreW.data[k] && !eroded.data[k] && !segClean.data[src + xx]) { bnd.data[k] = true; nb++ }
+                            }
+                        }
+                        if (nb >= p.bubbleOutlineMinPx) {
+                            var achromatic = true
+                            if (chroma != null) {
+                                // 外圈 1–3 px（core 膨脹 7×7 橢圓減 core、扣字）的平均彩度
+                                val ring = Cv.dilate(coreW, Cv.ellipse(7))
+                                var sum = 0L
+                                var cnt = 0
+                                for (yy in 0 until wh) {
+                                    val src = (py0 + yy) * w + px0
+                                    for (xx in 0 until ww) {
+                                        val k = yy * ww + xx
+                                        if (ring.data[k] && !coreW.data[k] && !segClean.data[src + xx]) { sum += chroma.data[src + xx]; cnt++ }
+                                    }
+                                }
+                                achromatic = cnt == 0 || sum.toDouble() / cnt <= p.stickerChromaMax
+                            }
+                            if (achromatic) {
+                                // 窗內對「非墨」做距離變換 ⇒ 每個邊界像素到最近墨像素的距離（python 是 3×3 chamfer 近似，
+                                // 這裡精確歐氏；審查者精確圓盤重算 118 顆、本機 fixture 7 顆核心的比例都與 cv2 值到小數第三位相同）
+                                val nonInk = Mask(ww, wh)
+                                for (yy in 0 until wh) {
+                                    val src = (py0 + yy) * w + px0
+                                    for (xx in 0 until ww) nonInk.data[yy * ww + xx] = g.data[src + xx] >= p.inkDarkTh
+                                }
+                                val dd = Cv.distanceL2(nonInk)
+                                var near = 0
+                                for (k in bnd.data.indices) if (bnd.data[k] && dd.data[k] <= p.bubbleOutlineDist) near++
+                                val bi = near.toDouble() / nb
+                                debug?.invoke("bubbleOutline[$bx,$by,$bw,$bh]‰", (bi * 1000).roundToInt())
+                                if (bi < p.bubbleOutlineMin) {
+                                    rejected.add(i); continue   // 邊界不貼墨＝沒有框線圍住＝字壓背景，不是泡
+                                }
+                            }
+                        }
                     }
                     for (yy in 0 until bh) {
                         val dst = (by + yy) * w + bx
@@ -434,21 +483,6 @@ internal object Regions {
                     cored.add(i)
                     continue
                 } else {
-                    if (segClean != null) {
-                        // 保護畫面：小泡也要是乾淨容器（小洞內非字墨 < bubbleCleanWins）才收
-                        val bx = cc.left[i]
-                        val by = cc.top[i]
-                        val bw = cc.width[i]
-                        val bh = cc.height[i]
-                        val comp = Mask(bw, bh)
-                        for (yy in 0 until bh) {
-                            val src = (by + yy) * w + bx
-                            for (xx in 0 until bw) comp.data[yy * bw + xx] = cc.labels[src + xx] == i
-                        }
-                        if (nonTextHoleInkRatio(comp, bx, by, g, segClean, p) >= p.bubbleCleanWins) {
-                            rejected.add(i); continue
-                        }
-                    }
                     // ⚠️ 只掃該元件的 bbox，不掃全頁：這條路徑每顆小泡走一次，
                     // 掃全頁的話成本是「泡數 × 2.6 MPx」
                     for (yy in cc.top[i] until cc.top[i] + cc.height[i]) {

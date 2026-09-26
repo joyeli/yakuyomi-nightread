@@ -45,10 +45,12 @@ object NightRead {
         val wc = Regions.classifyWhiteComponents(g, p)
         debug?.invoke("classifyWhite", 0)
         val excluded = wc.gutterIds + wc.panelIds
-        val bubbleRes = Regions.buildBubbleMask(g, input.regions, seg, wc.cc, excluded, p)
+        val bubbleRes = Regions.buildBubbleMask(g, input.regions, seg, wc.cc, excluded, p, input.chroma, debug)
         var bubble = bubbleRes.bubble
         debug?.invoke("buildBubble", 0)
-        val plan = Sticker.plan(g, input.chroma, wc, frameless, input.regions, frame, p)
+        // 貼紙計畫過安全網後再過三檔篩選（StickerMode；ALL＝原樣）。人物用**原始**遮罩（未收邊）、格線用 lh|lv
+        val plan = Sticker.filterPlan(
+            g, wc.cc, Sticker.plan(g, input.chroma, wc, frameless, input.regions, frame, p), charRaw, frame, p)
 
         debug?.invoke("stickerPlan", 0)
         val gutterShow = if (frameless) wc.gutterIds - plan.accept else wc.gutterIds
@@ -521,8 +523,7 @@ object NightRead {
 
         // 留白：有框頁只填「深入不超過短邊 12%」的部分；無框頁只填真頁邊帶
         if (gutterIn.any()) {
-            // 保護畫面：留白只看頁邊距離、不看格線（出血格的背景會被當貼格線的留白填掉）
-            val bd = borderDistance(g, frame, includeFrame = !frameless && !p.protectArtwork)
+            val bd = borderDistance(g, frame, includeFrame = !frameless)
             if (frameless) {
                 val cc = Cv.ccStats(gutterIn, 8)
                 val lim = p.framelessMarginDepth * min(h, w)
@@ -550,16 +551,18 @@ object NightRead {
             }
         }
 
-        if (plan.accept.isNotEmpty() && !p.protectArtwork) {   // 保護畫面：背景填黑（含貼框擢升）整段不做
+        if (plan.accept.isNotEmpty()) {
             paintSticker(out, g, wc.cc, plan.accept, bubble, plan.promoted, frame, seg, charMask, p)
         }
         debug?.invoke("paintSticker", 0)
         paintBubbles(out, g, bubble, seg, p)
         debug?.invoke("paintBubbles", 0)
-        val pb = buildPseudoBubbles(g, regions, bubble, seg, p)
+        // 偽泡：開口泡／字壓背景／字壓留白救回（三檔一律關：偽泡沿字往背景長，是撕裂黑塊來源之一，守護框 +2）
+        val pb = if (p.pseudoBubbles) buildPseudoBubbles(g, regions, bubble, seg, p) else Mask(w, h)
         debug?.invoke("pseudoBubble", pb.count())
         if (pb.any()) paintBubbles(out, g, pb, seg, p)
-        if (!p.protectArtwork) harmonize(out, g, bubble or pb or gutterIn, p)   // 保護畫面：亮島填黑會挖格內背景，關
+        // 亮島填黑（三檔一律關：會把格內背景挖成黑塊；守護框對它零敏感）
+        if (p.harmonize) harmonize(out, g, bubble or pb or gutterIn, p)
         debug?.invoke("harmonize", 0)
 
         // 字永遠在最上層：被人物扣掉的泡區裡，字筆畫及其貼身帶維持深底亮字

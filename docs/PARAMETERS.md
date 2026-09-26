@@ -6,9 +6,12 @@ Every knob in the pipeline: what it controls, what it is set to, and what happen
 way. They all live in a single block at the top of `research/nightread.py` — there are no magic numbers
 scattered through the code.
 
-There is exactly one environment variable: `NIGHTREAD_CHARMASK`, pointing at the character-mask directory
-produced by `charmask.py`. It is a **required input** — if it is missing the run fails outright rather than
-silently degrading. Everything else is edited in the file, so a run reproduces.
+One environment variable is required: `NIGHTREAD_CHARMASK`, pointing at the character-mask directory
+produced by `charmask.py`. If it is missing the run fails outright rather than silently degrading. The three
+product fill levels are also selected through the environment (`NIGHTREAD_STICKER_MODE`,
+`NIGHTREAD_STICKER_ROUGH`, `NIGHTREAD_STICKER_MINFRAC`, `NIGHTREAD_PB`, `NIGHTREAD_HM` — see *Fill tiers*), and a
+few research toggles read it too (`NIGHTREAD_EDGE_INK`, `NIGHTREAD_REQUIRE_CLEAN`, `NIGHTREAD_TEXT_*`).
+Everything else is edited in the file, so a run reproduces.
 
 Where each value came from, and which alternatives were measured and rejected, is in
 [DECISIONS.md](DECISIONS.md).
@@ -182,6 +185,33 @@ that get misclassified are almost entirely made of the text strokes themselves.
 Whatever is left of the bubble component once the core is removed is filled only within 20 px of the bubble.
 Drop the distance limit and fill the whole remainder, and the white-bearded old man loses his beard.
 
+### `BUBBLE_OUTLINE_MIN` = 0.85 · `BUBBLE_OUTLINE_DIST` = 6 · `BUBBLE_OUTLINE_MIN_PX` = 100 · `BUBBLE_OUTLINE_PAD` = 8
+The text-on-background gate. Take the core of a core-filled bubble, its 1 px inner boundary minus the dilated
+text strokes (the "non-text boundary"), and measure the fraction of it lying within 6 px of ink (distance
+transform of the non-ink pixels inside the component bbox padded by 8). A real bubble is enclosed by its own
+outline, so the fraction is ~1 (105 real bubbles over 19 pages: ≥ 0.977 at d=6, ≥ 0.959 at d=4). Text written
+straight onto a sky or a wall sits in white whose boundary is screentone, cloud lines or someone else's linework
+(d=6): c362_010「我想想」0.076, c371_008 0.257, c362_013 0.314, ch34_015 0.614, demo01's face 0.748. 0.85 sits
+between the two groups, the narrowest margin being demo01 at 0.10; guard 18/665 (default) and 12/12/16 (L1/L2/L3) unchanged. Two escapes: fewer than
+100 non-text boundary pixels is not judged (too few samples, old behaviour kept), and a 1–3 px ring whose mean
+chroma exceeds `STICKER_CHROMA_MAX` is not judged (a colour page's bubble outline or fill may be a tint, so the
+ink criterion does not hold). 0 turns the gate off.
+
+Hole-filled shape measures (roughness, solidity, ellipse IoU) were tried and rejected: text holes usually
+connect to the outside through the strokes, so filling does not rescue them, and burst bubbles, cloud bubbles
+and sky blocks overlap.
+
+The distance is absolute pixels. It was first set to 4 on pages 1600–2000 px tall; a reviewer's resolution
+probe (the same pages upscaled) showed d=4 breaking at 1.5–2× — at 2× 74–79 real bubbles fell below 0.85 —
+while d=6 keeps real bubbles ≥ 0.94 all the way from 1× to 2×, with text-on-background at most 0.748 at 1× and
+≤ 0.68 once upscaled. So d=6. At 1× it
+changes nothing: the 11 fixture pages and the 8 device pages are pixel-identical to d=4.
+
+### `BUBBLE_REQUIRE_CLEAN` = off (`NIGHTREAD_REQUIRE_CLEAN`)
+Research toggle: demand a clean container (non-text ink below `BUBBLE_CLEAN_WINS`) before accepting a
+component as a bubble at all, instead of only when deciding whether to fill it whole. It had no effect on the
+guard in the tier ablation, so no product level uses it.
+
 ---
 
 ## Pseudo-bubbles
@@ -296,6 +326,49 @@ good enough to use the relaxed gates.
 ### `PROMOTED_TEXTON_MAX` = 0.3
 The text-coverage ceiling that still rejects a strong hug. A lot of text genuinely sitting on the component
 means it is a caption box, and filling that black turns the text into a smeared outline.
+
+---
+
+## Fill tiers
+
+How much white should go black is a product setting with three levels (user definition, 2026-09-27). The full
+pipeline — every accepted sticker, pseudo-bubbles and floating-head harmonization — stays the library default
+so the fixtures and guard baselines hold, but it is no longer one of the product levels. Each level is a set of
+environment variables (listed in the header of `research/nightread.py`).
+
+### `STICKER_MODE` = `"all"` (`NIGHTREAD_STICKER_MODE`)
+Which accepted sticker components are actually filled. `all` fills everything the safety net accepted (the
+default). `plain` (L1) keeps only "no-artwork background": components that do not touch the raw character
+mask and whose outer ring meets nothing but frame lines or the page edge. `simple` (L2/L3) keeps the plain
+ones plus any accepted component with `rough` ≤ `STICKER_ROUGH_MAX` and page fraction ≥
+`STICKER_SIMPLE_MIN_FRAC`. A promoted component that is dropped is not core-filled either. Whatever is dropped
+gets the treatment it would have had without the sticker layer (scene curve on a framed page, untouched on a
+frameless one), so a level can only be brighter, never wrong.
+
+The ablation behind it: the tearing on device pages comes from large white components that touch a character
+and contain linework. They pass the safety net, and the core fill then stops at the character-mask boundary,
+leaving a black ring around the figure. Roughness (perimeter² / 4π·area) separates them: legitimate large
+backgrounds measure 1.8–8.3, the tearing components 17.8–173.
+
+### `STICKER_ROUGH_MAX` = 10 (`NIGHTREAD_STICKER_ROUGH`) · `STICKER_SIMPLE_MIN_FRAC` = 0.005 (`NIGHTREAD_STICKER_MINFRAC`)
+The `simple` thresholds. L2 uses 10 and 0.5%; L3 uses 20 and no area floor. Guard: L1 12, L2 12, L3 16 of
+665, against 18 for the default. Mean bright fraction (pixels ≥ 110) over the 8 tearing device pages: L1
+40.7%, L2 40.2%, L3 40.0%, default 35.7% (40.3 / 39.8 / 39.6 / 35.6 before the outline gate existed).
+
+### `STICKER_PLAIN_RING_R` = 7 · `STICKER_PLAIN_ART_MAX` = 0.05 · `STICKER_PLAIN_FRAME_DIL` = 7
+The `plain` test. The ring is the component dilated with a 15×15 ellipse minus the component; "artwork" is
+any pixel darker than `INK_DARK_TH` that is not within a 7×7 dilation of the frame-line mask. The component is
+plain when less than 5% of its ring is artwork.
+
+Measured on the 19 pages, this never fires: of the 55 components that pass the sticker safety net, the lowest
+ring-artwork fraction is 0.110, because bubble outlines and text count as ink too. So L1 today is gutters plus
+bubbles and paints no stickers at all. A wider "plain background" test (ring minus bubble outlines and text) is
+open research.
+
+### `PSEUDO_BUBBLES` = 1 (`NIGHTREAD_PB`) · `HARMONIZE` = 1 (`NIGHTREAD_HM`)
+Switches for the pseudo-bubble and floating-head layers. All three product levels turn both off:
+pseudo-bubbles grow from the text into the background and cost 2 guard boxes; harmonization has no effect on
+the guard but digs black holes into panel backgrounds. The default keeps both on.
 
 ---
 

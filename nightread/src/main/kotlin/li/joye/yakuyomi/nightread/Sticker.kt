@@ -1,5 +1,7 @@
 package li.joye.yakuyomi.nightread
 
+import java.math.BigDecimal
+import java.math.RoundingMode
 import kotlin.math.PI
 import kotlin.math.max
 import kotlin.math.min
@@ -126,6 +128,8 @@ internal object Sticker {
         val textCov: Double,
         val textOn: Double,
         val faintOfF: Double,
+        /** 周長²/(4π·面積)（圓＝1；輪廓破碎度）。周長＝[Cv.totalContourLength]（cv2 所有輪廓的閉合折線長）。 */
+        val rough: Double,
     )
 
     fun metrics(
@@ -193,12 +197,18 @@ internal object Sticker {
         }
         val faintOfF = if (fp > 0) faint.toDouble() / fp else 0.0
 
+        val perim = Cv.totalContourLength(win.comp)
+        val rough = perim * perim / (4.0 * PI * area)
+
         return Metrics(id, area.toDouble() / g.data.size, figFrac, thinFrac, chroma,
-            eatenFrac, textCov, textOn, faintOfF)
+            eatenFrac, textCov, textOn, faintOfF, rough)
     }
 
-    /** 貼紙計畫的結果：哪些元件要動（accept），其中哪些走核心填色（promoted）。 */
-    class Plan(val accept: Set<Int>, val promoted: Set<Int>)
+    /**
+     * 貼紙計畫的結果：哪些元件要動（accept），其中哪些走核心填色（promoted），以及每個候選元件的診斷
+     * （[metrics]，研究端的 audit；[filterPlan] 的 SIMPLE 檔要看 rough／areaFrac）。
+     */
+    class Plan(val accept: Set<Int>, val promoted: Set<Int>, val metrics: Map<Int, Metrics> = emptyMap())
 
     /**
      * 挑目標元件並過安全網。
@@ -277,8 +287,10 @@ internal object Sticker {
 
         val accept = HashSet<Int>()
         val promoted = HashSet<Int>()
+        val mets = HashMap<Int, Metrics>()
         for (i in cand.sorted()) {
             val met = metrics(g, chromaImg, cc, i, textRects, textRectsOn, p)
+            mets[i] = met
             val hugV = hug[i] ?: 0.0
             val ok: Boolean
             if (hugV >= p.frameHugStrong) {
@@ -312,8 +324,78 @@ internal object Sticker {
                 if (!frameless) promoted.add(i)
             }
         }
-        return Plan(accept, promoted)
+        return Plan(accept, promoted, mets)
     }
+
+    /**
+     * 背景填黑三檔（[NightReadParams.stickerMode]）：在 [plan] 的安全網之後再挑一次，決定哪些白元件真的填黑。
+     * 對應研究端 `filter_sticker_plan`。回傳的 accept＝keep、promoted 只留仍在 keep 內的（擢升元件落選＝連核心填色也不做）。
+     *
+     * plain(i)＝「無畫面背景」：元件不碰 [charRaw]（模型原輸出人物遮罩、未收邊——三檔實驗就是這樣量的）、且外圈
+     * （dilate 橢圓 (2·stickerPlainRingR+1)² − 元件）非空、且外圈上「非格線的墨」（g < inkDarkTh 且不在格線外擴
+     * stickerPlainFrameDil² 內）的佔比 < stickerPlainArtMax ⇒ 邊界只碰格線／頁邊、沒碰線稿。
+     *   ALL   ：keep＝accept（預設完整管線，不動）
+     *   PLAIN ：keep＝{plain}（L1）
+     *   SIMPLE：keep＝{plain} ∪ {rough ≤ stickerRoughMax 且 areaFrac ≥ stickerSimpleMinFrac}（L2／L3）
+     * 落選的元件回到 [plan] 落選時的待遇（有框頁 panel 白＝場景調壓暗；frameless＝背景保留），絕不會比原圖糟。
+     *
+     * rough／areaFrac 先照研究端審計表的精度四捨五入（`round(rough, 1)`、`round(areaFrac, 4)`；python 是拿表裡的值比）
+     * 再比門檻，這樣 Kotlin 與 python 在門檻邊上的判定才會一致。
+     */
+    fun filterPlan(g: Gray, cc: CC, plan: Plan, charRaw: Mask, frame: Mask, p: NightReadParams): Plan {
+        if (p.stickerMode == StickerMode.ALL) return plan
+        val w = g.w
+        val r = p.stickerPlainRingR
+        val kr = Cv.ellipse(2 * r + 1)
+        // 非格線的墨＝線稿：格線遮罩方核外擴後排除（框線本身不算線稿）
+        val fd = Cv.dilate(frame, Cv.rect(p.stickerPlainFrameDil, p.stickerPlainFrameDil))
+        val keep = HashSet<Int>()
+        for (i in plan.accept.sorted()) {
+            // 不碰人物：元件像素與原始人物遮罩無交集（只掃元件 bbox）
+            var touches = false
+            run {
+                for (y in cc.top[i] until cc.top[i] + cc.height[i]) {
+                    val base = y * w
+                    for (x in cc.left[i] until cc.left[i] + cc.width[i]) {
+                        if (cc.labels[base + x] == i && charRaw.data[base + x]) { touches = true; return@run }
+                    }
+                }
+            }
+            if (!touches) {
+                // 外圈：元件膨脹減元件。膨脹最遠只到 r，所以在 bbox 外擴 r 的窗內算與全頁算一樣（窗外的像素本來就不在外圈）
+                val win = window(g, cc, i, r)
+                val grown = Cv.dilate(win.comp, kr)
+                var ring = 0
+                var art = 0
+                for (y in 0 until win.h) {
+                    val src = (win.y0 + y) * w + win.x0
+                    for (x in 0 until win.w) {
+                        val k = y * win.w + x
+                        if (!grown.data[k] || win.comp.data[k]) continue
+                        ring++
+                        val j = src + x
+                        if (g.data[j] < p.inkDarkTh && !fd.data[j]) art++
+                    }
+                }
+                if (ring > 0 && art.toDouble() / ring < p.stickerPlainArtMax) {
+                    keep.add(i)                         // plain：外圈只碰格線／頁邊
+                    continue
+                }
+            }
+            if (p.stickerMode == StickerMode.SIMPLE) {
+                val met = plan.metrics[i] ?: continue
+                if (pyRound(met.rough, 1) <= p.stickerRoughMax && pyRound(met.areaFrac, 4) >= p.stickerSimpleMinFrac) keep.add(i)
+            }
+        }
+        return Plan(keep, plan.promoted.filterTo(HashSet()) { it in keep }, plan.metrics)
+    }
+
+    /**
+     * python 的 `round(x, digits)`：對 double 的**精確**二進位值做十進位四捨六入五成雙。`BigDecimal(double)` 就是那個
+     * 精確值，所以 HALF_EVEN 逐位對齊 python（`Math.round(x * 10) / 10.0` 在 0.x5 附近會因為乘法捨入而不同）。
+     */
+    private fun pyRound(x: Double, digits: Int): Double =
+        BigDecimal(x).setScale(digits, RoundingMode.HALF_EVEN).toDouble()
 
     private fun rectMask(w: Int, h: Int, regions: List<TextRegion>, pad: Int): Mask {
         val m = Mask(w, h)

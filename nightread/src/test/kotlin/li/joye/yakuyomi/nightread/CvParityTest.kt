@@ -232,14 +232,15 @@ class CvParityTest {
     // ── 純量 ─────────────────────────────────────────────────────────
 
     @Test
-    fun contourLengthIsCloseToOpenCv() {
+    fun contourLengthMatchesOpenCv() {
         val text = javaClass.classLoader!!.getResourceAsStream("cv/scalars.txt")!!
             .bufferedReader().readText()
         val want = text.lineSequence().first { it.startsWith("contourLength") }
             .split(" ")[1].toDouble()
         val got = Cv.totalContourLength(mask("mask_in.bin"))
-        // Moore 追蹤與 cv2 的輪廓抽取在單像素細節上有差；rough 只當排序用，10% 容差夠
+        // 逐點復刻 cv2 的 Suzuki 邊界追蹤（RETR_LIST + CHAIN_APPROX_NONE + arcLength 閉合）：輪廓點序列全同，
+        // 剩下的差只有 cv2 arcLength 的 float32 累加（~1e-8）。rough 是三檔的決策量，不能再用 10% 容差
         val rel = abs(got - want) / want
-        assertTrue("contourLength：cv2=$want kotlin=$got（相對差 ${"%.3f".format(rel)}）", rel < 0.10)
+        assertTrue("contourLength：cv2=$want kotlin=$got（相對差 ${"%.2e".format(rel)}）", rel < 1e-6)
     }
 }

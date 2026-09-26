@@ -852,58 +852,85 @@ object Cv {
 
     /**
      * `cv2.findContours(RETR_LIST, CHAIN_APPROX_NONE)` 後 `sum(arcLength(c, closed=True))`：
-     * 前景所有輪廓（含內外）的**總周長**。arcLength 是折線長（對角步 √2、直步 1）。
+     * 前景所有輪廓（外輪廓＋洞輪廓）的**總周長**。arcLength 是閉合折線長（直步 1、對角步 √2、首尾相接）。
      *
-     * 這裡用「邊界像素的 8-連通環繞長度」近似：對每個輪廓用 Moore 鄰域追蹤一圈、累加步長。
-     * `sticker_metrics` 的 rough ＝ perim² / area，只當粗糙度排序用，容差比對即可。
+     * 逐點復刻 OpenCV 的 Suzuki 邊界追蹤（contours.cpp 的 cvFindNextContour／icvFetchContour）：影像外圍補一圈 0、
+     * 逐列掃描找「0→1」的外輪廓起點與「≥1→0」的洞輪廓起點（右鄰在追蹤時已被檢查為 0 的邊界像素標成負值＝那個 0 區
+     * 的輪廓已追過，掃到它不再起新輪廓）；起點先順時針（外輪廓從左上、洞從右下）找第一個前景鄰居，之後每步從
+     * 「回到上一點的方向」起逆時針找下一個前景鄰居，回到起點且下一步是第二點就停。細線會來回走（3 px 橫線的輪廓
+     * ＝4 點、閉合長 4），與 cv2 一樣。
+     *
+     * 這不再是近似：純 python 同一份規則對 cv2 4.11 隨機 6400 張遮罩的輪廓點序列全同（長度差只剩 cv2 float32 累加的
+     * 1e-8）。`Sticker.Metrics.rough`（perim²/(4π·面積)）是背景填黑三檔的決策量（≤ 10／20），不能只當排序用。
      */
     fun totalContourLength(m: Mask): Double {
         val w = m.w
         val h = m.h
-        val visited = BooleanArray(w * h)
-        var total = 0.0
-        val dx = intArrayOf(1, 1, 0, -1, -1, -1, 0, 1)
-        val dy = intArrayOf(0, 1, 1, 1, 0, -1, -1, -1)
+        val pw = w + 2
+        val ph = h + 2
+        // 0＝背景、1＝未追、2＝已追、-126＝已追且右鄰是追蹤時檢查過的 0（cv2 的 nbd | -128）
+        val img = IntArray(pw * ph)
+        for (y in 0 until h) {
+            val src = y * w
+            val dst = (y + 1) * pw + 1
+            for (x in 0 until w) if (m.data[src + x]) img[dst + x] = 1
+        }
+        // 方向 0..7＝右、右上、上、左上、左、左下、下、右下（cv2 的 icvCodeDeltas；y 向下）
+        val delta = intArrayOf(1, 1 - pw, -pw, -pw - 1, -1, pw - 1, pw, pw + 1)
+        val sqrt2 = 1.4142135623730951
 
-        fun isFg(x: Int, y: Int): Boolean =
-            x in 0 until w && y in 0 until h && m.data[y * w + x]
-
-        fun isBoundary(x: Int, y: Int): Boolean {
-            if (!isFg(x, y)) return false
-            for (d in 0 until 8 step 2) {
-                if (!isFg(x + dx[d], y + dy[d])) return true
+        // 從起點 i0 追一圈，回傳這條輪廓的閉合折線長。每次迭代寫出點 i3、走到 i4：那一步就是折線的一段，
+        // 最後一步（i3 = 第二點、i4 = 起點）正好是閉合段，所以直接累加每步的步長即可。
+        fun fetch(i0: Int, isHole: Boolean): Double {
+            val sStart = if (isHole) 0 else 4
+            var s = sStart
+            var i1: Int
+            do {
+                s = (s - 1) and 7
+                i1 = i0 + delta[s]
+            } while (img[i1] == 0 && s != sStart)
+            if (s == sStart) {              // 單像素：輪廓只有一點、長 0
+                img[i0] = -126
+                return 0.0
             }
-            return false
+            var i3 = i0
+            var len = 0.0
+            while (true) {
+                val sEnd = s
+                var i4: Int
+                do {
+                    s++
+                    i4 = i3 + delta[s and 7]
+                } while (img[i4] == 0)
+                s = s and 7
+                // 找到的方向落在 1..sEnd ＝ 逆時針搜尋時經過了方向 0（右鄰）且它是 0 ⇒ 標「右界」
+                if (s >= 1 && s - 1 < sEnd) img[i3] = -126 else if (img[i3] == 1) img[i3] = 2
+                len += if (s and 1 == 0) 1.0 else sqrt2
+                if (i4 == i0 && i3 == i1) break
+                i3 = i4
+                s = (s + 4) and 7
+            }
+            return len
         }
 
-        for (sy in 0 until h) {
-            for (sx in 0 until w) {
-                if (!isBoundary(sx, sy) || visited[sy * w + sx]) continue
-                // Moore 鄰域追蹤
-                var cx = sx
-                var cy = sy
-                var dir = 6      // 從上方開始找
-                var len = 0.0
-                var steps = 0
-                val startX = sx
-                val startY = sy
-                do {
-                    visited[cy * w + cx] = true
-                    var found = false
-                    for (t in 0 until 8) {
-                        val d = (dir + 6 + t) % 8       // 從「上一步方向的左後方」開始繞
-                        val nx = cx + dx[d]
-                        val ny = cy + dy[d]
-                        if (isFg(nx, ny)) {
-                            len += if (d % 2 == 0) 1.0 else 1.4142135623730951
-                            cx = nx; cy = ny; dir = d; found = true
-                            break
-                        }
-                    }
-                    if (!found) break                    // 孤立像素
-                    steps++
-                } while ((cx != startX || cy != startY) && steps < w * h * 4)
-                total += len
+        var total = 0.0
+        val width = pw - 1
+        for (y in 1 until ph - 1) {
+            val row = y * pw
+            var x = 1
+            var prev = 0
+            while (x < width) {
+                while (x < width && img[row + x] == prev) x++
+                if (x >= width) break
+                val p = img[row + x]
+                var isHole = false
+                var skip = false
+                if (!(prev == 0 && p == 1)) {
+                    if (p != 0 || prev < 1) skip = true else isHole = true
+                }
+                if (!skip) total += fetch(row + x - (if (isHole) 1 else 0), isHole)
+                prev = img[row + x]         // cv2 每追完一條就 return，下次進來以（已標記的）img[x-1] 重讀 prev
+                x++
             }
         }
         return total

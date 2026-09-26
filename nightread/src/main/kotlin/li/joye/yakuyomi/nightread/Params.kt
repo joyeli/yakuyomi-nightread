@@ -79,15 +79,29 @@ data class NightReadParams(
      */
     val safeBubbleRatio: Double = 6.0,
     val bubbleCleanWins: Double = 0.005,
-    /**
-     * 「保護畫面」（產品端檔位，2026-09-27）：只動封閉氣泡與**貼頁邊**的留白帶——留白距離只看頁邊、不看格線（否則出血格
-     * 的背景會被當貼格線的留白填掉）；不做亮島填黑（harmonize）；泡只收「乾淨容器」（小洞內非字墨 < [bubbleCleanWins]，
-     * 開口泡吃進的格內背景不算泡）。背景填黑／偽泡／泡外圈由 [stickerMinFrac]／[pbCovMax]／[bubbleRestNear] 各自關，
-     * 呼叫端一起設。預設 false＝研究端行為不變。
-     */
-    val protectArtwork: Boolean = false,
     val bubbleCleanTextMax: Double = 0.8,
+    /** 泡元件的剩餘部分只在泡外此距離內填深（三檔皆同）。 */
     val bubbleRestNear: Int = 20,
+    /**
+     * 字壓背景閘（2026-09-27）：泡核心的「非字邊界」（core 的 1 px 內邊界、扣掉外擴 7 的筆畫）中，距墨線（< [inkDarkTh]）
+     * ≤ [bubbleOutlineDist] px 的比例下限。真泡由自己的框線圍住 ⇒ 邊界幾乎全貼墨（19 頁 105 顆真泡：d=6 實測 ≥ 0.977，
+     * d=4 時 ≥ 0.959）；字直接寫在天空／牆面上的白，邊界是網點灰／雲線／別人的線稿 ⇒ 比例低（d=6：c362_010「我想想」的
+     * 天空白塊 0.076、c371_008 建築 0.257、c362_013 天空 0.314、ch34_015 手寫字壓格內背景 0.614、demo01 臉 0.748）。
+     * 0.85 落在兩群中間（最窄處 demo01 距門檻 0.10），
+     * 守護框標準 18/665、三檔 L1/L2/L3 12/12/16 不變。只在核心填色分支判；外圈 1–3 px 平均彩度 > [stickerChromaMax] 不判
+     * （彩頁泡框／底可能是淡彩，墨判準不成立）；非字邊界少於 [bubbleOutlineMinPx] px 不判。0＝關。見 docs/DECISIONS.md。
+     */
+    val bubbleOutlineMin: Double = 0.85,
+    /**
+     * 「貼墨」距離（px），絕對像素。4 → 6（2026-09-27 審查的解析度探針）：d=4 在頁圖放大 1.5–2× 就破（2× 時 74–79 顆真泡
+     * 跌破 0.85）；d=6 從 1× 到 2× 真泡全程 ≥ 0.94，字壓背景 1× 最高 0.748、放大後 ≤ 0.68，兩群仍分得開；1× 的 fixture 11 頁
+     * 與真機 8 頁輸出逐像素不變。
+     */
+    val bubbleOutlineDist: Int = 6,
+    /** 非字邊界像素少於此不判（樣本不足 ⇒ 維持原行為）。 */
+    val bubbleOutlineMinPx: Int = 100,
+    /** 閘門量測窗外擴（距離變換要看得到元件 bbox 外的墨）。 */
+    val bubbleOutlinePad: Int = 8,
 
     // 偽泡
     val pbCovMax: Double = 0.85,
@@ -132,6 +146,42 @@ data class NightReadParams(
     val hugSideMin: Double = 0.5,
     val promotedTextOnMax: Double = 0.3,
 
+    // 背景填黑三檔（產品檔位；2026-09-27 使用者定義「多少白該黑」，取代被打回的「保護畫面」旗標）
+    /**
+     * 通過貼紙安全網的白元件裡，哪些真的填黑（含貼框擢升的核心填色）：
+     * - [StickerMode.ALL]：全填＝研究端完整管線（**預設**；fixture 與守護框基線不動，但不再是產品檔位）
+     * - [StickerMode.PLAIN]：只留「無畫面背景」——不碰原始人物遮罩（[NightReadInput.charMask]，未收邊未平滑）、且外圈
+     *   （橢圓 (2·[stickerPlainRingR]+1)² 膨脹減元件）非空、外圈上「非格線的墨」佔比 < [stickerPlainArtMax]
+     *   ⇒ 邊界只碰格線／頁邊、沒碰線稿（L1）。⚠️ 實測（19 頁）：過安全網的 55 顆元件外圈線稿佔比最低 0.110（泡框與字也算墨）> 0.05 ⇒ plain 零命中，L1 實際上＝留白＋泡、不填任何貼紙；「無畫面背景」要更寬的判準（外圈扣掉泡框／字）另案研究。
+     * - [StickerMode.SIMPLE]：PLAIN 的那些 ∪ {rough ≤ [stickerRoughMax] 且整頁佔比 ≥ [stickerSimpleMinFrac]}（L2／L3）
+     *
+     * 落選的擢升元件連核心填色也不做；落選元件回到沒有貼紙層時的待遇（有框頁場景調壓暗、無框頁背景保留），
+     * 絕不會比原圖糟。產品三檔由呼叫端整組設：L1＝PLAIN＋[pseudoBubbles]=false＋[harmonize]=false；
+     * L2＝SIMPLE、10／0.005、兩者關；L3＝SIMPLE、20／0.0、兩者關。三檔一律：泡外圈、留白深度、閘門都用標準值。
+     *
+     * 消融結論：撕裂真凶＝碰到人物、內有線稿的大白元件——它過了貼紙安全網、核心填色卻停在人物邊界 ⇒ 沿人物一圈黑。
+     * rough＝周長²/(4π·面積) 分得開：正當大白 1.8–8.3 vs 撕裂元件 17.8–173。守護框 L1 12／L2 12／L3 16 vs 標準 18（/665）；
+     * 8 張撕裂頁亮區（≥110 像素佔比）L1 40.7%／L2 40.2%／L3 40.0% vs 標準 35.7%（含字壓背景閘 d=6）。見 docs/DECISIONS.md。
+     */
+    val stickerMode: StickerMode = StickerMode.ALL,
+    /**
+     * SIMPLE：rough（周長²/(4π·面積)，周長＝cv2 `findContours(RETR_LIST, CHAIN_APPROX_NONE)` 所有輪廓的閉合折線長）上限。
+     * 與研究端同樣拿**四捨五入到小數 1 位**後的值比（python 比的是審計表裡 `round(rough, 1)`）。L2 10、L3 20。
+     */
+    val stickerRoughMax: Double = 10.0,
+    /** SIMPLE：整頁佔比下限（同樣拿四捨五入到小數 4 位後的值比）。L2 0.005、L3 0。 */
+    val stickerSimpleMinFrac: Double = 0.005,
+    /** PLAIN：元件外圈＝dilate(橢圓 (2r+1)²＝15×15) − 元件，量外圈碰到什麼。 */
+    val stickerPlainRingR: Int = 7,
+    /** PLAIN：外圈上「非格線的墨」（g < [inkDarkTh] 且不在格線外擴內）佔比 < 此＝只碰格線／頁邊。 */
+    val stickerPlainArtMax: Double = 0.05,
+    /** PLAIN：格線遮罩外擴的方核邊長（7×7），框線本身不算線稿。 */
+    val stickerPlainFrameDil: Int = 7,
+    /** 偽泡開關（三檔＝false；偽泡沿字往背景長，是撕裂黑塊來源之一，守護框 +2）。 */
+    val pseudoBubbles: Boolean = true,
+    /** 亮島填黑（人頭一致化）開關（三檔＝false；會把格內背景挖成黑塊；守護框對它零敏感）。 */
+    val harmonize: Boolean = true,
+
     // 核心填色
     val coreNeckR: Int = 12,
     val coreRecoverR: Int = 9,
@@ -159,6 +209,18 @@ data class NightReadParams(
     val harmonizeAreaMax: Double = 0.004,
     val harmonizeCollarInk: Double = 0.3,
 )
+
+/**
+ * 背景填黑三檔的貼紙篩選模式（[NightReadParams.stickerMode]）；對應研究端 `STICKER_MODE` 的 all／simple／plain。
+ */
+enum class StickerMode {
+    /** 通過安全網的全填（研究端完整管線，library 預設）。 */
+    ALL,
+    /** 只留「無畫面背景」加上 rough／面積門檻放行的元件（L2／L3）。 */
+    SIMPLE,
+    /** 只留「無畫面背景」：不碰人物、外圈只碰格線／頁邊（L1）。 */
+    PLAIN,
+}
 
 /** 文字區（偵測器的輸出經區域合併後的結果）。座標是原圖像素。 */
 data class TextRegion(val x0: Int, val y0: Int, val x1: Int, val y1: Int)
