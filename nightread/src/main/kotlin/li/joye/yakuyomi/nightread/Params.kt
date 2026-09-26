@@ -79,6 +79,13 @@ data class NightReadParams(
      */
     val safeBubbleRatio: Double = 6.0,
     val bubbleCleanWins: Double = 0.005,
+    /**
+     * 「保護畫面」（產品端檔位，2026-09-27）：只動封閉氣泡與**貼頁邊**的留白帶——留白距離只看頁邊、不看格線（否則出血格
+     * 的背景會被當貼格線的留白填掉）；不做亮島填黑（harmonize）；泡只收「乾淨容器」（小洞內非字墨 < [bubbleCleanWins]，
+     * 開口泡吃進的格內背景不算泡）。背景填黑／偽泡／泡外圈由 [stickerMinFrac]／[pbCovMax]／[bubbleRestNear] 各自關，
+     * 呼叫端一起設。預設 false＝研究端行為不變。
+     */
+    val protectArtwork: Boolean = false,
     val bubbleCleanTextMax: Double = 0.8,
     val bubbleRestNear: Int = 20,
 

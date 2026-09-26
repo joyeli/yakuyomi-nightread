@@ -113,6 +113,10 @@ BUBBLE_CORE_MIN_FRAC = 0.003    # ≥ 此頁佔比走文字種子核心填色；
 BUBBLE_NECK_R = 8           # 泡的切頸半徑：泡框缺口／下巴縫都是窄頸
 SAFE_BUBBLE_RATIO = 6.0     # 泡核心面積 ≤ 此×字框長邊²（擋「字壓臉」被當成泡）；2.5→6.0 見 DECISIONS「譯後頁的泡」
 BUBBLE_CLEAN_WINS = 0.005   # 內部非字墨 < 此的泡＝乾淨容器 ⇒ 整顆塗黑、人物不扣
+BUBBLE_REQUIRE_CLEAN = os.environ.get("NIGHTREAD_REQUIRE_CLEAN", "0") == "1"   # 只收乾淨容器當泡
+# 「保護畫面」（產品端檔位，2026-09-27）：只動封閉氣泡與**貼頁邊**的留白帶——留白距離不算格線（出血格的背景會被當貼格線的
+# 留白填掉）、不做亮島填黑（harmonize）、泡只收乾淨容器。背景填黑／偽泡／泡外圈由各自參數關（fork 一起設）。
+PROTECT_ARTWORK = os.environ.get("NIGHTREAD_PROTECT", "0") == "1"
 BUBBLE_CLEAN_TEXT_MAX = 0.8 # 但文字佔比 > 此＝那不是泡（是被誤判的白髮／白手）
 BUBBLE_REST_NEAR = 20       # 泡元件的剩餘部分只在泡外此距離內填深
 
@@ -463,6 +467,23 @@ def classify_white_components(g):
     return lab, stats, gutter_ids, panel_ids
 
 
+def _nontext_hole_ink_ratio(comp_u8, g, segd):
+    """元件小洞內、**不在（外擴）文字筆畫上**的墨 / 元件面積＝「容器裡除了字還有什麼」。
+    真泡是空白容器（0.0–0.3%）；開口泡吃進來的格內背景、字壓在臉上的皮膚白，洞裡有線稿／五官（>1%）。
+    與 compose 的 clean 判準同式，但在**收泡之前**用（BUBBLE_REQUIRE_CLEAN）：不乾淨就不當泡，字交偽泡／場景調。"""
+    ff = np.pad(comp_u8, 1)
+    m = np.zeros((ff.shape[0] + 2, ff.shape[1] + 2), np.uint8)
+    cv2.floodFill(ff, m, (0, 0), 2)
+    holes = (ff[1:-1, 1:-1] == 0)
+    hn, hlab, hstats, _ = cv2.connectedComponentsWithStats(holes.astype(np.uint8), 8)
+    ink = 0
+    for j in range(1, hn):
+        if hstats[j, cv2.CC_STAT_AREA] < HOLE_MAX_FRAC * g.size:
+            sel = (hlab == j) & ~segd
+            ink += int((g[sel] < INK_DARK_TH).sum())
+    return ink / max(int(comp_u8.sum()), 1)
+
+
 def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids, charmask=None):
     """氣泡內部遮罩（修法1）：每文字區 bbox+BUBBLE_PAD 窗內，找「貼著（外擴後）
     文字筆畫」的白色連通元件，通過守門則整顆併入（不裁窗 ⇒ 無截斷方塊，
@@ -474,6 +495,7 @@ def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids, charmask=None):
     H, W = g.shape
     seg_u8 = seg.astype(np.uint8) * 255
     seg_dil = cv2.dilate(seg_u8, np.ones((9, 9), np.uint8))  # 筆畫外擴→碰得到氣泡白底
+    segd_c = cv2.dilate(seg_u8, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))) > 0  # 乾淨判準用（同 compose）
     bubble = np.zeros((H, W), bool)
     merged, rejected, cored = set(), set(), set()
     # 先數「每個白元件被幾個文字區命中」：相連的雙泡是**同一個白元件**（ch34_015 左下格 4.78% 頁），
@@ -534,11 +556,22 @@ def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids, charmask=None):
                 if SAFE_BUBBLE_RATIO > 0 and int(core.sum()) > ratio_den:
                     rejected.add(int(i))
                     continue
+                if (BUBBLE_REQUIRE_CLEAN or PROTECT_ARTWORK) and _nontext_hole_ink_ratio(
+                    core.astype(np.uint8), g[by:by + bh, bx:bx + bw], segd_c[by:by + bh, bx:bx + bw],
+                ) >= BUBBLE_CLEAN_WINS:
+                    rejected.add(int(i))    # 核心裡除了字還有線稿＝不是容器（開口泡吃進的背景）
+                    continue
                 bubble[by:by + bh, bx:bx + bw] |= core
                 merged.add(int(i))
                 cored.add(int(i))
                 continue
             else:
+                if BUBBLE_REQUIRE_CLEAN or PROTECT_ARTWORK:
+                    bx, by, bw, bh = stats[i, :4]
+                    comp_s = (lab[by:by + bh, bx:bx + bw] == i).astype(np.uint8)
+                    if _nontext_hole_ink_ratio(comp_s, g[by:by + bh, bx:bx + bw], segd_c[by:by + bh, bx:bx + bw]) >= BUBBLE_CLEAN_WINS:
+                        rejected.add(int(i))
+                        continue
                 bubble |= lab == i
             merged.add(int(i))
         bubble[y0:y1, x0:x1] |= seg[y0:y1, x0:x1]       # 區內筆畫本身一定算氣泡內容
@@ -1234,7 +1267,7 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
         H2, W2 = g.shape
         yy, xx = np.mgrid[0:H2, 0:W2]
         bd = np.minimum(np.minimum(yy, H2 - 1 - yy), np.minimum(xx, W2 - 1 - xx)).astype(np.float32)
-        if frame is not None and frame.any():
+        if frame is not None and frame.any() and not PROTECT_ARTWORK:   # 保護畫面：留白只看頁邊距離、不看格線
             fd = cv2.distanceTransform((frame == 0).astype(np.uint8), cv2.DIST_L2, 3)
             bd = np.minimum(bd, fd)
         lim = SAFE_GUTTER_DEPTH * min(H2, W2)
@@ -1264,7 +1297,8 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
     pb = build_pseudo_bubbles(g, regions, bubble, seg=seg)   # 偽泡：開口泡/字壓背景/字壓留白救回
     if pb.any():
         out = paint_bubbles(out, g, pb, seg)
-    out = harmonize_enclosed_whites(out, g, lab, stats, bubble | pb | gutter)
+    if not PROTECT_ARTWORK:   # 保護畫面：亮島填黑會把格內背景挖成黑塊，關
+        out = harmonize_enclosed_whites(out, g, lab, stats, bubble | pb | gutter)
     if lost_bubble.any():
         txt = (cv2.dilate((seg & lost_bubble).astype(np.uint8),
                           np.ones((TEXT_TOP_PAD * 2 + 1,) * 2, np.uint8)) > 0) & lost_bubble
@@ -1386,6 +1420,8 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None):
         g, regions, seg, lab, stats, gutter_ids | panel_ids, charmask=charmask)
     sticker, audit, promoted = sticker_plan(g, img, lab, stats, gutter_ids, panel_ids,
                                             frameless, regions)
+    if PROTECT_ARTWORK:   # 保護畫面：背景填黑（含貼框擢升）整段不做
+        sticker, audit, promoted = set(), [], set()
     gutter_show = gutter_ids - sticker if frameless else gutter_ids
     gutter = np.isin(lab, sorted(gutter_show)) if gutter_show else np.zeros((H, W), bool)
     panel_show = panel_ids - sticker

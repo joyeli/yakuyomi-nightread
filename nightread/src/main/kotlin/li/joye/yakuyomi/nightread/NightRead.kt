@@ -521,7 +521,8 @@ object NightRead {
 
         // 留白：有框頁只填「深入不超過短邊 12%」的部分；無框頁只填真頁邊帶
         if (gutterIn.any()) {
-            val bd = borderDistance(g, frame, includeFrame = !frameless)
+            // 保護畫面：留白只看頁邊距離、不看格線（出血格的背景會被當貼格線的留白填掉）
+            val bd = borderDistance(g, frame, includeFrame = !frameless && !p.protectArtwork)
             if (frameless) {
                 val cc = Cv.ccStats(gutterIn, 8)
                 val lim = p.framelessMarginDepth * min(h, w)
@@ -549,7 +550,7 @@ object NightRead {
             }
         }
 
-        if (plan.accept.isNotEmpty()) {
+        if (plan.accept.isNotEmpty() && !p.protectArtwork) {   // 保護畫面：背景填黑（含貼框擢升）整段不做
             paintSticker(out, g, wc.cc, plan.accept, bubble, plan.promoted, frame, seg, charMask, p)
         }
         debug?.invoke("paintSticker", 0)
@@ -558,7 +559,7 @@ object NightRead {
         val pb = buildPseudoBubbles(g, regions, bubble, seg, p)
         debug?.invoke("pseudoBubble", pb.count())
         if (pb.any()) paintBubbles(out, g, pb, seg, p)
-        harmonize(out, g, bubble or pb or gutterIn, p)
+        if (!p.protectArtwork) harmonize(out, g, bubble or pb or gutterIn, p)   // 保護畫面：亮島填黑會挖格內背景，關
         debug?.invoke("harmonize", 0)
 
         // 字永遠在最上層：被人物扣掉的泡區裡，字筆畫及其貼身帶維持深底亮字
