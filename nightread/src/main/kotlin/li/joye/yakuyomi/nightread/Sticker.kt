@@ -333,7 +333,9 @@ internal object Sticker {
      *
      * plain(i)＝「無畫面背景」：元件不碰 [charRaw]（模型原輸出人物遮罩、未收邊——三檔實驗就是這樣量的）、且外圈
      * （dilate 橢圓 (2·stickerPlainRingR+1)² − 元件）非空、且外圈上「非格線的墨」（g < inkDarkTh 且不在格線外擴
-     * stickerPlainFrameDil² 內）的佔比 < stickerPlainArtMax ⇒ 邊界只碰格線／頁邊、沒碰線稿。
+     * stickerPlainFrameDil² 內）的佔比 < stickerPlainArtMax、「淡線稿」（inkDarkTh ≤ g < whiteTh、不在格線外擴內、
+     * 不在暗墨 stickerPlainFaintHalo² 外擴內）的佔比 < stickerPlainFaintMax ⇒ 邊界只碰格線／頁邊、沒碰線稿
+     * （雲、效果線這類淡線也是線稿）。
      *   ALL   ：keep＝accept（預設完整管線，不動）
      *   PLAIN ：keep＝{plain}（L1）
      *   SIMPLE：keep＝{plain} ∪ {rough ≤ stickerRoughMax 且 areaFrac ≥ stickerSimpleMinFrac}（L2／L3）
@@ -349,6 +351,8 @@ internal object Sticker {
         val kr = Cv.ellipse(2 * r + 1)
         // 非格線的墨＝線稿：格線遮罩方核外擴後排除（框線本身不算線稿）
         val fd = Cv.dilate(frame, Cv.rect(p.stickerPlainFrameDil, p.stickerPlainFrameDil))
+        // 暗墨的抗鋸齒暈：整頁算一次（不能在逐元件的窗裡算——窗只外擴 r，外圈邊上像素的暈來源可能落在窗外）
+        val halo = Cv.dilate(g.lt(p.inkDarkTh), Cv.rect(p.stickerPlainFaintHalo, p.stickerPlainFaintHalo))
         val keep = HashSet<Int>()
         for (i in plan.accept.sorted()) {
             // 不碰人物：元件像素與原始人物遮罩無交集（只掃元件 bbox）
@@ -367,6 +371,7 @@ internal object Sticker {
                 val grown = Cv.dilate(win.comp, kr)
                 var ring = 0
                 var art = 0
+                var faint = 0
                 for (y in 0 until win.h) {
                     val src = (win.y0 + y) * w + win.x0
                     for (x in 0 until win.w) {
@@ -374,11 +379,16 @@ internal object Sticker {
                         if (!grown.data[k] || win.comp.data[k]) continue
                         ring++
                         val j = src + x
-                        if (g.data[j] < p.inkDarkTh && !fd.data[j]) art++
+                        if (fd.data[j]) continue
+                        val v = g.data[j]
+                        if (v < p.inkDarkTh) art++                              // 非格線的墨＝線稿
+                        else if (v < p.whiteTh && !halo.data[j]) faint++        // 淡線稿：雲／效果線／淡網點（不是暗線的暈）
                     }
                 }
-                if (ring > 0 && art.toDouble() / ring < p.stickerPlainArtMax) {
-                    keep.add(i)                         // plain：外圈只碰格線／頁邊
+                if (ring > 0 && art.toDouble() / ring < p.stickerPlainArtMax &&
+                    faint.toDouble() / ring < p.stickerPlainFaintMax
+                ) {
+                    keep.add(i)                         // plain：外圈只碰格線／頁邊（暗墨、淡線稿都沒碰）
                     continue
                 }
             }

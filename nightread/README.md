@@ -196,8 +196,8 @@ without re-deriving them:
 
 ## Parameters
 
-`NightReadParams` is a `data class` holding the module's 120 parameters plus two nested groups — the any-angle
-separators, `sep: SeparatorParams` (52), and the bleed-panel filter, `bleed: BleedParams` (26) — 198 in all.
+`NightReadParams` is a `data class` holding the module's 122 parameters plus two nested groups — the any-angle
+separators, `sep: SeparatorParams` (52), and the bleed-panel filter, `bleed: BleedParams` (26) — 200 in all.
 Its defaults are the settled values. The nesting is forced: flattened, the constructor would exceed the JVM's
 255 parameter slots (a `Double` takes two) and the class would fail to load with `ClassFormatError`. Per-item documentation is in [`docs/PARAMETERS.md`](../docs/PARAMETERS.md), which covers the whole
 pipeline; the knobs that are not in `NightReadParams` sit outside the module — the detector's binarisation
@@ -210,9 +210,10 @@ it.
 
 The one group meant to be set by the caller is the **fill tier** (how much white goes black; *Fill tiers* in
 `docs/PARAMETERS.md`): `stickerMode` (`StickerMode.ALL` / `SIMPLE` / `PLAIN`), `stickerRoughMax`,
-`stickerSimpleMinFrac`, `stickerPlainRingR`, `stickerPlainArtMax`, `stickerPlainFrameDil`, `pseudoBubbles`
-and `harmonize`. The defaults (`ALL`, both switches on) are the full research pipeline, which the fixtures and
-the guard baselines are pinned to; the three product levels are parameter sets the caller passes in:
+`stickerSimpleMinFrac`, `stickerPlainRingR`, `stickerPlainArtMax`, `stickerPlainFrameDil`, `stickerPlainFaintMax`,
+`stickerPlainFaintHalo`, `pseudoBubbles` and `harmonize`. The defaults (`ALL`, both switches on) are the full
+research pipeline, which the fixtures and the guard baselines are pinned to; the three product levels are
+parameter sets the caller passes in:
 
 | Level | `NightReadParams(...)` |
 |---|---|

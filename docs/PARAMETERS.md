@@ -363,12 +363,24 @@ and the bright fraction L1 38.8%, L2 38.3%, L3 38.1%, default 36.3%.
 ### `STICKER_PLAIN_RING_R` = 7 · `STICKER_PLAIN_ART_MAX` = 0.05 · `STICKER_PLAIN_FRAME_DIL` = 7
 The `plain` test. The ring is the component dilated with a 15×15 ellipse minus the component; "artwork" is
 any pixel darker than `INK_DARK_TH` that is not within a 7×7 dilation of the frame-line mask. The component is
-plain when less than 5% of its ring is artwork.
+plain when less than 5% of its ring is artwork, and less than `STICKER_PLAIN_FAINT_MAX` of it is faint
+linework (next entry).
 
-Measured on the 19 pages, this never fires: of the 55 components that pass the sticker safety net, the lowest
-ring-artwork fraction is 0.110, because bubble outlines and text count as ink too. So L1 today is gutters plus
-bubbles and paints no stickers at all. A wider "plain background" test (ring minus bubble outlines and text) is
-open research.
+### `STICKER_PLAIN_FAINT_MAX` = 0.10 · `STICKER_PLAIN_FAINT_HALO` = 5
+The second half of the `plain` test. "Faint linework" is a ring pixel with `INK_DARK_TH` ≤ g < `WHITE_TH`
+that is neither within the 7×7 frame-line dilation nor within a 5×5 dilation of the dark ink (the anti-aliased
+halo of a dark line belongs to that line). Clouds, speed lines and light screentone are linework too, just
+lighter than `INK_DARK_TH`; counting only dark ink let a cloudy sky through. On device page c362_009 the sky
+under the bunting measured 0.041 dark ink (under the 0.05 bar) and 0.638 faint linework, and all three levels
+painted it black along the cloud lines.
+
+Over the 47 pages (11 fixtures, 8 device tearing pages, 28 extra), 139 components pass the sticker safety net
+and only 2 of them reach this test (do not touch the character mask, dark ink < 0.05): that sky (0.638) and a
+small triangle bounded by faint ceiling lines on c371_010 (0.167). Both were wrong fills, and with this test
+`plain` fires on none of the 47 pages, so L1 today is gutters plus bubbles and paints no stickers at all. Any
+threshold between 0 and 0.166 gives the same result (the triangle is 0.16676 and the test is strict); a 3×3 halo gives 0.688 / 0.176. The test applies only to
+`plain`: the `simple` rule (roughness and area) does not look at it. A wider "plain background" test (ring minus
+bubble outlines and text) is open research.
 
 ### `PSEUDO_BUBBLES` = 1 (`NIGHTREAD_PB`) · `HARMONIZE` = 1 (`NIGHTREAD_HM`)
 Switches for the pseudo-bubble and floating-head layers. All three product levels turn both off:

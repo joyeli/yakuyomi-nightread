@@ -151,8 +151,11 @@ data class NightReadParams(
      * 通過貼紙安全網的白元件裡，哪些真的填黑（含貼框擢升的核心填色）：
      * - [StickerMode.ALL]：全填＝研究端完整管線（**預設**；fixture 與守護框基線不動，但不再是產品檔位）
      * - [StickerMode.PLAIN]：只留「無畫面背景」——不碰原始人物遮罩（[NightReadInput.charMask]，未收邊未平滑）、且外圈
-     *   （橢圓 (2·[stickerPlainRingR]+1)² 膨脹減元件）非空、外圈上「非格線的墨」佔比 < [stickerPlainArtMax]
-     *   ⇒ 邊界只碰格線／頁邊、沒碰線稿（L1）。⚠️ 實測（19 頁）：過安全網的 55 顆元件外圈線稿佔比最低 0.110（泡框與字也算墨）> 0.05 ⇒ plain 零命中，L1 實際上＝留白＋泡、不填任何貼紙；「無畫面背景」要更寬的判準（外圈扣掉泡框／字）另案研究。
+     *   （橢圓 (2·[stickerPlainRingR]+1)² 膨脹減元件）非空、外圈上「非格線的墨」佔比 < [stickerPlainArtMax]、「淡線稿」
+     *   佔比 < [stickerPlainFaintMax] ⇒ 邊界只碰格線／頁邊、沒碰線稿（L1）。⚠️ 實測（47 頁、2026-09-27）：過安全網的
+     *   139 顆元件裡，不碰人物且暗墨 < 0.05 的只有 2 顆（c362_009 有雲的天空、c371_010 天花板淡線的小三角），兩顆淡線稿
+     *   都 ≥ 0.167 ⇒ 加了淡線稿判準後 plain 零命中，L1 實際上＝留白＋泡、不填任何貼紙；「無畫面背景」要更寬的判準
+     *   （外圈扣掉泡框／字）另案研究。
      * - [StickerMode.SIMPLE]：PLAIN 的那些 ∪ {rough ≤ [stickerRoughMax] 且整頁佔比 ≥ [stickerSimpleMinFrac]}（L2／L3）
      *
      * 落選的擢升元件連核心填色也不做；落選元件回到沒有貼紙層時的待遇（有框頁場景調壓暗、無框頁背景保留），
@@ -177,6 +180,15 @@ data class NightReadParams(
     val stickerPlainArtMax: Double = 0.05,
     /** PLAIN：格線遮罩外擴的方核邊長（7×7），框線本身不算線稿。 */
     val stickerPlainFrameDil: Int = 7,
+    /**
+     * PLAIN：外圈上「淡線稿」（[inkDarkTh] ≤ g < [whiteTh]、不在格線外擴內、也不在暗墨暈 [stickerPlainFaintHalo] 內）
+     * 佔比 < 此，才算只碰格線／頁邊。雲、效果線、淡網點都比 [inkDarkTh] 亮，只數暗墨會漏掉（c362_009 彩旗下的天空：
+     * 暗墨 0.041 過了 0.05 門、淡線稿 0.638 ⇒ 整片有雲的天空被當無畫面背景塗黑）。47 頁能走到這道判準的只有 2 顆
+     * （0.167、0.638），門檻取 0.10 兩側都留空間。
+     */
+    val stickerPlainFaintMax: Double = 0.10,
+    /** PLAIN：暗墨（g < [inkDarkTh]）抗鋸齒暈的方核外擴邊長（5×5）；暈裡的淡像素屬於暗線、不算淡線稿。 */
+    val stickerPlainFaintHalo: Int = 5,
     /** 偽泡開關（三檔＝false；偽泡沿字往背景長，是撕裂黑塊來源之一，守護框 +2）。 */
     val pseudoBubbles: Boolean = true,
     /** 亮島填黑（人頭一致化）開關（三檔＝false；會把格內背景挖成黑塊；守護框對它零敏感）。 */

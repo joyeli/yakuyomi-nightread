@@ -193,7 +193,9 @@ PROMOTED_TEXTON_MAX = 0.3   # 強貼框仍拒的文字覆蓋上限（真旁白�
 # 背景填黑三檔（產品檔位；2026-09-27 使用者定義「多少白該黑」，取代被打回的「保護畫面」旗標）
 #   L1 最低  ＝ 分鏡溝／頁邊帶（標準留白邏輯）＋ 封閉泡（標準泡邏輯，含泡外圈 BUBBLE_REST_NEAR）
 #              ＋「無畫面背景」貼紙：邊界只碰格線／頁邊、不碰線稿、不碰人物（STICKER_MODE=plain）
-#              ⚠️ 實測（19 頁）：過安全網的 55 顆元件外圈線稿佔比最低 0.110（泡框與字也算墨）> 0.05 ⇒ plain 零命中，L1 實際上＝留白＋泡、不填任何貼紙；「無畫面背景」要更寬的判準（外圈扣掉泡框／字）另案研究
+#              ⚠️ 實測（47 頁、2026-09-27）：過安全網的 139 顆元件裡，不碰人物且暗墨 < 0.05 的只有 2 顆（c362_009 有雲的天空、
+#              c371_010 天花板淡線的小三角），淡線稿都 ≥ 0.167 ⇒ 加了淡線稿判準（STICKER_PLAIN_FAINT_MAX）後 plain 零命中，
+#              L1 實際上＝留白＋泡、不填任何貼紙；「無畫面背景」要更寬的判準（外圈扣掉泡框／字）另案研究
 #   L2 進階  ＝ L1 ＋ 通過貼紙安全網、且 rough ≤ STICKER_ROUGH_MAX、整頁佔比 ≥ STICKER_SIMPLE_MIN_FRAC 的白（simple／10／0.005）
 #   L3 更進階＝ L1 ＋ rough ≤ 20、無面積下限（simple／20／0）
 #   三檔一律：無偽泡（PSEUDO_BUBBLES=0）、無亮島填黑（HARMONIZE=0）；泡外圈、留白深度、閘門都用標準值。
@@ -209,6 +211,11 @@ STICKER_SIMPLE_MIN_FRAC = float(os.environ.get("NIGHTREAD_STICKER_MINFRAC", "0.0
 STICKER_PLAIN_RING_R = 7    # plain：元件外圈＝dilate(橢圓 (2r+1)²＝15×15) − 元件，量外圈碰到什麼
 STICKER_PLAIN_ART_MAX = 0.05    # plain：外圈上「非格線的墨」（g < INK_DARK_TH 且不在格線外擴內）佔比 < 此＝只碰格線／頁邊
 STICKER_PLAIN_FRAME_DIL = 7 # plain：格線遮罩外擴的方核邊長（7×7），框線本身不算線稿
+STICKER_PLAIN_FAINT_MAX = 0.10  # plain：外圈上「淡線稿」（INK_DARK_TH ≤ g < WHITE_TH、不在格線外擴內、也不是暗墨的抗鋸齒暈）佔比 < 此
+                            # 才算只碰格線／頁邊。雲、效果線、淡網點都比 INK_DARK_TH 亮，只數暗墨會漏掉（c362_009 彩旗下的天空：
+                            # 暗墨 0.041 過了 0.05 門、淡線稿 0.638 ⇒ 整片有雲的天空被當無畫面背景塗黑）。47 頁能走到這道判準（不碰人物、暗墨 < 0.05）
+                            # 的只有 2 顆：淡線稿 0.638、0.16676（c371_010 天花板淡線的小三角），兩顆都是塗錯；0～0.166 之間任何門檻結果都一樣
+STICKER_PLAIN_FAINT_HALO = 5   # 暗墨抗鋸齒暈：暗墨（g < INK_DARK_TH）方核外擴邊長（5×5），暈裡的淡像素屬於暗線、不算淡線稿
 PSEUDO_BUBBLES = os.environ.get("NIGHTREAD_PB", "1") == "1"   # 偽泡開關（三檔＝0；偽泡沿字往背景長，是撕裂黑塊來源之一）
 HARMONIZE = os.environ.get("NIGHTREAD_HM", "1") == "1"        # 亮島填黑開關（三檔＝0；會把格內背景挖成黑塊）
 
@@ -934,7 +941,9 @@ def filter_sticker_plan(g, lab, stats, accept, audit, promoted, char_raw, frame)
 
     plain(i)＝「無畫面背景」：元件不碰 char_raw（模型原輸出人物遮罩、未收邊——三檔實驗就是這樣量的）、且外圈
     （dilate 橢圓 (2·STICKER_PLAIN_RING_R+1)² − 元件）非空、且外圈上「非格線的墨」（g < INK_DARK_TH 且不在格線
-    外擴 STICKER_PLAIN_FRAME_DIL² 內）的佔比 < STICKER_PLAIN_ART_MAX ⇒ 邊界只碰格線／頁邊、沒碰線稿。
+    外擴 STICKER_PLAIN_FRAME_DIL² 內）的佔比 < STICKER_PLAIN_ART_MAX、「淡線稿」（INK_DARK_TH ≤ g < WHITE_TH、不在
+    格線外擴內、不在暗墨 STICKER_PLAIN_FAINT_HALO² 外擴內）的佔比 < STICKER_PLAIN_FAINT_MAX ⇒ 邊界只碰格線／頁邊、
+    沒碰線稿（雲、效果線這類淡線也是線稿）。
       all   ：keep＝accept（預設完整管線，不動）
       plain ：keep＝{plain}（L1）
       simple：keep＝{plain} ∪ {audit 的 rough ≤ STICKER_ROUGH_MAX 且 areaFrac ≥ STICKER_SIMPLE_MIN_FRAC}（L2／L3）
@@ -950,13 +959,17 @@ def filter_sticker_plan(g, lab, stats, accept, audit, promoted, char_raw, frame)
         fd = cv2.dilate(np.asarray(frame).astype(np.uint8),
                         np.ones((STICKER_PLAIN_FRAME_DIL,) * 2, np.uint8)) > 0
         art = (g < INK_DARK_TH) & ~fd                       # 非格線的墨＝線稿
+        halo = cv2.dilate((g < INK_DARK_TH).astype(np.uint8),
+                          np.ones((STICKER_PLAIN_FAINT_HALO,) * 2, np.uint8)) > 0
+        faint = (g >= INK_DARK_TH) & (g < WHITE_TH) & ~fd & ~halo   # 淡線稿：雲／效果線／淡網點（不是暗線的暈）
         keep = set()
         for i in accept:
             comp = lab == i
             if not comp[char_raw].any():                    # 不碰人物
                 ring = (cv2.dilate(comp.astype(np.uint8), kr) > 0) & ~comp
-                if ring.any() and float(art[ring].mean()) < STICKER_PLAIN_ART_MAX:
-                    keep.add(i)                             # plain：外圈只碰格線／頁邊
+                if (ring.any() and float(art[ring].mean()) < STICKER_PLAIN_ART_MAX
+                        and float(faint[ring].mean()) < STICKER_PLAIN_FAINT_MAX):
+                    keep.add(i)                             # plain：外圈只碰格線／頁邊（暗墨、淡線稿都沒碰）
                     continue
             if STICKER_MODE == "simple":
                 a = met.get(int(i))
