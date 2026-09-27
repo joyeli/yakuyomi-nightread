@@ -418,6 +418,19 @@ data class SeparatorParams(
     val marginAxisAng: Double = 5.0,
     /** 其餘框線當頁邊框線的命中率下限（尺畫框線 ≈1.0）。 */
     val marginFillMin: Double = 0.95,
+    /**
+     * 頁邊斷框線：被狀聲詞／出血物蓋斷、每截都短於最短框線長的框線，由第二趟短段偵測＋共線串接補回（只給頁邊與頁邊否決的
+     * 格線遮罩，不進溝帶／出血過濾）。c371_001 第二排左框被「ザ」蓋斷成 150／159px 兩截（最短框線長 203）。
+     */
+    val marginOcc: Boolean = true,
+    /** 補列：伸進頁邊的物件擋住的列（兩側都是頁邊行程、缺口 ≤ [occGapFrac]）也算頁邊，物件後面與頁邊白相連的白一起塗。 */
+    val marginClose: Boolean = true,
+    /** 斷框線的每一截 ≥ 最短框線長×此（整條的證據量仍要 ≥ 最短框線長）。 */
+    val occPieceFrac: Double = 0.5,
+    /** 斷口上限（短邊×此，rint）：斷框線相鄰兩截之間、補列的缺口長度。 */
+    val occGapFrac: Double = 0.05,
+    /** 補列的淡網點判準扣掉暗像素（< frameDarkTh）外擴此 px（方核半徑）內的暈：暈屬於擋路的物件。 */
+    val marginHaloR: Int = 2,
     /** 圖層：泡遮罩外擴（方核邊長）——SEP 讓開泡與泡框。 */
     val bubDil: Int = 7,
     /** 圖層：單條溝被外擴泡遮罩吃掉 > 此比例 ⇒ 整條不塗（剩下的會是梯子狀碎段）；頁邊不受影響。 */

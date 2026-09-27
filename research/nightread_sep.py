@@ -20,6 +20,10 @@
       ├ 頁邊           從頁緣沿軸向往內走，途中只經白／字／泡，在 MARGIN_FRAC 內撞到頁邊框線（或其
       │                封口延長線）的那一段白；行程要連成段、淡網點／漸層與出血格內部都否決；
       │                最後過 texture_veto2（有線稿的白不是頁邊）
+      │                ・斷框線：被狀聲詞／出血物蓋斷、每截都短於最短框線長的框線，由第二趟短段偵測＋共線串接
+      │                  補回（只給頁邊與頁邊否決的格線遮罩，不進溝帶／出血過濾）
+      │                ・補列：伸進頁邊的物件擋住的幾列（兩側都是頁邊行程、缺口 ≤ OCC_GAP_FRAC）也算頁邊，
+      │                  物件後面、框線前、與頁邊白相連的白一起塗
       ├ 溝網連通       溝帶必須經由自己的走廊接上頁邊／頁緣／已收的溝帶，孤立在格內的平行線夾白丟掉
       └ 圖層（build_sep）泡 ⊕7 扣掉；單條溝被泡吃掉過半整條不塗；< SEP_MIN_CC 的碎塊不塗；
                        **人物遮罩不扣**——SEP 畫在人物之上，compose 最後的人物還原也跳過 SEP
@@ -47,7 +51,11 @@ compose 裡的位置：開頭就算好；留白路徑 texture_veto2 之後給出
      NET_THICK 的粗黑塊判定吃這個值。
   6. `cv2.line`（thickness > 1）與 `cv2.fillPoly` 的點陣化規則（框線點陣、延長線、走廊）要照 cv2。
   7. PCA 用 `np.cov`＋`np.linalg.eigh`，主軸方向正規化成 d.x ≥ 0（d.x≈0 時 d.y ≥ 0）。
+  8. 補列的框線位置內插在 double 算（`da + (db − da)·(r − k + 1)/(e − k + 1)`），與整數 d 直接比；
+     `_behind` 用 4 連通（`cv2.connectedComponents(..., connectivity=4)`）。
 """
+import os
+
 import cv2
 import numpy as np
 
@@ -115,6 +123,12 @@ FL_HIT_R = 8                # 頁邊「撞到框線」判定的半寬：擬合�
 MARGIN_EDGE_ANG = 30.0      # 已成溝的框線（trusted）當頁邊框線：與頁緣方向夾角上限
 MARGIN_AXIS_ANG = 5.0       # 其餘框線當頁邊框線：必須幾乎平行頁緣（格子外框沿版心；斜的排線／效果線不是）
 MARGIN_FILL_MIN = 0.95      # 其餘框線的命中率下限（尺畫框線 ≈1.0）
+# 斷框線與補列（c371_001 第二排左框：「ザ」的橫畫＋白描邊把框線蓋斷成 150／159px 兩截，各自 < 最短框線長 203）
+MARGIN_OCC = os.environ.get("NIGHTREAD_MARGIN_OCC", "1") != "0"       # 斷框線（第二趟短段偵測＋共線串接）
+MARGIN_CLOSE = os.environ.get("NIGHTREAD_MARGIN_CLOSE", "1") != "0"   # 補列（伸進頁邊的物件擋住的列）
+OCC_PIECE_FRAC = 0.5        # 斷框線的每一截 ≥ 最短框線長×此（整條的證據量仍要 ≥ 最短框線長）
+OCC_GAP_FRAC = 0.05         # 斷口上限（短邊×此）：斷框線相鄰兩截之間、補列的缺口長度都用這個
+MARGIN_HALO_R = 2           # 補列的淡網點判準扣掉暗像素（< DARK_TH）外擴此 px（方核半徑）內的暈：暈屬於擋路的物件
 
 # ── 圖層（build_sep：compose 用的最終遮罩）───────────────────────────────────────
 SEP_BUB_DIL = 7         # 泡遮罩外擴（方核邊長 7）：SEP 讓開泡與泡框
@@ -250,24 +264,36 @@ def _hits_xy(v, xi, yi, a, b):
     return xi[a:b + 1][sel].astype(float), yi[a:b + 1][sel].astype(float)
 
 
-def detect_segments(g):
+def detect_segments(g, min_len=None, axis_tol=None, final_win=WALK_WIN, hough_cache=None):
     """Hough 峰 → 沿線走訪切段 → 每一段**各自** PCA 精修兩次 → 最終窄窗走訪定端點與命中率。
-    （各段獨立精修：同一條 ρ 上的幾段共線框線不會被最長那段的微小斜率拖偏。）"""
+    （各段獨立精修：同一條 ρ 上的幾段共線框線不會被最長那段的微小斜率拖偏。）
+
+    預設參數＝主偵測。斷框線那一趟（`occluded_frames`）：[min_len] 切段長度下限（峰的票數門檻仍用最短框線長 L）、
+    [axis_tol] 只走與水平／垂直夾角 ≤ 此度的峰、[final_win] 定稿走訪的法向半窗；[hough_cache] dict，兩趟共用
+    候選像素／累加器／峰。"""
     H, W = g.shape
     L = max(60, int(round(LEN_FRAC * min(H, W))))
-    M = candidate_pixels(g)
-    acc, thetas, D = hough(M)
-    pk = peaks(acc, min_votes=int(PEAK_VOTE_FRAC * L))
+    Lr = L if min_len is None else min_len
+    hc = {} if hough_cache is None else hough_cache
+    if "pk" not in hc:
+        M = candidate_pixels(g)
+        acc, thetas, D = hough(M)
+        hc.update(M=M, thetas=thetas, D=D, pk=peaks(acc, min_votes=int(PEAK_VOTE_FRAC * L)))
+    M, thetas, D, pk = hc["M"], hc["thetas"], hc["D"], hc["pk"]
     segs = []
-    offs = np.arange(-WALK_WIN, WALK_WIN + 1)
+    offs = np.arange(-final_win, final_win + 1)
     for ti, ri, votes in pk:
         th, rho = thetas[ti], ri - D
+        if axis_tol is not None:
+            tdeg = ti * TH_STEP                           # 峰的 θ 格號 × 0.5°（精確，不經弧度來回）
+            if min(tdeg, 180.0 - tdeg, abs(tdeg - 90.0)) > axis_tol:
+                continue
         p0, d, n = line_param(th, rho)
         tr = t_range(p0, d, H, W)
         if tr is None:
             continue
         ts, hit, v, xi, yi = walk(M, p0, d, n, tr[0], tr[1], WALK_WIN0)
-        for a, b in runs(hit, GAP, int(0.7 * L), 0.6):
+        for a, b in runs(hit, GAP, int(0.7 * Lr), 0.6):
             xs, ys = _hits_xy(v, xi, yi, a, b)
             if len(xs) < 20:
                 continue
@@ -277,7 +303,7 @@ def detect_segments(g):
             ok = True
             for _ in range(2):                           # 只在這段附近（±2·GAP）重走、重擬合
                 ts2, hit2, v2, xi2, yi2 = walk(M, m, d2, n2, lo_t, hi_t, WALK_WIN0)
-                rr = runs(hit2, GAP, int(0.7 * L), 0.6)
+                rr = runs(hit2, GAP, int(0.7 * Lr), 0.6)
                 if not rr:
                     ok = False; break
                 a3, b3 = max(rr, key=lambda r: r[1] - r[0])
@@ -287,8 +313,8 @@ def detect_segments(g):
                 lo_t, hi_t = int(np.floor(proj.min())) - 2 * GAP, int(np.ceil(proj.max())) + 2 * GAP
             if not ok:
                 continue
-            ts2, hit2, v2, xi2, yi2 = walk(M, m, d2, n2, lo_t, hi_t, WALK_WIN)
-            for a2, b2 in runs(hit2, GAP, L, FILL_MIN):
+            ts2, hit2, v2, xi2, yi2 = walk(M, m, d2, n2, lo_t, hi_t, final_win)
+            for a2, b2 in runs(hit2, GAP, Lr, FILL_MIN):
                 t0, t1 = ts2[a2], ts2[b2]
                 P0 = m + t0 * d2; P1 = m + t1 * d2
                 vv = v2[a2:b2 + 1]; hh = vv.any(axis=1)
@@ -361,6 +387,37 @@ def group_lines(segs):
         gp["iv"] = [tuple(x) for x in mg]
         gp["len"] = sum(b - a for a, b in gp["iv"])
     return groups
+
+
+def occluded_frames(g, hough_cache=None):
+    """頁邊斷框線：被狀聲詞／出血物蓋斷的框線，每截都短於最短框線長 L，主偵測一截都收不到。
+    第二趟（共用 Hough）只走近軸向的峰、切段下限降到 OCC_PIECE_FRAC×L、定稿走訪用 ±WALK_WIN0（粗框線 ≥ 5px 只有兩緣是候選
+    像素，擬合中心 ±2 的窄窗在縮放／抗鋸齒下會漏掉一緣、命中率掉到 0.93）；共線分組後，相鄰兩截斷口 ≤ OCC_GAP_FRAC×短邊的
+    串成一條，**至少兩截、各截長度和 ≥ L** 才收——證據量與主偵測的一條框線相同，只是中間被蓋住。
+    只給 margin_mask（撞到框線的粗帶）與頁邊否決的格線遮罩用，不進溝帶／出血過濾。回傳群組（同 group_lines 的格式）。"""
+    H, W = g.shape; sh = min(H, W)
+    L = max(60, int(round(LEN_FRAC * sh)))
+    gap_max = int(round(OCC_GAP_FRAC * sh))                   # ⚠️KT 陷阱 1
+    pieces = detect_segments(g, min_len=int(round(OCC_PIECE_FRAC * L)), axis_tol=MARGIN_AXIS_ANG + 1.0,
+                             final_win=WALK_WIN0, hough_cache=hough_cache)
+    out = []
+    for gp in group_lines(pieces):
+        chains = [[gp["iv"][0]]]
+        for a, b in gp["iv"][1:]:
+            if a - chains[-1][-1][1] <= gap_max:
+                chains[-1].append((a, b))
+            else:
+                chains.append([(a, b)])
+        for ch in chains:
+            tot = sum(b - a for a, b in ch)
+            if len(ch) < 2 or tot < L:
+                continue
+            lo, hi = ch[0][0], ch[-1][1]
+            segs = [s for s in gp["segs"]
+                    if min(np.dot(s["p0"] - gp["m"], gp["d"]), np.dot(s["p1"] - gp["m"], gp["d"])) >= lo - 1
+                    and max(np.dot(s["p0"] - gp["m"], gp["d"]), np.dot(s["p1"] - gp["m"], gp["d"])) <= hi + 1]
+            out.append(dict(m=gp["m"], d=gp["d"], n=gp["n"], ang=gp["ang"], iv=list(ch), segs=segs, len=tot))
+    return out
 
 
 def bridged(iv, bridge):
@@ -781,8 +838,41 @@ def _open1d(b, L):
     return out
 
 
-def margin_mask(g, groups, seg=None, bubble=None, maxd=None, trusted=(), strip_pre=None):
-    """頁邊＝從頁緣沿軸向往內、途中只經過白／字／泡、在 maxd 內撞到一條頁邊框線（或其封口延長線）的那一段白。"""
+def _close_rows(hit0, d, maxd, gap, ok):
+    """補列：兩側都是頁邊行程、長 ≤ gap 的一段未中列裡，在框線前（或框線帶內）就被擋下的列——d ≤ maxd、
+    d ≤ 兩側 d 的內插 + FL_HIT_R——且 ok(r) 成立 ⇒ 也算頁邊。＝伸進頁邊的物件（狀聲詞、出血的頭髮／手）擋住的那幾列：
+    頁緣到物件之間仍是頁邊的紙白。回傳 (補後的 hit, reach：補上的列＝max(d, 內插)，其餘 −1)。⚠️KT 陷阱 8。"""
+    out = hit0.copy()
+    reach = np.full(len(hit0), -1.0)
+    n = len(hit0); k = 0
+    while k < n:
+        if hit0[k]:
+            k += 1; continue
+        e = k
+        while e < n and not hit0[e]:
+            e += 1
+        if k > 0 and e < n and e - k <= gap:
+            da, db = float(d[k - 1]), float(d[e])
+            for r in range(k, e):
+                di = da + (db - da) * (r - k + 1) / (e - k + 1)
+                if d[r] <= maxd and d[r] <= di + FL_HIT_R and ok(r):
+                    out[r] = True
+                    reach[r] = max(float(d[r]), di)
+        k = e
+    return out, reach
+
+
+def _behind(white_ok, seed_side, band_side):
+    """補上的列：物件後面、框線（內插位置）前的白，只收與這一側頁邊種子 4 連通的（被物件圍住的白不收）。⚠️KT 陷阱 8。"""
+    n, lb = cv2.connectedComponents((white_ok & band_side).astype(np.uint8), connectivity=4)
+    ids = np.unique(lb[seed_side & white_ok])
+    ids = ids[ids > 0]
+    return np.isin(lb, ids)
+
+
+def margin_mask(g, groups, seg=None, bubble=None, maxd=None, trusted=(), strip_pre=None, extra=()):
+    """頁邊＝從頁緣沿軸向往內、途中只經過白／字／泡、在 maxd 內撞到一條頁邊框線（或其封口延長線）的那一段白。
+    [extra]＝斷框線（`occluded_frames`）。"""
     H, W = g.shape
     if maxd is None:
         maxd = MARGIN_FRAC * min(H, W)
@@ -807,16 +897,20 @@ def margin_mask(g, groups, seg=None, bubble=None, maxd=None, trusted=(), strip_p
                 if off(gp, target) <= MARGIN_EDGE_ANG: sel.append(gp)
             elif off(gp, target) <= MARGIN_AXIS_ANG and group_fill(gp) >= MARGIN_FILL_MIN:
                 sel.append(gp)
-        return sel
+        ex = [gp for gp in extra if off(gp, target) <= MARGIN_AXIS_ANG and group_fill(gp) >= MARGIN_FILL_MIN]
+        return sel, ex
     fls = {}
     for key, target in (("v", 90.0), ("h", 0.0)):
-        gs = pick(target)
+        gs, ex = pick(target)
         lines, exts = [], []
         for gp in gs:
             for t0, t1 in gp["iv"]:
                 lines.append((gp["m"] + t0 * gp["d"], gp["m"] + t1 * gp["d"]))
             exts += extensions(g, gp, maxd)
-        fls[key] = (_raster_lines((H, W), lines, r=FL_HIT_R) & ~white) | _raster_lines((H, W), lines + exts, r=1)
+        # 斷框線的各截只進「撞到框線」的粗帶（±FL_HIT_R 內的非白）：不畫穿白的細線、不做延長線、斷口不補——常與主偵測的
+        # 同一條框線重複、擬合差零點幾度，細線畫在白裡會讓行程提早 1–2px 停；斷口那幾列交給補列
+        xl = [(gp["m"] + t0 * gp["d"], gp["m"] + t1 * gp["d"]) for gp in ex for t0, t1 in gp["iv"]]
+        fls[key] = (_raster_lines((H, W), lines + xl, r=FL_HIT_R) & ~white) | _raster_lines((H, W), lines + exts, r=1)
     nonok = ~okm
     light = okm & ~white & ~txd & ~bub       # 亮但不白（200–234）：零星＝紙面雜訊，成片＝淡網點／漸層（畫）
     trl = [groups[k] for k in trusted if k < len(groups)]
@@ -824,6 +918,16 @@ def margin_mask(g, groups, seg=None, bubble=None, maxd=None, trusted=(), strip_p
                           r=FL_HIT_R) & ~white
     sp = strip_pre if strip_pre is not None else np.zeros((H, W), bool)
     run_min = max(3, int(round(MARGIN_RUN_FRAC * min(H, W))))
+    close_gap = int(round(OCC_GAP_FRAC * min(H, W)))           # ⚠️KT 陷阱 1
+    white_ok = white & ~bub
+    l2c = []
+
+    def light2():
+        # 補列的淡網點判準：暗像素（< DARK_TH）的抗鋸齒暈屬於擋路的物件，不算淡網點（整頁只算一次、要用才算）
+        if not l2c:
+            halo = cv2.dilate((g < DARK_TH).astype(np.uint8), np.ones((2 * MARGIN_HALO_R + 1,) * 2, np.uint8)) > 0
+            l2c.append(light & ~halo)
+        return l2c[0]
     seeds = np.zeros((H, W), bool)
     yy = np.arange(H)[:, None]; xx = np.arange(W)[None, :]
     # 左／右：逐列從頁緣往內，第一個「非白非字非泡、或框線（含延長線）」的像素
@@ -837,15 +941,27 @@ def margin_mask(g, groups, seg=None, bubble=None, maxd=None, trusted=(), strip_p
         # 行程內「亮但不白」過多＝淡網點／漸層（畫），不是頁邊
         lc = np.cumsum(np.flip(light, 1) if rev else light, axis=1)
         nl = lc[rows, np.clip(d - 1, 0, W - 1)] * (d > 0)
-        hit0 &= nl <= np.maximum(MARGIN_LIGHT_MIN, MARGIN_LIGHT_FRAC * d)
+        lim = np.maximum(MARGIN_LIGHT_MIN, MARGIN_LIGHT_FRAC * d)
+        hit0 &= nl <= lim
         # 撞到的是溝的框線、而溝在框線另一側 ⇒ 這段白在格子那一側（出血格的內部），不是頁邊
         sgn = -1 if rev else 1
         far = np.zeros(H, bool)
         for k in range(2, FAR_PROBE + 1):
             far |= sp[rows, np.clip(xe + sgn * k, 0, W - 1)]
-        hit0 &= ~(fl_tr[rows, xe] & far)
+        badfar = fl_tr[rows, xe] & far
+        hit0 &= ~badfar
+        reach = None
+        if MARGIN_CLOSE:
+            def ok(r, d=d, lim=lim, badfar=badfar, rev=rev):
+                run = light2()[r, W - d[r]:] if rev else light2()[r, :d[r]]
+                return not badfar[r] and int(run.sum()) <= lim[r]
+            hit0, reach = _close_rows(hit0, d, maxd, close_gap, ok)
         hit = _open1d(hit0, run_min)
-        seeds |= (dist < d[:, None]) & hit[:, None]
+        sd = (dist < d[:, None]) & hit[:, None]
+        if reach is not None and (hit & (reach >= 0)).any():
+            dr = np.where(hit & (reach >= 0), reach, d.astype(float))
+            sd |= _behind(white_ok, sd, (dist < dr[:, None]) & hit[:, None])
+        seeds |= sd
     # 上／下：逐行同理
     for rev in (False, True):
         stop = nonok | fls["h"]
@@ -856,14 +972,26 @@ def margin_mask(g, groups, seg=None, bubble=None, maxd=None, trusted=(), strip_p
         hit0 = (d <= maxd) & (d < H) & fls["h"][ye, cols]
         lc = np.cumsum(np.flip(light, 0) if rev else light, axis=0)
         nl = lc[np.clip(d - 1, 0, H - 1), cols] * (d > 0)
-        hit0 &= nl <= np.maximum(MARGIN_LIGHT_MIN, MARGIN_LIGHT_FRAC * d)
+        lim = np.maximum(MARGIN_LIGHT_MIN, MARGIN_LIGHT_FRAC * d)
+        hit0 &= nl <= lim
         sgn = -1 if rev else 1
         far = np.zeros(W, bool)
         for k in range(2, FAR_PROBE + 1):
             far |= sp[np.clip(ye + sgn * k, 0, H - 1), cols]
-        hit0 &= ~(fl_tr[ye, cols] & far)
+        badfar = fl_tr[ye, cols] & far
+        hit0 &= ~badfar
+        reach = None
+        if MARGIN_CLOSE:
+            def ok(c, d=d, lim=lim, badfar=badfar, rev=rev):
+                run = light2()[H - d[c]:, c] if rev else light2()[:d[c], c]
+                return not badfar[c] and int(run.sum()) <= lim[c]
+            hit0, reach = _close_rows(hit0, d, maxd, close_gap, ok)
         hit = _open1d(hit0, run_min)
-        seeds |= (dist < d[None, :]) & hit[None, :]
+        sd = (dist < d[None, :]) & hit[None, :]
+        if reach is not None and (hit & (reach >= 0)).any():
+            dr = np.where(hit & (reach >= 0), reach, d.astype(float))
+            sd |= _behind(white_ok, sd, (dist < dr[None, :]) & hit[None, :])
+        seeds |= sd
     return seeds & white & ~bub
 
 
@@ -875,18 +1003,23 @@ def separators(g, seg=None, bubble=None, frame_hv=None, veto=None):
     veto＝texture_veto2 同款函式（頁邊要過線稿密度否決；溝帶已逐剖面驗白、不過）。
     frame_hv＝nightread.frame_line_mask 的水平／垂直格線，只併進頁邊否決的格線遮罩。"""
     H, W = g.shape; sh = min(H, W)
-    segs = detect_segments(g); groups = group_lines(segs)
+    hcache = {}
+    segs = detect_segments(g, hough_cache=hcache); groups = group_lines(segs)
+    ogroups = occluded_frames(g, hough_cache=hcache) if MARGIN_OCC else []   # 斷框線：只給頁邊
     if bubble is not None and np.any(bubble):
         # 貼著對白框／說明框外框的直線不是格框（c371_009：方形說明框的左緣被當頁邊框線 → 效果線之間被塗成條紋）
         bd = cv2.dilate(np.asarray(bubble).astype(np.uint8), np.ones((2 * BUB_LINE_R + 1,) * 2, np.uint8)) > 0
-        keep = []
-        for gp in groups:
-            pts = [gp["m"] + t * gp["d"] for t0, t1 in gp["iv"] for t in np.arange(t0, t1 + 1, 2.0)]
-            xy = np.round(np.array(pts)).astype(int)
-            xy[:, 0] = np.clip(xy[:, 0], 0, W - 1); xy[:, 1] = np.clip(xy[:, 1], 0, H - 1)
-            if float(bd[xy[:, 1], xy[:, 0]].mean()) < BUB_LINE_MAX:
-                keep.append(gp)
-        groups = keep
+
+        def off_bubble(gs):
+            keep = []
+            for gp in gs:
+                pts = [gp["m"] + t * gp["d"] for t0, t1 in gp["iv"] for t in np.arange(t0, t1 + 1, 2.0)]
+                xy = np.round(np.array(pts)).astype(int)
+                xy[:, 0] = np.clip(xy[:, 0], 0, W - 1); xy[:, 1] = np.clip(xy[:, 1], 0, H - 1)
+                if float(bd[xy[:, 1], xy[:, 0]].mean()) < BUB_LINE_MAX:
+                    keep.append(gp)
+            return keep
+        groups = off_bubble(groups); ogroups = off_bubble(ogroups)
     strip, pairs = separator_mask(g, groups, WMAX_FRAC * sh, OVL_FRAC * LEN_FRAC * sh, BRIDGE_FRAC * sh, seg=seg)
     trusted = set()
     strip_pre = np.zeros(g.shape, bool)
@@ -894,10 +1027,11 @@ def separators(g, seg=None, bubble=None, frame_hv=None, veto=None):
         if q["acc"]:
             trusted |= {q["i"], q["j"]}
             strip_pre |= q["mask"]
-    mar = margin_mask(g, groups, seg=seg, bubble=bubble, trusted=trusted, strip_pre=strip_pre)
+    mar = margin_mask(g, groups, seg=seg, bubble=bubble, trusted=trusted, strip_pre=strip_pre, extra=ogroups)
     strip = network_filter(pairs, mar, g)
     if veto is not None and mar.any():
-        fr = frame_raster(g, groups).astype(np.uint8)
+        # 斷框線也當格線隔板：否則頁邊與格內經斷口連成同一區，格內線稿的密度滲到頁邊
+        fr = frame_raster(g, groups + ogroups).astype(np.uint8)
         if frame_hv is not None:
             fr |= (np.asarray(frame_hv) > 0).astype(np.uint8)
         mar = veto(mar, g, fr, seg, bubble)

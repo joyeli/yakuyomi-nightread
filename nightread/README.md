@@ -197,7 +197,7 @@ without re-deriving them:
 ## Parameters
 
 `NightReadParams` is a `data class` holding the module's 122 parameters plus two nested groups — the any-angle
-separators, `sep: SeparatorParams` (52), and the bleed-panel filter, `bleed: BleedParams` (26) — 200 in all.
+separators, `sep: SeparatorParams` (57), and the bleed-panel filter, `bleed: BleedParams` (26) — 205 in all.
 Its defaults are the settled values. The nesting is forced: flattened, the constructor would exceed the JVM's
 255 parameter slots (a `Double` takes two) and the class would fail to load with `ClassFormatError`. Per-item documentation is in [`docs/PARAMETERS.md`](../docs/PARAMETERS.md), which covers the whole
 pipeline; the knobs that are not in `NightReadParams` sit outside the module — the detector's binarisation

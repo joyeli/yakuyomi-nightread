@@ -371,22 +371,42 @@ internal object Separators {
      * Hough 峰 → 沿線走訪切段 → 每一段各自 PCA 精修兩次 → 窄窗走訪定端點與命中率 → 去重。
      * [debug] 非 null 時放入 "peaks"（List<IntArray>）與 "D"。
      */
-    fun detectSegments(g: Gray, p: NightReadParams, m0: Mask? = null, debug: MutableMap<String, Any>? = null): List<Seg> {
-        val m = m0 ?: timed(debug, "cand") { candidatePixels(g, p) }
+    /** 兩趟共用的候選像素／Hough／峰（`hough_cache`）。 */
+    class HoughCache { var m: Mask? = null; var d: Int = 0; var pk: List<IntArray>? = null }
+
+    /**
+     * 預設參數＝主偵測。斷框線那一趟（[occludedFrames]）：[minLen] 切段長度下限（峰的票數門檻仍用最短框線長）、
+     * [axisTol] 只走與水平／垂直夾角 ≤ 此度的峰（θ＝格號×thStep，精確）、[finalWin] 定稿走訪的法向半窗；[cache] 兩趟共用。
+     */
+    fun detectSegments(g: Gray, p: NightReadParams, m0: Mask? = null, debug: MutableMap<String, Any>? = null,
+                       minLen: Int? = null, axisTol: Double? = null, finalWin: Int = p.sep.walkWin,
+                       cache: HoughCache? = null): List<Seg> {
         val h = g.h
         val w = g.w
         val l = max(60, rint(p.sep.lenFrac * min(h, w)))
+        val lr = minLen ?: l
         val th = thetas(p)
-        val (acc, d) = timed(debug, "hough") { hough(m, th) }
-        val nr = 2 * d + 1
-        val pk = timed(debug, "peaks") { peaks(acc, th.size, nr, (p.sep.peakVoteFrac * l).toInt(), p) }
+        val hc = cache ?: HoughCache()
+        if (hc.pk == null) {
+            val m1 = m0 ?: timed(debug, "cand") { candidatePixels(g, p) }
+            val (acc, d1) = timed(debug, "hough") { hough(m1, th) }
+            val nr = 2 * d1 + 1
+            hc.m = m1; hc.d = d1
+            hc.pk = timed(debug, "peaks") { peaks(acc, th.size, nr, (p.sep.peakVoteFrac * l).toInt(), p) }
+        }
+        val m = hc.m!!
+        val d = hc.d
+        val pk = hc.pk!!
         val tWalk = System.nanoTime()
-        debug?.put("peaks", pk)
-        debug?.put("D", d)
+        if (minLen == null) { debug?.put("peaks", pk); debug?.put("D", d) }
         val gap = p.sep.gap
-        val minRun = (0.7 * l).toInt()
+        val minRun = (0.7 * lr).toInt()
         val segs = ArrayList<Seg>()
         for (peak in pk) {
+            if (axisTol != null) {
+                val tdeg = peak[0] * p.sep.thStep                  // 峰的 θ 格號 × 0.5°（精確）
+                if (min(min(tdeg, 180.0 - tdeg), abs(tdeg - 90.0)) > axisTol) continue
+            }
             val t = th[peak[0]]
             val rho = (peak[1] - d).toDouble()
             val cs = StrictMath.cos(t)
@@ -417,8 +437,8 @@ internal object Separators {
                     lohi = projRange(xs, ys, n, f, gap)
                 }
                 if (!ok) continue
-                val wk3 = walk(m, f[0], f[1], f[2], f[3], f[4], f[5], lohi[0], lohi[1], p.sep.walkWin)
-                for (r2 in runs(wk3.hit, gap, l, p.sep.fillMin)) {
+                val wk3 = walk(m, f[0], f[1], f[2], f[3], f[4], f[5], lohi[0], lohi[1], finalWin)
+                for (r2 in runs(wk3.hit, gap, lr, p.sep.fillMin)) {
                     val t0 = (lohi[0] + r2[0]).toDouble()
                     val t1 = (lohi[0] + r2[1]).toDouble()
                     var c = 0
@@ -432,7 +452,43 @@ internal object Separators {
             }
         }
         val out = dedupe(segs, p)
-        debug?.put("t_walk", (System.nanoTime() - tWalk) / 1e6)
+        debug?.put(if (minLen == null) "t_walk" else "t_occwalk", (System.nanoTime() - tWalk) / 1e6)
+        return out
+    }
+
+    /**
+     * 頁邊斷框線（`occluded_frames`）：被狀聲詞／出血物蓋斷、每截都短於最短框線長的框線。第二趟只走近軸向的峰、
+     * 切段下限 occPieceFrac×L、定稿走訪 ±walkWin0；共線分組後相鄰兩截斷口 ≤ rint(occGapFrac×短邊) 的串成一條，
+     * 至少兩截、各截長度和 ≥ L 才收。只給頁邊與頁邊否決的格線遮罩，不進溝帶／出血過濾。
+     */
+    fun occludedFrames(g: Gray, p: NightReadParams, cache: HoughCache, debug: MutableMap<String, Any>? = null): List<Group> {
+        val sh = min(g.h, g.w)
+        val l = max(60, rint(p.sep.lenFrac * sh))
+        val gapMax = rint(p.sep.occGapFrac * sh)
+        val pieces = detectSegments(g, p, debug = debug, minLen = rint(p.sep.occPieceFrac * l),
+            axisTol = p.sep.marginAxisAng + 1.0, finalWin = p.sep.walkWin0, cache = cache)
+        val out = ArrayList<Group>()
+        for (gp in groupLines(pieces, p)) {
+            val chains = ArrayList<ArrayList<Iv>>()
+            chains.add(arrayListOf(gp.iv[0]))
+            for (k in 1 until gp.iv.size) {
+                val v = gp.iv[k]
+                if (v.lo - chains.last().last().hi <= gapMax) chains.last().add(v) else chains.add(arrayListOf(v))
+            }
+            for (ch in chains) {
+                var tot = 0.0
+                for (v in ch) tot += v.hi - v.lo
+                if (ch.size < 2 || tot < l) continue
+                val lo = ch.first().lo
+                val hi = ch.last().hi
+                val segs = gp.segs.filter { s ->
+                    val u0 = dot(s.p0x - gp.mx, s.p0y - gp.my, gp.dx, gp.dy)
+                    val u1 = dot(s.p1x - gp.mx, s.p1y - gp.my, gp.dx, gp.dy)
+                    min(u0, u1) >= lo - 1 && max(u0, u1) <= hi + 1
+                }
+                out.add(Group(gp.mx, gp.my, gp.dx, gp.dy, gp.nx, gp.ny, gp.ang, ch.toList(), segs))
+            }
+        }
         return out
     }
 
@@ -1146,6 +1202,58 @@ internal object Separators {
         return out
     }
 
+    /**
+     * 補列（`_close_rows`）：兩側都是頁邊行程、長 ≤ gap 的一段未中列裡，在框線前（或框線帶內）就被擋下的列——
+     * d ≤ maxd、d ≤ 兩側 d 的內插 + flHitR——且 ok(r) ⇒ 也算頁邊。內插用 double（同 python）。
+     * 回傳 reach：補上的列＝max(d, 內插)，其餘 −1；hit0 就地改。
+     */
+    private fun closeRows(hit0: BooleanArray, d: IntArray, maxd: Double, gap: Int, flHitR: Int, ok: (Int) -> Boolean): DoubleArray {
+        val n = hit0.size
+        val orig = hit0.copyOf()
+        val reach = DoubleArray(n) { -1.0 }
+        var k = 0
+        while (k < n) {
+            if (orig[k]) { k++; continue }
+            var e = k
+            while (e < n && !orig[e]) e++
+            if (k > 0 && e < n && e - k <= gap) {
+                val da = d[k - 1].toDouble()
+                val db = d[e].toDouble()
+                for (r in k until e) {
+                    val di = da + (db - da) * (r - k + 1) / (e - k + 1)
+                    if (d[r] <= maxd && d[r] <= di + flHitR && ok(r)) {
+                        hit0[r] = true
+                        reach[r] = max(d[r].toDouble(), di)
+                    }
+                }
+            }
+            k = e
+        }
+        return reach
+    }
+
+    /** `_behind`：從種子白（4 連通）在 band∧whiteOk 內漫淹，＝python「band∧whiteOk 的 4 連通元件裡含種子白的那些」。 */
+    private fun behind(whiteOk: Mask, seedSide: Mask, band: Mask): Mask {
+        val w = whiteOk.w
+        val h = whiteOk.h
+        val out = Mask(w, h)
+        val q = IntArray(w * h)
+        var head = 0
+        var tail = 0
+        for (i in out.data.indices) if (seedSide.data[i] && whiteOk.data[i] && band.data[i]) { out.data[i] = true; q[tail++] = i }
+        while (head < tail) {
+            val i = q[head++]
+            val x = i % w
+            val y = i / w
+            fun push(j: Int) { if (!out.data[j] && whiteOk.data[j] && band.data[j]) { out.data[j] = true; q[tail++] = j } }
+            if (x > 0) push(i - 1)
+            if (x < w - 1) push(i + 1)
+            if (y > 0) push(i - w)
+            if (y < h - 1) push(i + w)
+        }
+        return out
+    }
+
     /** 一維開運算：丟掉長度 < l 的連續 true 段。 */
     private fun open1d(b: BooleanArray, l: Int): BooleanArray {
         val out = b.copyOf()
@@ -1166,7 +1274,7 @@ internal object Separators {
      * （`margin_mask`）。行程要連成 ≥ run_min 的段、亮而不白的像素不能多、撞到的若是溝的框線而另一側是溝就不算。
      */
     private fun marginMask(g: Gray, groups: List<Group>, seg: Mask?, bubble: Mask?, trusted: Set<Int>,
-                           stripPre: Mask, p: NightReadParams): Mask {
+                           stripPre: Mask, p: NightReadParams, extra: List<Group> = emptyList()): Mask {
         val w = g.w
         val h = g.h
         val sh = min(h, w)
@@ -1188,6 +1296,9 @@ internal object Separators {
             if (k in trusted) off <= p.sep.marginEdgeAng
             else off <= p.sep.marginAxisAng && gp.fill >= p.sep.marginFillMin
         }.map { it.value }
+        fun pickExtra(target: Double): List<Group> = extra.filter { gp ->
+            angDiff(gp.ang, target) <= p.sep.marginAxisAng && gp.fill >= p.sep.marginFillMin
+        }
         val fls = HashMap<String, Mask>()
         for ((key, target) in listOf("v" to 90.0, "h" to 0.0)) {
             val gs = pick(target)
@@ -1197,7 +1308,9 @@ internal object Separators {
                 lines.addAll(groupLinesOf(gp))
                 exts.addAll(extensions(g, gp, maxd, p))
             }
-            val thick = rasterLines(w, h, lines, p.sep.flHitR)
+            // 斷框線的各截只進「撞到框線」的粗帶（±flHitR 內的非白）：不畫細線、不做延長線、斷口不補（交給補列）
+            val xl = pickExtra(target).flatMap { groupLinesOf(it) }
+            val thick = rasterLines(w, h, lines + xl, p.sep.flHitR)
             val thin = rasterLines(w, h, lines + exts, 1)
             fls[key] = Mask(w, h, BooleanArray(w * h) { (thick.data[it] && !white.data[it]) || thin.data[it] })
         }
@@ -1206,6 +1319,13 @@ internal object Separators {
         val flTr = rasterLines(w, h, trl.flatMap { groupLinesOf(it) }, p.sep.flHitR)
         for (i in flTr.data.indices) if (white.data[i]) flTr.data[i] = false
         val runMin = max(3, rint(p.sep.marginRunFrac * sh))
+        val closeGap = rint(p.sep.occGapFrac * sh)
+        val whiteOk = Mask(w, h, BooleanArray(w * h) { white.data[it] && !bub.data[it] })
+        // 補列的淡網點判準：暗像素（< frameDarkTh）的抗鋸齒暈屬於擋路的物件，不算（整頁只算一次、要用才算）
+        val light2 by lazy {
+            val halo = dilateSquare(g.lt(p.frameDarkTh), 2 * p.sep.marginHaloR + 1)
+            BooleanArray(w * h) { light[it] && !halo.data[it] }
+        }
         val seeds = Mask(w, h)
         // 左／右：逐列從頁緣往內，第一個「非白非字非泡、或框線（含延長線）」的像素
         val flv = fls["v"]!!
@@ -1213,6 +1333,8 @@ internal object Separators {
             val d = IntArray(h)
             val xe = IntArray(h)
             val hit0 = BooleanArray(h)
+            val badfar = BooleanArray(h)
+            val lim = DoubleArray(h)
             val sgn = if (rev) -1 else 1
             for (y in 0 until h) {
                 val base = y * w
@@ -1231,21 +1353,44 @@ internal object Separators {
                 ok = ok && nl <= max(p.sep.marginLightMin.toDouble(), p.sep.marginLightFrac * dd)
                 var far = false
                 for (k in 2..p.sep.farProbe) if (stripPre.data[base + min(max(xev + sgn * k, 0), w - 1)]) far = true
-                if (flTr.data[base + xev] && far) ok = false
+                badfar[y] = flTr.data[base + xev] && far
+                if (badfar[y]) ok = false
+                lim[y] = max(p.sep.marginLightMin.toDouble(), p.sep.marginLightFrac * dd)
                 hit0[y] = ok
             }
+            val reach = if (p.sep.marginClose) closeRows(hit0, d, maxd, closeGap, p.sep.flHitR) { y ->
+                val base = y * w
+                var c = 0
+                for (k in 0 until d[y]) if (light2[base + (if (rev) w - 1 - k else k)]) c++
+                !badfar[y] && c <= lim[y]
+            } else null
             val hit = open1d(hit0, runMin)
+            val sd = Mask(w, h)
             for (y in 0 until h) {
                 if (!hit[y]) continue
                 val base = y * w
-                for (k in 0 until d[y]) seeds.data[base + (if (rev) w - 1 - k else k)] = true
+                for (k in 0 until d[y]) sd.data[base + (if (rev) w - 1 - k else k)] = true
             }
+            if (reach != null && (0 until h).any { hit[it] && reach[it] >= 0 }) {
+                val band = Mask(w, h)
+                for (y in 0 until h) {
+                    if (!hit[y]) continue
+                    val dr = if (reach[y] >= 0) reach[y] else d[y].toDouble()
+                    val base = y * w
+                    var k = 0
+                    while (k < w && k < dr) { band.data[base + (if (rev) w - 1 - k else k)] = true; k++ }
+                }
+                sd.orInPlace(behind(whiteOk, sd, band))
+            }
+            seeds.orInPlace(sd)
         }
         // 上／下：逐行同理
         val flh = fls["h"]!!
         for (rev in listOf(false, true)) {
             val d = IntArray(w)
             val hit0 = BooleanArray(w)
+            val badfar = BooleanArray(w)
+            val lim = DoubleArray(w)
             val sgn = if (rev) -1 else 1
             for (x in 0 until w) {
                 var dd = h
@@ -1263,14 +1408,33 @@ internal object Separators {
                 ok = ok && nl <= max(p.sep.marginLightMin.toDouble(), p.sep.marginLightFrac * dd)
                 var far = false
                 for (k in 2..p.sep.farProbe) if (stripPre.data[min(max(yev + sgn * k, 0), h - 1) * w + x]) far = true
-                if (flTr.data[yev * w + x] && far) ok = false
+                badfar[x] = flTr.data[yev * w + x] && far
+                if (badfar[x]) ok = false
+                lim[x] = max(p.sep.marginLightMin.toDouble(), p.sep.marginLightFrac * dd)
                 hit0[x] = ok
             }
+            val reach = if (p.sep.marginClose) closeRows(hit0, d, maxd, closeGap, p.sep.flHitR) { x ->
+                var c = 0
+                for (k in 0 until d[x]) if (light2[(if (rev) h - 1 - k else k) * w + x]) c++
+                !badfar[x] && c <= lim[x]
+            } else null
             val hit = open1d(hit0, runMin)
+            val sd = Mask(w, h)
             for (x in 0 until w) {
                 if (!hit[x]) continue
-                for (k in 0 until d[x]) seeds.data[(if (rev) h - 1 - k else k) * w + x] = true
+                for (k in 0 until d[x]) sd.data[(if (rev) h - 1 - k else k) * w + x] = true
             }
+            if (reach != null && (0 until w).any { hit[it] && reach[it] >= 0 }) {
+                val band = Mask(w, h)
+                for (x in 0 until w) {
+                    if (!hit[x]) continue
+                    val dr = if (reach[x] >= 0) reach[x] else d[x].toDouble()
+                    var k = 0
+                    while (k < h && k < dr) { band.data[(if (rev) h - 1 - k else k) * w + x] = true; k++ }
+                }
+                sd.orInPlace(behind(whiteOk, sd, band))
+            }
+            seeds.orInPlace(sd)
         }
         for (i in seeds.data.indices) seeds.data[i] = seeds.data[i] && white.data[i] && !bub.data[i]
         return seeds
@@ -1287,7 +1451,9 @@ internal object Separators {
         val h = g.h
         val w = g.w
         val sh = min(h, w)
-        val segs = detectSegments(g, p, debug = debug)
+        val hc = HoughCache()
+        val segs = detectSegments(g, p, debug = debug, cache = hc)
+        var ogroups = if (p.sep.marginOcc) timed(debug, "occ") { occludedFrames(g, p, hc) } else emptyList()
         val tGroup = System.nanoTime()
         var groups = groupLines(segs, p)
         debug?.put("segs", segs)
@@ -1295,7 +1461,7 @@ internal object Separators {
         if (bubble != null && bubble.any()) {
             // 貼著對白框／說明框外框的直線不是格框（線上每 2px 取樣，一半以上落在泡 ⊕7 內就丟）
             val bd = dilateSquare(bubble, 2 * p.sep.bubLineR + 1)
-            groups = groups.filter { gp ->
+            val offBubble = { gp: Group ->
                 var n = 0
                 var inb = 0
                 for (v in gp.iv) {
@@ -1315,7 +1481,10 @@ internal object Separators {
                 }
                 inb.toDouble() / n < p.sep.bubLineMax
             }
+            groups = groups.filter(offBubble)
+            ogroups = ogroups.filter(offBubble)
         }
+        debug?.put("ogroups", ogroups)
         debug?.put("t_group", (System.nanoTime() - tGroup) / 1e6)
         val pairs = timed(debug, "pairs") {
             separatorPairs(g, groups, p.sep.wmaxFrac * sh, p.sep.ovlFrac * p.sep.lenFrac * sh, p.sep.bridgeFrac * sh, seg, p)
@@ -1324,13 +1493,14 @@ internal object Separators {
         val stripPre = Mask(w, h)
         for (q in pairs) if (q.acc) { trusted.add(q.i); trusted.add(q.j); q.mask!!.orInto(stripPre) }
         debug?.put("stripPre", stripPre)
-        var mar = timed(debug, "margin") { marginMask(g, groups, seg, bubble, trusted, stripPre, p) }
+        var mar = timed(debug, "margin") { marginMask(g, groups, seg, bubble, trusted, stripPre, p, ogroups) }
         debug?.put("marginRaw", mar)
         val strip = timed(debug, "network") { networkFilter(pairs, mar, g, p) }
         debug?.put("stripNet", strip)
         val frameArb = timed(debug, "raster") { frameRaster(g, groups, p) }
         if (veto && mar.any()) {
-            val fr = frameArb.copy()
+            // 斷框線也當格線隔板（frameArb 本身不變：出血過濾不吃斷框線）
+            val fr = if (ogroups.isEmpty()) frameArb.copy() else frameRaster(g, groups + ogroups, p)
             if (frameHv != null) fr.orInPlace(frameHv)
             debug?.put("fr", fr)
             mar = timed(debug, "veto") { Texture.veto(mar, g, fr, seg ?: Mask(w, h), bubble ?: Mask(w, h), p) }

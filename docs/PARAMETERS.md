@@ -481,6 +481,32 @@ line the walk probes 14 px further, and a gutter on the other side means this wh
 panel, not the margin. The ±3 px frame raster doubles as texture_veto2's frame mask and as frame evidence for the
 bleed filter.
 
+### `MARGIN_OCC` = 1 (`NIGHTREAD_MARGIN_OCC`) · `MARGIN_CLOSE` = 1 (`NIGHTREAD_MARGIN_CLOSE`)
+Switches for the two margin repairs (Kotlin `marginOcc` / `marginClose`); both off reproduces the output from before
+they existed, pixel for pixel. **Occluded frames** (`occluded_frames`): a margin frame cut by a sound effect, a bubble
+or a bleeding object into pieces that are each shorter than the minimum line length (c371_001: the left frame of
+row 2 is cut by the stroke of 「ザ」 and its white outline into 150 and 159 px, minimum 203) is never found by the
+main detection, so the margin walk has nothing to hit. A second pass over the same Hough peaks (only those within
+`MARGIN_AXIS_ANG` + 1° of horizontal/vertical) finds the short pieces and chains collinear ones; the chain feeds only
+the margin's "hit a frame" band and texture_veto2's frame mask — no thin line through white, no sealing extension,
+no gutter, no bleed-filter evidence. It still has to pass `MARGIN_AXIS_ANG` and `MARGIN_FILL_MIN`, and lines hugging
+a bubble are dropped. **Closed rows** (`_close_rows`): rows (or columns) where an object reaching into the margin
+stops the walk short of the frame, with margin runs on both sides, also count as margin, and the white behind the
+object up to the (interpolated) frame position that is 4-connected to the margin is taken too. Over 47 pages × 4
+levels 13 pages change, every newly black pixel was white in the original; guard 18 / 12 / 12 / 16 (/664) unchanged.
+Known gap: under upscaling (≥ 1.0675× in the c371_001 sweeps, mostly ≥ 1.09×) the two short pieces' own PCA angles
+can differ by 1–1.8° > `GROUP_ANG`, they never form a group and that margin stays grey (54 of 483 sweep cells;
+every cell ≤ 1.00× passes).
+
+### `OCC_PIECE_FRAC` = 0.5 · `OCC_GAP_FRAC` = 0.05 · `MARGIN_HALO_R` = 2
+Each occluded-frame piece must be at least 0.5 × the minimum line length, and the chain at least two pieces whose
+lengths sum to the minimum line length — the same evidence as one ordinary frame line, only covered in the middle.
+The final walk of the second pass uses ±`WALK_WIN0` instead of ±`WALK_WIN` (a frame ≥ 5 px thick has candidate
+pixels only on its two edges, and the ±2 window loses one edge under scaling or anti-aliasing, dropping the hit
+rate to 0.93). The gap between neighbouring pieces and the length of a closed-row gap are both at most 0.05 × the
+short side. In closed rows the "light but not white" budget ignores the anti-aliased halo within 2 px (square
+kernel) of dark pixels (< `DARK_TH`): that halo belongs to the object in the way.
+
 ### `SEP_BUB_DIL` = 7 · `PAIR_SUB_MAX` = 0.5 · `SEP_MIN_CC` = 150
 Layering. SEP subtracts the bubbles ⊕7 (square); a strip that loses more than half to that is dropped whole
 (what remained would be a ladder of fragments) — **bubbles only, never the character mask**; fragments under
