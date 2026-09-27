@@ -12,7 +12,8 @@ import kotlin.math.abs
  * 背景填黑三檔（L1／L2／L3）的整頁 parity：同 [PageParityTest] 的輸入，換成產品三檔的參數組，比對
  * `fixtures/baseline/tiers/<檔>/<頁>_final.png`（研究端 `nightread.py` 以對應環境變數跑出的成品，見
  * docs/DECISIONS.md「背景填黑三檔」）。容差與 [PageParityTest] 相同；泡／留白遮罩在三檔都不該動，逐像素比對
- * 測試資源裡的 `<頁>_bubble.png`／`<頁>_gutter.png`（研究端實測三檔的遮罩與預設逐像素相同）。
+ * 測試資源裡的 `<頁>_bubble.png`／`<頁>_gutter.png`（研究端實測三檔的遮罩與預設逐像素相同）。任意角度格溝（SEP）不吃
+ * 檔位參數，實際塗的那份同樣逐像素比 `<頁>_sep.png`，有框頁還要求非空（格溝壓過人物、出血格過濾也在三檔一律開）。
  *
  * 貼紙的 keep 集合（三檔篩選的直接輸出）也比：期望值抄自研究端各檔位 `<頁>_regions.json` 的 sticker 審計
  * `keep` 欄（2026-09-27），以元件 bbox 表示（cv2 與 Kotlin 的元件標號在少數頁差 1，bbox 才穩）。ch34_011 只有
@@ -75,12 +76,12 @@ class TierParityTest {
     )
 
     @Test
-    fun framedPageMatchesTierBaselines() = checkPage("ch34_011")
+    fun framedPageMatchesTierBaselines() = checkPage("ch34_011", expectSep = true)
 
     @Test
-    fun framelessColourPageMatchesTierBaselines() = checkPage("demo05")
+    fun framelessColourPageMatchesTierBaselines() = checkPage("demo05", expectSep = false)
 
-    private fun checkPage(page: String) {
+    private fun checkPage(page: String, expectSep: Boolean) {
         val gray = readGray("${page}_gray.png")
         val input = NightReadInput(
             gray = gray,
@@ -91,6 +92,7 @@ class TierParityTest {
         )
         val pyGutter = readMask("${page}_gutter.png")
         val pyBubble = readMask("${page}_bubble.png")
+        val pySep = readMask("${page}_sep.png")
         // keep 集合以 bbox 比：白元件的標號由 classifyWhiteComponents 決定，與 render 內部同一份
         val cc = Regions.classifyWhiteComponents(Regions.normalizePaper(gray, input.chroma, NightReadParams()), NightReadParams()).cc
         fun bbox(i: Int) = listOf(cc.left[i], cc.top[i], cc.left[i] + cc.width[i], cc.top[i] + cc.height[i])
@@ -105,7 +107,10 @@ class TierParityTest {
             assertEquals("$page/$tier 貼紙 keep 集合（bbox）", expectedKeep.getValue(page).getValue(tier),
                 result.stickerAccept.map { bbox(it) }.toSet())
 
-            for ((tag, kt, py) in listOf(Triple("gutter", result.gutter, pyGutter), Triple("bubble", result.bubble, pyBubble))) {
+            val ktSep = result.sep ?: error("$page/$tier：SEP 三檔一律開，result.sep 不該是 null")
+            assertEquals("$page/$tier 格溝遮罩 SEP 有無", expectSep, ktSep.any())
+            for ((tag, kt, py) in listOf(Triple("gutter", result.gutter, pyGutter), Triple("bubble", result.bubble, pyBubble),
+                    Triple("sep", ktSep, pySep))) {
                 var only = 0
                 var miss = 0
                 for (i in py.data.indices) {

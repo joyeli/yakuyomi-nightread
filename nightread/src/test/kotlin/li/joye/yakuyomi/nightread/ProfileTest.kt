@@ -143,13 +143,30 @@ class ProfileTest {
             prev = at
         }
 
-        // 單次計時在 JIT 與 GC 下跳動很大（實測同一份程式碼 1300–1500 ms），取中位數才看得出效果
-        val runs = LongArray(7) {
-            val t = System.currentTimeMillis()
-            NightRead.render(input)
-            System.currentTimeMillis() - t
+        // 單次計時在 JIT 與 GC 下跳動很大（實測同一份程式碼 1300–1500 ms），取中位數才看得出效果。
+        // 同時量任意角度格溝＋出血格過濾的成本：預設（兩者都開）與兩個開關都關交錯各跑七次，另從 diag 讀兩段各自的耗時
+        val off = p.copy(separators = false, bleedFilter = false)
+        val runs = LongArray(7)
+        val offRuns = LongArray(7)
+        val tSep = DoubleArray(7)
+        val tBleed = DoubleArray(7)
+        for (k in 0 until 7) {
+            val diag = HashMap<String, Any>()
+            var t = System.currentTimeMillis()
+            NightRead.render(input, p, null, diag)
+            runs[k] = System.currentTimeMillis() - t
+            tSep[k] = diag["t_sep"] as Double
+            tBleed[k] = diag["t_bleed"] as Double
+            t = System.currentTimeMillis()
+            NightRead.render(input, off)
+            offRuns[k] = System.currentTimeMillis() - t
         }
         runs.sort()
+        offRuns.sort()
+        tSep.sort()
+        tBleed.sort()
         println("  render 七次：${runs.joinToString(" ")} ⇒ 中位數 ${runs[3]} ms")
+        println("  格溝＋出血過濾都關 七次：${offRuns.joinToString(" ")} ⇒ 中位數 ${offRuns[3]} ms（開的成本 ${runs[3] - offRuns[3]} ms）")
+        println("  其中 格溝 ${"%.0f".format(tSep[3])} ms、出血過濾 ${"%.0f".format(tBleed[3])} ms（中位數）")
     }
 }

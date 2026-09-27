@@ -172,6 +172,166 @@ object Cv {
     fun close(m: Mask, k: Kernel): Mask = erode(dilate(m, k), k)
 
     /**
+     * 二值膨脹的位元打包快路：與 [dilate]（單次）**逐像素相同**（同一套取樣：輸出 (x, y) 看輸入
+     * (x + [runStart−ax .. runEnd−1−ax], y − (ky−ay))，影像外視為 0），但每列打包成 Long（64 像素一字）。
+     *
+     * 核的每一列是一段水平 run：先對每種 run 算一次整張的「水平區間 OR」（倍增移位，log₂(run 長) 趟），
+     * 再逐輸出列把核各列對應的來源列 OR 起來。成本 ≈ 核高 × 像素數 / 64，比 [dilate] 的逐像素列分解
+     * （核高 × 像素數）快一個數量級：13×13 橢圓在 2.6 MPx 上約 40 ms → 5 ms。出血格過濾一頁要五趟整頁橢圓／方核外擴，
+     * 用這條。
+     */
+    fun dilatePacked(m: Mask, k: Kernel): Mask = unpackBits(dilateBits(packBits(m), m.w, m.h, k), m.w, m.h)
+
+    /** 列打包：每列 (w+63)/64 個 Long，像素 x 在第 x ushr 6 字的第 x and 63 位；末字超出寬度的位元一律 0。 */
+    fun packBits(m: Mask): LongArray {
+        val w = m.w
+        val h = m.h
+        val nw = (w + 63) ushr 6
+        val out = LongArray(nw * h)
+        val d = m.data
+        for (y in 0 until h) {
+            val base = y * w
+            val wb = y * nw
+            for (i in 0 until nw) {
+                val x0 = i shl 6
+                val n = min(64, w - x0)
+                var v = 0L
+                for (b in 0 until n) if (d[base + x0 + b]) v = v or (1L shl b)
+                out[wb + i] = v
+            }
+        }
+        return out
+    }
+
+    /** [packBits] 的反向。 */
+    fun unpackBits(a: LongArray, w: Int, h: Int): Mask {
+        val nw = (w + 63) ushr 6
+        val out = Mask(w, h)
+        for (y in 0 until h) {
+            val base = y * w
+            val wb = y * nw
+            for (i in 0 until nw) {
+                var v = a[wb + i]
+                while (v != 0L) {
+                    val x = (i shl 6) + java.lang.Long.numberOfTrailingZeros(v)
+                    if (x < w) out.data[base + x] = true
+                    v = v and (v - 1)
+                }
+            }
+        }
+        return out
+    }
+
+    /** [dilatePacked] 的本體：輸入輸出都是 [packBits] 的打包格式（呼叫端可以直接查位元、省掉解包）。 */
+    fun dilateBits(src: LongArray, w: Int, h: Int, k: Kernel): LongArray {
+        val nw = (w + 63) ushr 6
+        val acc = LongArray(nw * h)
+        val cache = HashMap<Long, LongArray>()
+        for (ky in 0 until k.h) {
+            val runS = k.runStart[ky]
+            val runE = k.runEnd[ky]
+            if (runS >= runE) continue
+            val dy = ky - k.ay
+            val offL = runS - k.ax
+            val offR = runE - 1 - k.ax
+            val hor = cache.getOrPut((offL.toLong() shl 32) or (offR.toLong() and 0xffffffffL)) {
+                packedRangeOr(src, nw, h, w, offL, offR)
+            }
+            for (y in 0 until h) {
+                val sy = y - dy
+                if (sy < 0 || sy >= h) continue
+                val o = y * nw
+                val si = sy * nw
+                for (i in 0 until nw) acc[o + i] = acc[o + i] or hor[si + i]
+            }
+        }
+        return acc
+    }
+
+    /**
+     * 打包列的水平區間 OR：out[x] = OR_{o=lo..hi} in[x + o]（範圍外視為 0）。
+     *
+     * ⚠️ 不能「先倍增出 [0, len) 再整體平移 lo」：lo < 0 時 out[0] 要讀倍增結果的第 −1 格，那一格（含 in[0..]）
+     * 沒存在陣列裡 ⇒ 左緣少一圈。所以跨 0 的區間拆成往左（負移位倍增）與往右（正移位倍增）兩半；整段在 0 的
+     * 同一側時才倍增後平移，平移方向讀到的界外格本來就是 0。
+     */
+    private fun packedRangeOr(src: LongArray, nw: Int, h: Int, w: Int, lo: Int, hi: Int): LongArray {
+        if (lo >= 0) {                                   // 全在右側：a[x] = OR in[x .. x+len−1]，再往右讀 lo
+            val a = packedDouble(src, nw, h, w, hi - lo + 1, 1)
+            return if (lo == 0) a else shiftPacked(a, nw, h, w, lo)
+        }
+        if (hi <= 0) {                                   // 全在左側：a[x] = OR in[x−len+1 .. x]，再往左讀 −hi
+            val a = packedDouble(src, nw, h, w, hi - lo + 1, -1)
+            return if (hi == 0) a else shiftPacked(a, nw, h, w, hi)
+        }
+        val left = packedDouble(src, nw, h, w, 1 - lo, -1)
+        val right = packedDouble(src, nw, h, w, hi + 1, 1)
+        for (i in left.indices) left[i] = left[i] or right[i]
+        return left
+    }
+
+    /**
+     * 倍增：dir = 1 ⇒ out[x] = OR in[x .. x+n−1]；dir = −1 ⇒ out[x] = OR in[x−n+1 .. x]。
+     * n = 1 時回傳複本（呼叫端會就地改寫）。
+     */
+    private fun packedDouble(src: LongArray, nw: Int, h: Int, w: Int, n: Int, dir: Int): LongArray {
+        var a = src
+        var span = 1
+        while (span * 2 <= n) {
+            a = orShifted(a, a, nw, h, w, dir * span)
+            span *= 2
+        }
+        if (span < n) a = orShifted(a, a, nw, h, w, dir * (n - span))
+        return if (a === src) src.copyOf() else a
+    }
+
+    /** x | shift(y, s)：shift 見 [shiftPacked]。 */
+    private fun orShifted(x: LongArray, y: LongArray, nw: Int, h: Int, w: Int, s: Int): LongArray {
+        val t = shiftPacked(y, nw, h, w, s)
+        for (i in t.indices) t[i] = t[i] or x[i]
+        return t
+    }
+
+    /**
+     * 打包列平移：out[x] = in[x + s]（逐列、範圍外視為 0）。s < 0 會把位元推過寬度 w，末字的尾巴要清掉，
+     * 否則下一趟往回移時會漏回影像內。
+     */
+    private fun shiftPacked(src: LongArray, nw: Int, h: Int, w: Int, s: Int): LongArray {
+        val out = LongArray(src.size)
+        val tail = if (w and 63 == 0) -1L else (1L shl (w and 63)) - 1
+        if (s >= 0) {
+            val q = s ushr 6
+            val r = s and 63
+            for (y in 0 until h) {
+                val b = y * nw
+                for (i in 0 until nw) {
+                    val j = i + q
+                    if (j >= nw) break
+                    var v = src[b + j] ushr r
+                    if (r != 0 && j + 1 < nw) v = v or (src[b + j + 1] shl (64 - r))
+                    out[b + i] = v
+                }
+            }
+        } else {
+            val u = -s
+            val q = u ushr 6
+            val r = u and 63
+            for (y in 0 until h) {
+                val b = y * nw
+                for (i in 0 until nw) {
+                    val j = i - q
+                    if (j < 0) continue
+                    var v = src[b + j] shl r
+                    if (r != 0 && j - 1 >= 0) v = v or (src[b + j - 1] ushr (64 - r))
+                    out[b + i] = v
+                }
+                out[b + nw - 1] = out[b + nw - 1] and tail
+            }
+        }
+        return out
+    }
+
+    /**
      * 列分解的膨脹。核的每一列是一段 run，所以該列的貢獻＝「原圖某一行的某個水平區間內有沒有
      * true」——用每行的 prefix count O(1) 查詢，總複雜度 O(W·H·kh)。
      *
@@ -1087,6 +1247,804 @@ object Cv {
                 val cnt = integral[d * (pw + 1) + c] - integral[b * (pw + 1) + c] -
                     integral[d * (pw + 1) + a] + integral[b * (pw + 1) + a]
                 out.data[y * w + x] = cnt >= need
+            }
+        }
+        return out
+    }
+
+    // ── 繪圖（cv2.line / cv2.fillPoly，LINE_8、shift 0）──────────────────────
+    //
+    // 逐行移植 OpenCV 4.11 `modules/imgproc/src/drawing.cpp`：LineIterator（8 連通、左到右）、Line2（16 位定點）、
+    // FillConvexPoly、Circle（實心）、ThickLine、CollectPolyEdges + FillEdgeCollection、clipLine。
+    // 點陣化規則（端點捨入、邊的定點斜率、掃描線左右端的取整）全照 cv2——格溝偵測拿它畫框線、延長線與走廊，
+    // 差一顆像素就會連鎖改變溝網連通與頁邊判定。只支援單通道遮罩、顏色＝true。
+
+    private const val XY_SHIFT = 16
+    private const val XY_ONE = 1L shl XY_SHIFT
+
+    /** `cv::clipLine(Size2l, Point2l&, Point2l&)`：把線段裁進 [0,w)×[0,h)；回傳是否有落在影像內的部分。 */
+    private fun clipLine(w: Long, h: Long, p: LongArray): Boolean {
+        // p = [x1, y1, x2, y2]，就地修改
+        if (w <= 0 || h <= 0) return false
+        val right = w - 1
+        val bottom = h - 1
+        var x1 = p[0]; var y1 = p[1]; var x2 = p[2]; var y2 = p[3]
+        fun code(x: Long, y: Long) =
+            (if (x < 0) 1 else 0) + (if (x > right) 2 else 0) + (if (y < 0) 4 else 0) + (if (y > bottom) 8 else 0)
+        var c1 = code(x1, y1)
+        var c2 = code(x2, y2)
+        if ((c1 and c2) == 0 && (c1 or c2) != 0) {
+            var a: Long
+            if ((c1 and 12) != 0) {
+                a = if (c1 < 8) 0 else bottom
+                x1 += ((a - y1).toDouble() * (x2 - x1).toDouble() / (y2 - y1).toDouble()).toLong()
+                y1 = a
+                c1 = (if (x1 < 0) 1 else 0) + (if (x1 > right) 2 else 0)
+            }
+            if ((c2 and 12) != 0) {
+                a = if (c2 < 8) 0 else bottom
+                x2 += ((a - y2).toDouble() * (x2 - x1).toDouble() / (y2 - y1).toDouble()).toLong()
+                y2 = a
+                c2 = (if (x2 < 0) 1 else 0) + (if (x2 > right) 2 else 0)
+            }
+            if ((c1 and c2) == 0 && (c1 or c2) != 0) {
+                if (c1 != 0) {
+                    a = if (c1 == 1) 0 else right
+                    y1 += ((a - x1).toDouble() * (y2 - y1).toDouble() / (x2 - x1).toDouble()).toLong()
+                    x1 = a
+                    c1 = 0
+                }
+                if (c2 != 0) {
+                    a = if (c2 == 1) 0 else right
+                    y2 += ((a - x2).toDouble() * (y2 - y1).toDouble() / (x2 - x1).toDouble()).toLong()
+                    x2 = a
+                    c2 = 0
+                }
+            }
+        }
+        p[0] = x1; p[1] = y1; p[2] = x2; p[3] = y2
+        return (c1 or c2) == 0
+    }
+
+    private fun hline(m: Mask, y: Int, xl: Int, xr: Int) {
+        val base = y * m.w
+        for (x in xl..xr) m.data[base + x] = true
+    }
+
+    /** cv2 `Line()`（thickness 1、LINE_8）：`LineIterator(img, p1, p2, 8, leftToRight=true)`，端點在外先 clipLine。 */
+    private fun lineIter(m: Mask, ax: Int, ay: Int, bx: Int, by: Int) {
+        val w = m.w
+        val h = m.h
+        var x1 = ax; var y1 = ay; var x2 = bx; var y2 = by
+        if (x1 < 0 || x1 >= w || x2 < 0 || x2 >= w || y1 < 0 || y1 >= h || y2 < 0 || y2 >= h) {
+            val p = longArrayOf(x1.toLong(), y1.toLong(), x2.toLong(), y2.toLong())
+            if (!clipLine(w.toLong(), h.toLong(), p)) return
+            x1 = p[0].toInt(); y1 = p[1].toInt(); x2 = p[2].toInt(); y2 = p[3].toInt()
+        }
+        var deltaX = 1
+        var deltaY = 1
+        var dx = x2 - x1
+        var dy = y2 - y1
+        if (dx < 0) {                      // leftToRight：從左端開始
+            dx = -dx; dy = -dy
+            x1 = x2; y1 = y2
+        }
+        if (dy < 0) { dy = -dy; deltaY = -1 }
+        val vert = dy > dx
+        if (vert) {
+            val t = dx; dx = dy; dy = t
+            val td = deltaX; deltaX = deltaY; deltaY = td
+        }
+        var err = dx - (dy + dy)
+        val plusDelta = dx + dx
+        val minusDelta = -(dy + dy)
+        var minusShift = deltaX
+        var plusShift = 0
+        var minusStep = 0
+        var plusStep = deltaY
+        val count = dx + 1
+        if (vert) {
+            var t = plusStep; plusStep = plusShift; plusShift = t
+            t = minusStep; minusStep = minusShift; minusShift = t
+        }
+        var px = x1
+        var py = y1
+        for (i in 0 until count) {
+            m.data[py * w + px] = true
+            val mask = if (err < 0) -1 else 0
+            err += minusDelta + (plusDelta.toInt() and mask)
+            px += minusShift + (plusShift and mask)
+            py += minusStep + (plusStep and mask)
+        }
+    }
+
+    /** cv2 `Line2()`：16 位定點端點的細線（FillConvexPoly 在 shift≠0 時畫邊用）。 */
+    private fun line2(m: Mask, p1x0: Long, p1y0: Long, p2x0: Long, p2y0: Long) {
+        val w = m.w
+        val h = m.h
+        val p = longArrayOf(p1x0, p1y0, p2x0, p2y0)
+        if (!clipLine(w.toLong() shl XY_SHIFT, h.toLong() shl XY_SHIFT, p)) return
+        var pt1x = p[0]; var pt1y = p[1]; var pt2x = p[2]; var pt2y = p[3]
+        var dx = pt2x - pt1x
+        var dy = pt2y - pt1y
+        val j = if (dx < 0) -1L else 0L
+        val ax = (dx xor j) - j
+        val i = if (dy < 0) -1L else 0L
+        val ay = (dy xor i) - i
+        val xStep: Long
+        val yStep: Long
+        var ecount: Int
+        if (ax > ay) {
+            dy = (dy xor j) - j
+            pt1x = pt1x xor (pt2x and j); pt2x = pt2x xor (pt1x and j); pt1x = pt1x xor (pt2x and j)
+            pt1y = pt1y xor (pt2y and j); pt2y = pt2y xor (pt1y and j); pt1y = pt1y xor (pt2y and j)
+            xStep = XY_ONE
+            yStep = dy * (1L shl XY_SHIFT) / (ax or 1L)
+            ecount = ((pt2x - pt1x) shr XY_SHIFT).toInt()
+        } else {
+            dx = (dx xor i) - i
+            pt1x = pt1x xor (pt2x and i); pt2x = pt2x xor (pt1x and i); pt1x = pt1x xor (pt2x and i)
+            pt1y = pt1y xor (pt2y and i); pt2y = pt2y xor (pt1y and i); pt1y = pt1y xor (pt2y and i)
+            xStep = dx * (1L shl XY_SHIFT) / (ay or 1L)
+            yStep = XY_ONE
+            ecount = ((pt2y - pt1y) shr XY_SHIFT).toInt()
+        }
+        pt1x += XY_ONE shr 1
+        pt1y += XY_ONE shr 1
+        fun put(x: Long, y: Long) {
+            if (x in 0 until w && y in 0 until h) m.data[y.toInt() * w + x.toInt()] = true
+        }
+        put((pt2x + (XY_ONE shr 1)) shr XY_SHIFT, (pt2y + (XY_ONE shr 1)) shr XY_SHIFT)
+        if (ax > ay) {
+            pt1x = pt1x shr XY_SHIFT
+            while (ecount >= 0) {
+                put(pt1x, pt1y shr XY_SHIFT)
+                pt1x++
+                pt1y += yStep
+                ecount--
+            }
+        } else {
+            pt1y = pt1y shr XY_SHIFT
+            while (ecount >= 0) {
+                put(pt1x shr XY_SHIFT, pt1y)
+                pt1x += xStep
+                pt1y++
+                ecount--
+            }
+        }
+    }
+
+    /** cv2 `FillConvexPoly()`（LINE_8）。vx/vy 是 `shift` 位定點座標。 */
+    private fun fillConvexPoly(m: Mask, vx: LongArray, vy: LongArray, shift: Int) {
+        val npts = vx.size
+        val w = m.w
+        val h = m.h
+        val delta = (1 shl shift) shr 1
+        val delta1 = XY_ONE shr 1
+        val delta2 = XY_ONE shr 1
+        var imin = 0
+        var edges = npts
+        var p0x = vx[npts - 1] shl (XY_SHIFT - shift)
+        var p0y = vy[npts - 1] shl (XY_SHIFT - shift)
+        var xmin = vx[0]; var xmax = vx[0]
+        var ymin = vy[0]; var ymax = vy[0]
+        for (i in 0 until npts) {
+            var px = vx[i]
+            var py = vy[i]
+            if (py < ymin) { ymin = py; imin = i }
+            ymax = max(ymax, py)
+            xmax = max(xmax, px)
+            xmin = min(xmin, px)
+            px = px shl (XY_SHIFT - shift)
+            py = py shl (XY_SHIFT - shift)
+            if (shift == 0) {
+                lineIter(m, (p0x shr XY_SHIFT).toInt(), (p0y shr XY_SHIFT).toInt(),
+                    (px shr XY_SHIFT).toInt(), (py shr XY_SHIFT).toInt())
+            } else {
+                line2(m, p0x, p0y, px, py)
+            }
+            p0x = px
+            p0y = py
+        }
+        xmin = (xmin + delta) shr shift
+        xmax = (xmax + delta) shr shift
+        ymin = (ymin + delta) shr shift
+        ymax = (ymax + delta) shr shift
+        if (npts < 3 || xmax.toInt() < 0 || ymax.toInt() < 0 || xmin.toInt() >= w || ymin.toInt() >= h) return
+        ymax = min(ymax, (h - 1).toLong())
+        val eIdx = intArrayOf(imin, imin)
+        val eDi = intArrayOf(1, npts - 1)
+        val eX = longArrayOf(-XY_ONE, -XY_ONE)
+        val eDx = longArrayOf(0, 0)
+        var y = ymin.toInt()
+        val eYe = intArrayOf(y, y)
+        do {
+            for (i in 0..1) {
+                if (y >= eYe[i]) {
+                    var idx0 = eIdx[i]
+                    val di = eDi[i]
+                    var idx = idx0 + di
+                    if (idx >= npts) idx -= npts
+                    var ty: Int
+                    while (true) {
+                        val cont = edges > 0
+                        edges--
+                        if (!cont) break
+                        ty = ((vy[idx] + delta) shr shift).toInt()
+                        if (ty > y) {
+                            var xs = vx[idx0]
+                            var xe = vx[idx]
+                            if (shift != XY_SHIFT) {
+                                xs = xs shl (XY_SHIFT - shift)
+                                xe = xe shl (XY_SHIFT - shift)
+                            }
+                            eYe[i] = ty
+                            eDx[i] = ((xe - xs) * 2 + (ty.toLong() - y)) / (2 * (ty.toLong() - y))
+                            eX[i] = xs
+                            eIdx[i] = idx
+                            break
+                        }
+                        idx0 = idx
+                        idx += di
+                        if (idx >= npts) idx -= npts
+                    }
+                }
+            }
+            if (edges < 0) break
+            if (y >= 0) {
+                var left = 0
+                var right = 1
+                if (eX[0] > eX[1]) { left = 1; right = 0 }
+                var xx1 = ((eX[left] + delta1) shr XY_SHIFT).toInt()
+                var xx2 = ((eX[right] + delta2) shr XY_SHIFT).toInt()
+                if (xx2 >= 0 && xx1 < w) {
+                    if (xx1 < 0) xx1 = 0
+                    if (xx2 >= w) xx2 = w - 1
+                    hline(m, y, xx1, xx2)
+                }
+            }
+            eX[0] += eDx[0]
+            eX[1] += eDx[1]
+        } while (++y <= ymax.toInt())
+    }
+
+    /** cv2 `Circle(img, center, radius, color, fill=1)`：實心圓（Bresenham 式逐列水平線）。 */
+    private fun fillCircle(m: Mask, cx: Int, cy: Int, radius: Int) {
+        val w = m.w
+        val h = m.h
+        var err = 0L
+        var dx = radius.toLong()
+        var dy = 0L
+        var plus = 1L
+        var minus = (radius.toLong() shl 1) - 1
+        val inside = cx >= radius && cx < w - radius && cy >= radius && cy < h - radius
+        while (dx >= dy) {
+            val y11 = cy - dy; val y12 = cy + dy; val y21 = cy - dx; val y22 = cy + dx
+            var x11 = cx - dx; var x12 = cx + dx; var x21 = cx - dy; var x22 = cx + dy
+            if (inside) {
+                hline(m, y11.toInt(), x11.toInt(), x12.toInt())
+                hline(m, y12.toInt(), x11.toInt(), x12.toInt())
+                hline(m, y21.toInt(), x21.toInt(), x22.toInt())
+                hline(m, y22.toInt(), x21.toInt(), x22.toInt())
+            } else if (x11 < w && x12 >= 0 && y21 < h && y22 >= 0) {
+                x11 = max(x11, 0L)
+                x12 = min(x12, (w - 1).toLong())
+                if (y11 >= 0 && y11 < h) hline(m, y11.toInt(), x11.toInt(), x12.toInt())
+                if (y12 >= 0 && y12 < h) hline(m, y12.toInt(), x11.toInt(), x12.toInt())
+                if (x21 < w && x22 >= 0) {
+                    x21 = max(x21, 0L)
+                    x22 = min(x22, (w - 1).toLong())
+                    if (y21 >= 0 && y21 < h) hline(m, y21.toInt(), x21.toInt(), x22.toInt())
+                    if (y22 >= 0 && y22 < h) hline(m, y22.toInt(), x21.toInt(), x22.toInt())
+                }
+            }
+            dy++
+            err += plus
+            plus += 2
+            val mask = if (err <= 0) 0L else -1L
+            err -= minus and mask
+            dx += mask
+            minus -= mask and 2L
+        }
+    }
+
+    /**
+     * `cv2.line(m, (x0,y0), (x1,y1), 1, thickness)`（LINE_8、shift 0）＝ThickLine：thickness ≤ 1 走 LineIterator；
+     * 否則定點平行四邊形（FillConvexPoly，半寬 = thickness/2 沿法向、`cvRound` 半數取偶）＋兩端各一個實心圓
+     * （半徑 (thickness+1)/2，即 thickness=2r+1 時為 r+1）。端點可在影像外（照 cv2 裁切）。
+     */
+    fun line(m: Mask, x0: Int, y0: Int, x1: Int, y1: Int, thickness: Int) {
+        var p0x = x0.toLong() shl XY_SHIFT
+        var p0y = y0.toLong() shl XY_SHIFT
+        val p1x = x1.toLong() shl XY_SHIFT
+        val p1y = y1.toLong() shl XY_SHIFT
+        if (thickness <= 1) {
+            lineIter(m, x0, y0, x1, y1)
+            return
+        }
+        val inv = 1.0 / XY_ONE.toDouble()
+        val dx = (p0x - p1x) * inv
+        val dy = (p1y - p0y) * inv
+        var r = dx * dx + dy * dy
+        val odd = thickness and 1
+        val th = thickness.toLong() shl (XY_SHIFT - 1)
+        if (abs(r) > 2.220446049250313e-16) {
+            r = (th + odd * XY_ONE * 0.5) / sqrt(r)
+            val dpx = Math.rint(dy * r).toLong()      // cvRound：半數取偶
+            val dpy = Math.rint(dx * r).toLong()
+            fillConvexPoly(
+                m,
+                longArrayOf(p0x + dpx, p0x - dpx, p1x - dpx, p1x + dpx),
+                longArrayOf(p0y + dpy, p0y - dpy, p1y - dpy, p1y + dpy),
+                XY_SHIFT,
+            )
+        }
+        val rad = ((th + (XY_ONE shr 1)) shr XY_SHIFT).toInt()
+        for (i in 0..1) {
+            val cx = ((p0x + (XY_ONE shr 1)) shr XY_SHIFT).toInt()
+            val cy = ((p0y + (XY_ONE shr 1)) shr XY_SHIFT).toInt()
+            fillCircle(m, cx, cy, rad)
+            p0x = p1x
+            p0y = p1y
+        }
+    }
+
+    /**
+     * `cv2.fillPoly(m, [pts], 1)`（單一多邊形、LINE_8、shift 0）：CollectPolyEdges（先用 LineIterator 畫外框、
+     * 裁切後的端點修正邊的起點）＋ FillEdgeCollection（活動邊表逐列掃描、左端 ceil 右端 floor）。
+     * 頂點可在影像外。
+     */
+    fun fillPoly(m: Mask, xs: IntArray, ys: IntArray) {
+        val count = xs.size
+        val w = m.w
+        val h = m.h
+        // ── CollectPolyEdges（offset 0、shift 0 ⇒ delta 0）──
+        val ey0 = IntArray(count)
+        val ey1 = IntArray(count)
+        val ex = LongArray(count + 1)
+        val edx = LongArray(count + 1)
+        var total = 0
+        var pt0x = xs[count - 1].toLong() shl XY_SHIFT
+        var pt0y = ys[count - 1].toLong()
+        for (i in 0 until count) {
+            val pt1x = xs[i].toLong() shl XY_SHIFT
+            val pt1y = ys[i].toLong()
+            var pt0cy = pt0y
+            var pt1cy = pt1y
+            val t = longArrayOf((pt0x + (XY_ONE shr 1)) shr XY_SHIFT, pt0y, (pt1x + (XY_ONE shr 1)) shr XY_SHIFT, pt1y)
+            lineIter(m, t[0].toInt(), t[1].toInt(), t[2].toInt(), t[3].toInt())
+            if (t[0] < 0 || t[0] >= w || t[2] < 0 || t[2] >= w || t[1] < 0 || t[1] >= h || t[3] < 0 || t[3] >= h) {
+                clipLine(w.toLong(), h.toLong(), t)
+                if (t[1] != t[3]) { pt0cy = t[1]; pt1cy = t[3] }
+            }
+            val pt0cx = t[0] shl XY_SHIFT
+            val pt1cx = t[2] shl XY_SHIFT
+            if (pt0y != pt1y) {
+                val dxe = (pt1cx - pt0cx) / (pt1cy - pt0cy)
+                if (pt0y < pt1y) {
+                    ey0[total] = pt0y.toInt(); ey1[total] = pt1y.toInt()
+                    ex[total] = pt0cx + (pt0y - pt0cy) * dxe
+                } else {
+                    ey0[total] = pt1y.toInt(); ey1[total] = pt0y.toInt()
+                    ex[total] = pt1cx + (pt1y - pt1cy) * dxe
+                }
+                edx[total] = dxe
+                total++
+            }
+            pt0x = pt1x
+            pt0y = pt1y
+        }
+        // ── FillEdgeCollection ──
+        if (total < 2) return
+        val delta = XY_ONE - 1
+        var yMax = Int.MIN_VALUE
+        var yMin = Int.MAX_VALUE
+        var xMax = -1L
+        var xMin = Long.MAX_VALUE
+        for (i in 0 until total) {
+            val x1 = ex[i] + (ey1[i] - ey0[i]).toLong() * edx[i]
+            yMin = min(yMin, ey0[i]); yMax = max(yMax, ey1[i])
+            xMin = min(xMin, ex[i]); xMax = max(xMax, ex[i])
+            xMin = min(xMin, x1); xMax = max(xMax, x1)
+        }
+        if (yMax < 0 || yMin >= h || xMax < 0 || xMin >= (w.toLong() shl XY_SHIFT)) return
+        // CmpEdges：y0、x、dx 遞增。std::sort 在 ≤16 個元素時是插入排序（穩定）⇒ 這裡用穩定排序
+        val order = (0 until total).sortedWith(compareBy<Int>({ ey0[it] }, { ex[it] }, { edx[it] }))
+        val sy0 = IntArray(total + 1); val sy1 = IntArray(total + 1)
+        val sx = LongArray(total + 1); val sdx = LongArray(total + 1)
+        for ((k, o) in order.withIndex()) { sy0[k] = ey0[o]; sy1[k] = ey1[o]; sx[k] = ex[o]; sdx[k] = edx[o] }
+        sy0[total] = Int.MAX_VALUE                     // 哨兵（edges.push_back(tmp)）
+        val next = IntArray(total + 2) { -1 }
+        val head = total + 1                           // tmp（活動邊表的頭）
+        var i = 0
+        var e = 0
+        yMax = min(yMax, h)
+        var y = sy0[e]
+        while (y < yMax) {
+            var draw = 0
+            val clipline = y < 0
+            var prelast = head
+            var last = next[head]
+            while (last >= 0 || sy0[e] == y) {
+                if (last >= 0 && sy1[last] == y) {
+                    next[prelast] = next[last]
+                    last = next[last]
+                    continue
+                }
+                val keepPrelast = prelast
+                if (last >= 0 && (sy0[e] > y || sx[last] < sx[e])) {
+                    prelast = last
+                    last = next[last]
+                } else if (i < total) {
+                    next[prelast] = e
+                    next[e] = last
+                    prelast = e
+                    e = ++i
+                } else {
+                    break
+                }
+                if (draw != 0) {
+                    if (!clipline) {
+                        var x1: Int
+                        var x2: Int
+                        if (sx[keepPrelast] > sx[prelast]) {
+                            x1 = ((sx[prelast] + delta) shr XY_SHIFT).toInt()
+                            x2 = (sx[keepPrelast] shr XY_SHIFT).toInt()
+                        } else {
+                            x1 = ((sx[keepPrelast] + delta) shr XY_SHIFT).toInt()
+                            x2 = (sx[prelast] shr XY_SHIFT).toInt()
+                        }
+                        if (x1 < w && x2 >= 0) {
+                            if (x1 < 0) x1 = 0
+                            if (x2 >= w) x2 = w - 1
+                            hline(m, y, x1, x2)
+                        }
+                    }
+                    sx[keepPrelast] += sdx[keepPrelast]
+                    sx[prelast] += sdx[prelast]
+                }
+                draw = draw xor 1
+            }
+            // 活動邊表依 x 泡沫排序
+            var keep = -1
+            do {
+                prelast = head
+                last = next[head]
+                var lastExchange = -1
+                while (last != keep && next[last] != -1) {
+                    val te = next[last]
+                    if (sx[last] > sx[te]) {
+                        next[prelast] = te
+                        next[last] = next[te]
+                        next[te] = last
+                        prelast = te
+                        lastExchange = prelast
+                    } else {
+                        prelast = last
+                        last = te
+                    }
+                }
+                if (lastExchange == -1) break
+                keep = lastExchange
+            } while (keep != next[head] && keep != head)
+            y++
+        }
+    }
+
+    // ── chamfer 距離變換（cv2.distanceTransform(DIST_L2, 3／5) 的非 IPP 路徑）──────────
+    //
+    // [distanceL2] 是精確歐氏；研究端拿 chamfer 值比門檻的地方（格溝的 NET_THICK）要用這個。
+    // 逐行移植 `distransform.cpp` 的 distanceTransform_3x3／_5x5：16 位定點（HV=round(0.955·2¹⁶)…）、
+    // 兩趟掃描、DIST_MAX 飽和。⚠️ pip 版 opencv 內建 IPP，實際走 `ippiDistanceTransform_*_8u32f`（浮點累加、
+    // 權重不同）：這裡的定點權重 62587/65536、89738/65536 對 0.955、1.3693 有 ≤ 5e-6 的相對誤差，隨距離累積；
+    // 但決策門檻（≥ 5）附近最近的 chamfer 值是 4.775／5.0629，差距遠大於此 ⇒ 門檻遮罩逐像素相同（47 頁實測）。
+    // `cv2.ipp.setUseIPP(False)` 時與這裡逐位元相同。
+
+    /** `cv2.distanceTransform(m, DIST_L2, maskSize)`，maskSize ∈ {3, 5}；前景＝true，輸出到最近背景的 chamfer 距離。 */
+    fun distanceChamfer(m: Mask, maskSize: Int): FImg {
+        require(maskSize == 3 || maskSize == 5) { "maskSize 只能 3 或 5" }
+        val w = m.w
+        val h = m.h
+        val border = if (maskSize == 3) 1 else 2
+        fun fix(v: Float): Long = Math.rint(v.toDouble() * (1 shl 16)).toLong()
+        val hv: Long
+        val diag: Long
+        val lng: Long
+        if (maskSize == 3) { hv = fix(0.955f); diag = fix(1.3693f); lng = 0 } else { hv = fix(1.0f); diag = fix(1.4f); lng = fix(2.1969f) }
+        val distMax = 0xFFFFFFFFL - (if (maskSize == 3) diag else lng)
+        val scale = 1f / (1 shl 16)
+        val sw = w + 2 * border
+        val sh = h + 2 * border
+        val t = LongArray(sw * sh)
+        for (bi in 0 until border) {
+            for (x in 0 until sw) { t[bi * sw + x] = distMax; t[(sh - 1 - bi) * sw + x] = distMax }
+        }
+        // 前向
+        for (y in 0 until h) {
+            val row = (y + border) * sw + border
+            for (bj in 0 until border) { t[row - bj - 1] = distMax; t[row + w + bj] = distMax }
+            val src = y * w
+            for (x in 0 until w) {
+                val j = row + x
+                if (!m.data[src + x]) { t[j] = 0; continue }
+                var t0: Long
+                if (maskSize == 3) {
+                    t0 = t[j - sw - 1] + diag
+                    var c = t[j - sw] + hv; if (t0 > c) t0 = c
+                    c = t[j - sw + 1] + diag; if (t0 > c) t0 = c
+                    c = t[j - 1] + hv; if (t0 > c) t0 = c
+                } else {
+                    t0 = t[j - sw * 2 - 1] + lng
+                    var c = t[j - sw * 2 + 1] + lng; if (t0 > c) t0 = c
+                    c = t[j - sw - 2] + lng; if (t0 > c) t0 = c
+                    c = t[j - sw - 1] + diag; if (t0 > c) t0 = c
+                    c = t[j - sw] + hv; if (t0 > c) t0 = c
+                    c = t[j - sw + 1] + diag; if (t0 > c) t0 = c
+                    c = t[j - sw + 2] + lng; if (t0 > c) t0 = c
+                    c = t[j - 1] + hv; if (t0 > c) t0 = c
+                }
+                t[j] = if (t0 > distMax) distMax else t0
+            }
+        }
+        // 後向
+        val out = FImg(w, h)
+        for (y in h - 1 downTo 0) {
+            val row = (y + border) * sw + border
+            for (x in w - 1 downTo 0) {
+                val j = row + x
+                var t0 = t[j]
+                if (t0 > hv) {
+                    if (maskSize == 3) {
+                        var c = t[j + sw + 1] + diag; if (t0 > c) t0 = c
+                        c = t[j + sw] + hv; if (t0 > c) t0 = c
+                        c = t[j + sw - 1] + diag; if (t0 > c) t0 = c
+                        c = t[j + 1] + hv; if (t0 > c) t0 = c
+                    } else {
+                        var c = t[j + sw * 2 + 1] + lng; if (t0 > c) t0 = c
+                        c = t[j + sw * 2 - 1] + lng; if (t0 > c) t0 = c
+                        c = t[j + sw + 2] + lng; if (t0 > c) t0 = c
+                        c = t[j + sw + 1] + diag; if (t0 > c) t0 = c
+                        c = t[j + sw] + hv; if (t0 > c) t0 = c
+                        c = t[j + sw - 1] + diag; if (t0 > c) t0 = c
+                        c = t[j + sw - 2] + lng; if (t0 > c) t0 = c
+                        c = t[j + 1] + hv; if (t0 > c) t0 = c
+                    }
+                    t[j] = t0
+                }
+                out.data[y * w + x] = t0.toFloat() * scale
+            }
+        }
+        return out
+    }
+
+    // ── numpy／LAPACK 相容的數值原語（格溝偵測的逐位元 parity 要用）──────────────────
+
+    /**
+     * `np.argsort(v)`（預設 kind='quicksort'）對 int32 的結果：numpy 1.26 在沒有 AVX-512 的機器上走
+     * `aquicksort_`（introsort：三數取中、≤16 插入排序、深度超過 2·⌊log2 n⌋ 改 heapsort）。**不穩定**——
+     * 同值的順序由這個演算法決定，格溝取峰的截斷（前 400 峰）與後續「同長度保持輸入順序」都吃它。
+     */
+    fun npArgsort(v: IntArray): IntArray {
+        val num = v.size
+        val ts = IntArray(num) { it }
+        if (num <= 1) return ts
+        val small = 15
+        var pl = 0
+        var pr = num - 1
+        val stack = IntArray(256)
+        var sp = 0
+        val depth = IntArray(128)
+        var dp = 0
+        var cdepth = 0
+        run { var u = num; while (u > 1) { u = u shr 1; cdepth++ }; cdepth *= 2 }
+        fun swap(a: Int, b: Int) { val t = ts[a]; ts[a] = ts[b]; ts[b] = t }
+        while (true) {
+            if (cdepth < 0) {
+                aheapsort(v, ts, pl, pr - pl + 1)
+            } else {
+                while (pr - pl > small) {
+                    val pm = pl + ((pr - pl) shr 1)
+                    if (v[ts[pm]] < v[ts[pl]]) swap(pm, pl)
+                    if (v[ts[pr]] < v[ts[pm]]) swap(pr, pm)
+                    if (v[ts[pm]] < v[ts[pl]]) swap(pm, pl)
+                    val vp = v[ts[pm]]
+                    var pi = pl
+                    var pj = pr - 1
+                    swap(pm, pj)
+                    while (true) {
+                        do { ++pi } while (v[ts[pi]] < vp)
+                        do { --pj } while (vp < v[ts[pj]])
+                        if (pi >= pj) break
+                        swap(pi, pj)
+                    }
+                    val pk = pr - 1
+                    swap(pi, pk)
+                    if (pi - pl < pr - pi) {
+                        stack[sp++] = pi + 1; stack[sp++] = pr
+                        pr = pi - 1
+                    } else {
+                        stack[sp++] = pl; stack[sp++] = pi - 1
+                        pl = pi + 1
+                    }
+                    depth[dp++] = --cdepth
+                }
+                // 插入排序
+                for (pi in pl + 1..pr) {
+                    val vi = ts[pi]
+                    val vpv = v[vi]
+                    var pj = pi
+                    var pk = pi - 1
+                    while (pj > pl && vpv < v[ts[pk]]) { ts[pj--] = ts[pk--] }
+                    ts[pj] = vi
+                }
+            }
+            if (sp == 0) break
+            pr = stack[--sp]
+            pl = stack[--sp]
+            cdepth = depth[--dp]
+        }
+        return ts
+    }
+
+    /** numpy `aheapsort_`（1-based 索引），給 [npArgsort] 的深度保護。 */
+    private fun aheapsort(v: IntArray, ts: IntArray, off: Int, n0: Int) {
+        val base = off - 1
+        var n = n0
+        var l = n shr 1
+        while (l > 0) {
+            val tmp = ts[base + l]
+            var i = l
+            var j = l shl 1
+            while (j <= n) {
+                if (j < n && v[ts[base + j]] < v[ts[base + j + 1]]) j += 1
+                if (v[tmp] < v[ts[base + j]]) { ts[base + i] = ts[base + j]; i = j; j += j } else break
+            }
+            ts[base + i] = tmp
+            l--
+        }
+        while (n > 1) {
+            val tmp = ts[base + n]
+            ts[base + n] = ts[base + 1]
+            n -= 1
+            var i = 1
+            var j = 2
+            while (j <= n) {
+                if (j < n && v[ts[base + j]] < v[ts[base + j + 1]]) j++
+                if (v[tmp] < v[ts[base + j]]) { ts[base + i] = ts[base + j]; i = j; j += j } else break
+            }
+            ts[base + i] = tmp
+        }
+    }
+
+    /**
+     * `np.sum`／`np.mean` 對連續 float64 陣列的加總：numpy 的**成對加總**（n < 8 逐項；≤ 128 八路累加器再
+     * `((r0+r1)+(r2+r3))+((r4+r5)+(r6+r7))`、餘數逐項；更長則對半遞迴，切點取 8 的倍數）。
+     */
+    fun npSum(a: DoubleArray, off: Int = 0, n: Int = a.size - off): Double {
+        if (n < 8) {
+            var s = 0.0
+            for (i in 0 until n) s += a[off + i]
+            return s
+        }
+        if (n <= 128) {
+            val r = DoubleArray(8) { a[off + it] }
+            var i = 8
+            val lim = n - (n % 8)
+            while (i < lim) {
+                for (j in 0 until 8) r[j] += a[off + i + j]
+                i += 8
+            }
+            var res = ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7]))
+            while (i < n) { res += a[off + i]; i++ }
+            return res
+        }
+        var n2 = n / 2
+        n2 -= n2 % 8
+        return npSum(a, off, n2) + npSum(a, off + n2, n - n2)
+    }
+
+    /**
+     * `np.linalg.eigh([[a, b], [b, c]])` 的特徵向量（LAPACK dsyevd → dstedc → dsteqr 的 2×2 路徑：dlaev2 ＋
+     * 旋轉 ＋ 特徵值遞增排序），逐位元重現。回傳 [w0, w1, v00, v10, v01, v11]（w 遞增；第 k 欄＝w_k 的向量）。
+     */
+    fun eigh2(a: Double, b: Double, c: Double): DoubleArray {
+        val eps = Math.ulp(1.0) / 2              // dlamch('E')＝2⁻⁵³
+        val safmin = java.lang.Double.MIN_NORMAL
+        var e = b
+        var w0: Double
+        var w1: Double
+        var z00 = 1.0; var z01 = 0.0; var z10 = 0.0; var z11 = 1.0
+        if (e != 0.0 && abs(e) <= (sqrt(abs(a)) * sqrt(abs(c))) * eps) e = 0.0
+        if (e == 0.0 || abs(e) * abs(e) <= (eps * eps * abs(a)) * abs(c) + safmin) {
+            w0 = a; w1 = c
+        } else {
+            // dlaev2
+            val sm = a + c
+            val df = a - c
+            val adf = abs(df)
+            val tb = e + e
+            val ab = abs(tb)
+            val acmx: Double
+            val acmn: Double
+            if (abs(a) > abs(c)) { acmx = a; acmn = c } else { acmx = c; acmn = a }
+            val rt = when {
+                adf > ab -> adf * sqrt(1.0 + (ab / adf) * (ab / adf))
+                adf < ab -> ab * sqrt(1.0 + (adf / ab) * (adf / ab))
+                else -> ab * sqrt(2.0)
+            }
+            val rt1: Double
+            val rt2: Double
+            val sgn1: Int
+            if (sm < 0.0) { rt1 = 0.5 * (sm - rt); sgn1 = -1; rt2 = (acmx / rt1) * acmn - (e / rt1) * e }
+            else if (sm > 0.0) { rt1 = 0.5 * (sm + rt); sgn1 = 1; rt2 = (acmx / rt1) * acmn - (e / rt1) * e }
+            else { rt1 = 0.5 * rt; rt2 = -0.5 * rt; sgn1 = 1 }
+            val cs: Double
+            val sgn2: Int
+            if (df >= 0.0) { cs = df + rt; sgn2 = 1 } else { cs = df - rt; sgn2 = -1 }
+            var cs1: Double
+            var sn1: Double
+            if (abs(cs) > ab) {
+                val ct = -tb / cs
+                sn1 = 1.0 / sqrt(1.0 + ct * ct)
+                cs1 = ct * sn1
+            } else if (ab == 0.0) {
+                cs1 = 1.0; sn1 = 0.0
+            } else {
+                val tn = -cs / tb
+                cs1 = 1.0 / sqrt(1.0 + tn * tn)
+                sn1 = tn * cs1
+            }
+            if (sgn1 == sgn2) { val tn = cs1; cs1 = -sn1; sn1 = tn }
+            w0 = rt1; w1 = rt2
+            z00 = cs1; z01 = -sn1; z10 = sn1; z11 = cs1
+        }
+        if (w1 < w0) {
+            val tw = w0; w0 = w1; w1 = tw
+            var t = z00; z00 = z01; z01 = t
+            t = z10; z10 = z11; z11 = t
+        }
+        return doubleArrayOf(w0, w1, z00, z10, z01, z11)
+    }
+
+    /**
+     * (2nt+1)×(2nr+1) 最大值濾波，列（θ）方向**環狀**、欄（ρ）方向界外視為 0（值域 ≥ 0 ⇒ 等於只看界內）。
+     * ＝ `scipy.ndimage.maximum_filter(s, size=(2nt+1, 2nr+1), mode=("wrap", "constant"))`。可分離：先欄後列。
+     */
+    fun maxFilterWrapRows(s: IntArray, rows: Int, cols: Int, nt: Int, nr: Int): IntArray {
+        // 欄方向：van Herk／Gil–Werman（分塊前綴／後綴極大），兩側各補 nr 個 0 ⇒ 每元素常數次比較
+        val k = 2 * nr + 1
+        val pl = cols + 2 * nr
+        val pad = IntArray(pl)
+        val pre = IntArray(pl)
+        val suf = IntArray(pl)
+        val tmp = IntArray(rows * cols)
+        for (r in 0 until rows) {
+            val base = r * cols
+            System.arraycopy(s, base, pad, nr, cols)
+            var i = 0
+            while (i < pl) {
+                val e = min(i + k, pl)
+                pre[i] = pad[i]
+                for (j in i + 1 until e) pre[j] = max(pre[j - 1], pad[j])
+                suf[e - 1] = pad[e - 1]
+                for (j in e - 2 downTo i) suf[j] = max(suf[j + 1], pad[j])
+                i = e
+            }
+            // 窗 [c, c+k−1]（補零後座標）＝ max(suf[c], pre[c+k−1])
+            for (c in 0 until cols) tmp[base + c] = max(suf[c], pre[c + k - 1])
+        }
+        // 列方向（θ）：環狀、窗只有 2nt+1 列，直接取
+        val out = IntArray(rows * cols)
+        for (r in 0 until rows) {
+            val base = r * cols
+            System.arraycopy(tmp, base, out, base, cols)
+            for (q in 1..nt) {
+                val ub = (((r - q) % rows + rows) % rows) * cols
+                val db = ((r + q) % rows) * cols
+                for (c in 0 until cols) {
+                    var v = tmp[ub + c]; if (v > out[base + c]) out[base + c] = v
+                    v = tmp[db + c]; if (v > out[base + c]) out[base + c] = v
+                }
             }
         }
         return out

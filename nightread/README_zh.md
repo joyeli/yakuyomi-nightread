@@ -149,6 +149,7 @@ val charMask = Mask(w, h, BooleanArray(w * h) { a[it] || b[it] })
 | `gutter`、`bubble`、`charMask` | `Mask` | 中間遮罩，除錯與驗收用 |
 | `frameless` | `Boolean` | 頁型判別結果 |
 | `stickerAccept`、`stickerPromoted` | `Set<Int>` | 貼紙計畫，parity 檢查用 |
+| `sep` | `Mask?` | 實際塗的任意角度格溝／頁邊（`separators` 關時為 `null`），parity 檢查用 |
 
 ## 生命週期與執行緒
 
@@ -157,7 +158,7 @@ val charMask = Mask(w, h, BooleanArray(w * h) { a[it] || b[it] })
 
 ## 參數
 
-`NightReadParams` 是一個 data class，裝著這個模組的 118 個參數，預設值就是定案值。逐項說明見 [`docs/PARAMETERS_zh.md`](../docs/PARAMETERS_zh.md)，那份涵蓋整條管線；沒進 `NightReadParams` 的在模組外面——偵測遮罩的二值化門檻、只用於回報的白面積統計門檻、偽泡生長的參照邊（Kotlin 版固定取長邊），以及純研究開關 `BUBBLE_REQUIRE_CLEAN`。
+`NightReadParams` 是一個 data class，裝著這個模組的 120 個參數，外加兩組巢狀參數：任意角度格溝 `sep: SeparatorParams`（52 個）與出血格過濾 `bleed: BleedParams`（26 個），合計 198 個。預設值就是定案值。巢狀是不得已：平鋪進來建構子會超過 JVM 的 255 個參數槽（`Double` 佔兩槽），類別載入就 `ClassFormatError`。逐項說明見 [`docs/PARAMETERS_zh.md`](../docs/PARAMETERS_zh.md)，那份涵蓋整條管線；沒進 `NightReadParams` 的在模組外面——偵測遮罩的二值化門檻、只用於回報的白面積統計門檻、偽泡生長的參照邊（Kotlin 版固定取長邊），以及純研究開關 `BUBBLE_REQUIRE_CLEAN`。
 
 改它等於改演算法，不是調風格。門檻之間是連動的：分區方案建立在白元件的判斷上，動了前面一段的值，後面每一段都會跟著變。
 
@@ -171,15 +172,20 @@ val charMask = Mask(w, h, BooleanArray(w * h) { a[it] || b[it] })
 
 `TierParityTest` 拿兩張 fixture 頁跑三檔，對 `fixtures/baseline/tiers/` 比。
 
+另有兩個開關，預設都開、三檔也一律開：`separators`（任意角度格溝／頁邊，`Separators.kt`；研究端 `NIGHTREAD_SEP`）與
+`bleedFilter`（出血格過濾，`Bleed.kt`；研究端 `NIGHTREAD_BLEED`）。格溝在貼紙層之前用留白待遇塗，而且壓過人物遮罩（圖層：
+字 > 對話框 > 格溝／頁邊 > 人物 > 背景）；出血格過濾在兩條留白路徑的線稿密度否決之後，把其實是出血格畫面的塊拿掉。兩個都關＝
+加入前的輸出。見 `docs/PARAMETERS_zh.md`「任意角度格溝」「出血格過濾」與 `docs/DECISIONS.md`。
+
 ## 紅線
 
-**絕不塗到臉、手、白衣、白髮。** 唯一可接受的失敗是「不夠暗」。驗收靠 704 個人工標註的前景框，目前 18 框違規。
+**絕不塗到臉、手、白衣、白髮。** 唯一可接受的失敗是「不夠暗」。驗收靠 704 個人工標註的前景框，目前 18 框違規（664 框的 fixture 子集；ch34_006 有一框其實畫在斜格溝上，已修正標註，見 `docs/DECISIONS.md`）。
 
 要達到這條線必須有人物語意遮罩：純幾何最好也只能到 37 框，而且要付 14 個百分點的亮區代價。
 
 ## Python 端
 
-`research/nightread.py` 是同一條管線的 Python 版，也是 Kotlin 移植的規格本。進入點是 `run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None)`：`regions` 與 `seg` 傳進去就跳過偵測，形狀與 `NightReadInput` 相同。
+`research/nightread.py` 是同一條管線的 Python 版，也是 Kotlin 移植的規格本。進入點是 `run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None, diag=None)`：`regions` 與 `seg` 傳進去就跳過偵測，形狀與 `NightReadInput` 相同。
 
 研究腳本會 import yakuyomi-engine 的 parity 工具做偵測，靠 `YAKU_ENGINE_CLONE` 環境變數指路。那是研究腳本的便利，不是管線本身的要求。
 

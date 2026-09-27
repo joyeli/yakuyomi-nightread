@@ -132,7 +132,86 @@ def main():
         f.write(f"contourLength {perim:.6f}\n")
         f.write(f"maskCount {int(m.sum())}\n")
 
+    sep_fixtures(o, g, m)
     print(f"→ {o}（{len(os.listdir(o))} 個檔）")
+
+
+def sep_fixtures(o, g, m):
+    """格溝偵測（nightread_sep.py）用到的 cv2／numpy／scipy 原語：Cv.line／fillPoly／distanceChamfer／
+    maxFilterWrapRows／npArgsort／npSum／eigh2 的正確答案。案例用固定亂數種子產生，重跑逐位元相同。"""
+    rng = np.random.default_rng(20260927)
+    S = 48                                              # 繪圖案例的畫布邊長；多個案例縱向疊成一張
+
+    # ── cv2.line（LINE_8、thickness 1／3／7／17；端點含影像外、零長度、近水平／近垂直）
+    lines = [(5, 5, 40, 12, 1), (3, 44, 44, 3, 1), (-10, 20, 60, 25, 1), (24, 24, 24, 24, 1),
+             (5, 5, 40, 12, 3), (10, 40, 12, 2, 3), (24, 24, 24, 24, 3), (-5, -5, 30, 50, 3),
+             (8, 30, 40, 31, 7), (40, 5, 6, 45, 7), (20, 20, 20, 20, 7), (-20, 10, 70, 14, 7),
+             (5, 24, 43, 24, 17), (24, 3, 25, 45, 17), (30, 30, 30, 30, 17), (-8, 50, 55, -6, 17)]
+    for _ in range(16):
+        x0, y0, x1, y1 = (int(v) for v in rng.integers(-15, S + 15, 4))
+        lines.append((x0, y0, x1, y1, int(rng.choice([1, 3, 7, 17]))))
+    big = np.zeros((S * len(lines), S), np.uint8)
+    with open(os.path.join(o, "line_cases.txt"), "w", encoding="utf-8") as f:
+        for i, (x0, y0, x1, y1, t) in enumerate(lines):
+            c = np.zeros((S, S), np.uint8)
+            cv2.line(c, (x0, y0), (x1, y1), 1, t)
+            big[i * S:(i + 1) * S] = c
+            f.write(f"{x0} {y0} {x1} {y1} {t}\n")
+    write(os.path.join(o, "line.bin"), big, 0)
+
+    # ── cv2.fillPoly（單一多邊形、LINE_8；凸／凹、跨出影像、退化成線、極小）
+    polys = [[(5, 5), (40, 8), (35, 40), (8, 30)], [(-10, 10), (30, -5), (60, 30), (20, 60)],
+             [(24, 24), (24, 24), (25, 25), (24, 25)], [(5, 5), (40, 40), (5, 40), (40, 5)],
+             [(10, 10), (38, 10), (38, 11), (10, 11)], [(3, 20), (45, 21), (44, 22), (2, 21)],
+             [(-30, -30), (80, -30), (80, 80), (-30, 80)], [(10, 40), (20, 5), (30, 40), (20, 30)]]
+    for _ in range(16):
+        polys.append([(int(rng.integers(-12, S + 12)), int(rng.integers(-12, S + 12))) for _ in range(4)])
+    big = np.zeros((S * len(polys), S), np.uint8)
+    with open(os.path.join(o, "fillpoly_cases.txt"), "w", encoding="utf-8") as f:
+        for i, pts in enumerate(polys):
+            c = np.zeros((S, S), np.uint8)
+            cv2.fillPoly(c, [np.array(pts, np.int32)], 1)
+            big[i * S:(i + 1) * S] = c
+            f.write(" ".join(f"{x} {y}" for x, y in pts) + "\n")
+    write(os.path.join(o, "fillpoly.bin"), big, 0)
+
+    # ── cv2.distanceTransform(DIST_L2, 3／5)：關掉 IPP＝OpenCV 自己的定點 chamfer（逐位元）；開著 IPP 的值另存（容差）
+    ipp = cv2.ipp.useIPP()
+    cv2.ipp.setUseIPP(False)
+    write(os.path.join(o, "chamfer3.bin"), cv2.distanceTransform(m, cv2.DIST_L2, 3), 2)
+    write(os.path.join(o, "chamfer5.bin"), cv2.distanceTransform(m, cv2.DIST_L2, 5), 2)
+    cv2.ipp.setUseIPP(True)
+    write(os.path.join(o, "chamfer3_ipp.bin"), cv2.distanceTransform(m, cv2.DIST_L2, 3), 2)
+    write(os.path.join(o, "chamfer5_ipp.bin"), cv2.distanceTransform(m, cv2.DIST_L2, 5), 2)
+    cv2.ipp.setUseIPP(ipp)
+
+    # ── scipy maximum_filter（θ 環狀、ρ 常數 0）＝ Hough 取峰的 NMS
+    from scipy.ndimage import maximum_filter
+    acc = rng.integers(0, 12, (24, 50)).astype(np.float32)
+    write(os.path.join(o, "maxfilt_in.bin"), acc, 2)
+    write(os.path.join(o, "maxfilt_out.bin"),
+          maximum_filter(acc, size=(7, 13), mode=("wrap", "constant"), cval=0).astype(np.float32), 2)
+
+    # ── np.argsort（int32、大量同值 ⇒ 看不穩定排序的同值順序）
+    v = (-rng.integers(0, 40, 3000)).astype(np.int32)
+    write(os.path.join(o, "argsort_in.bin"), v.reshape(1, -1).astype(np.float32), 2)
+    write(os.path.join(o, "argsort_out.bin"), np.argsort(v).reshape(1, -1).astype(np.float32), 2)
+
+    # ── np.sum（float64 成對加總）與 np.linalg.eigh（2×2）：純量用 repr 寫成文字（逐位元）
+    with open(os.path.join(o, "npsum.txt"), "w", encoding="utf-8") as f:
+        for n in (3, 8, 13, 128, 131, 700):
+            a = rng.normal(size=n) * np.exp(rng.normal(size=n) * 4)
+            f.write(repr(float(a.sum())) + " " + " ".join(repr(float(x)) for x in a) + "\n")
+    with open(os.path.join(o, "eigh2.txt"), "w", encoding="utf-8") as f:
+        cases = [(4.0, 0.0, 1.0), (1.0, 0.0, 4.0), (2.0, 0.0, 2.0), (3.0, 1.0, 3.0), (0.0, 0.0, 5.0)]
+        for _ in range(120):
+            a, c = float(rng.random() * 10.0 ** rng.integers(-2, 6)), float(rng.random() * 10.0 ** rng.integers(-2, 6))
+            k = int(rng.integers(0, 3))
+            b = 0.0 if k == 0 else float((rng.random() - 0.5) * (1e-15 * a if k == 1 else 10.0 ** rng.integers(-3, 5)))
+            cases.append((a, b, c))
+        for a, b, c in cases:
+            w, vv = np.linalg.eigh(np.array([[a, b], [b, c]]))
+            f.write(" ".join(repr(float(x)) for x in (a, b, c, w[0], w[1], vv[0, 0], vv[1, 0], vv[0, 1], vv[1, 1])) + "\n")
 
 
 if __name__ == "__main__":

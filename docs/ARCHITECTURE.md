@@ -269,7 +269,7 @@ Two implementations do work:
 
 | Metric | Value |
 |---|---|
-| Guard-box violations | 18 / 665 |
+| Guard-box violations | 18 / 664 |
 | Light area (share of the output at ≥110) | 38.6% |
 | Pipeline | 1351 lines of Python |
 
@@ -302,6 +302,8 @@ the rebuild.
 ```
 research/           desktop pipeline (the spec)
   nightread.py        the whole pipeline, one page at a time
+  nightread_sep.py    any-angle gutters and margins
+  nightread_bleed.py  bleed-panel filter
   nightread_batch.py  run the 11 fixture pages, print the light-area table
   nightread_guard.py  the red-line test: 704 guard boxes
   charmask.py         character-mask probe (cseg / yoloseg / union)

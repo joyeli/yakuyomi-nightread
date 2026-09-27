@@ -1,5 +1,6 @@
 package li.joye.yakuyomi.nightread
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.awt.image.BufferedImage
@@ -16,6 +17,10 @@ import kotlin.math.abs
  * 不要求逐位元：距離變換在 Python 是 chamfer 近似、Kotlin 是精確歐氏，這個差會沿著門檻
  * 傳遞。驗收看的是**視覺等價**——平均絕對差、大偏差像素的比例，以及最重要的紅線指標
  * 「原本是白的地方有沒有被塗黑」。
+ *
+ * 任意角度格溝（SEP）是例外：輸入（灰階、文字遮罩、泡、格線）在兩邊逐像素相同，所以實際塗的那份遮罩
+ * 逐像素比 python（`<頁>_sep.png`，make_page_fixture.py 的 `sep_masks`）；有框頁還要求它非空——
+ * 否則 SEP 沒接上也會因為別處的差剛好落在容差內而過關。
  */
 class PageParityTest {
 
@@ -60,13 +65,13 @@ class PageParityTest {
 
     /** 有框的黑白頁：留白、格內白、氣泡核心填色、貼框擢升全部走到。 */
     @Test
-    fun framedPageMatchesPythonPipeline() = checkPage("ch34_011")
+    fun framedPageMatchesPythonPipeline() = checkPage("ch34_011", expectSep = true)
 
-    /** 無框的水彩頁：走 frameless 分支，且紙白峰只有 223、彩度門必須擋住整片拉白。 */
+    /** 無框的水彩頁：走 frameless 分支，且紙白峰只有 223、彩度門必須擋住整片拉白。SEP 16 對全拒、一顆都不塗。 */
     @Test
-    fun framelessColourPageMatchesPythonPipeline() = checkPage("demo05")
+    fun framelessColourPageMatchesPythonPipeline() = checkPage("demo05", expectSep = false)
 
-    private fun checkPage(page: String) {
+    private fun checkPage(page: String, expectSep: Boolean) {
         val gray = readGray("${page}_gray.png")
         val input = NightReadInput(
             gray = gray,
@@ -95,6 +100,20 @@ class PageParityTest {
             }
             println("  $tag: python=${py.count()} kotlin=${kt.count()} 多=$only 少=$miss")
         }
+
+        // 任意角度格溝：同輸入 ⇒ 逐像素相同
+        val pySep = readMask("${page}_sep.png")
+        val ktSep = result.sep ?: error("$page：SEP 預設開，result.sep 不該是 null")
+        var sepMore = 0
+        var sepLess = 0
+        for (i in pySep.data.indices) {
+            if (ktSep.data[i] && !pySep.data[i]) sepMore++
+            if (!ktSep.data[i] && pySep.data[i]) sepLess++
+        }
+        println("  sep: python=${pySep.count()} kotlin=${ktSep.count()} 多=$sepMore 少=$sepLess")
+        assertEquals("$page 格溝遮罩 SEP 有無", expectSep, ktSep.any())
+        assertEquals("$page 格溝遮罩 SEP 多", 0, sepMore)
+        assertEquals("$page 格溝遮罩 SEP 少", 0, sepLess)
 
         // 失敗時要看得到圖，不然只能猜
         dump(got, "build/parity_${page}_kotlin.png")

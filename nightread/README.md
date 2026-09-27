@@ -185,6 +185,7 @@ without re-deriving them:
 | `gutter`, `bubble`, `charMask` | `Mask` | the intermediate masks, for debugging and acceptance |
 | `frameless` | `Boolean` | the page-type verdict |
 | `stickerAccept`, `stickerPromoted` | `Set<Int>` | the sticker plan, used by the parity checks |
+| `sep` | `Mask?` | the any-angle separators/margins actually painted (`null` when `separators` is off), used by the parity checks |
 
 ## Lifecycle and threading
 
@@ -195,8 +196,10 @@ without re-deriving them:
 
 ## Parameters
 
-`NightReadParams` is a `data class` holding the module's 118 parameters, and its defaults are the settled
-values. Per-item documentation is in [`docs/PARAMETERS.md`](../docs/PARAMETERS.md), which covers the whole
+`NightReadParams` is a `data class` holding the module's 120 parameters plus two nested groups — the any-angle
+separators, `sep: SeparatorParams` (52), and the bleed-panel filter, `bleed: BleedParams` (26) — 198 in all.
+Its defaults are the settled values. The nesting is forced: flattened, the constructor would exceed the JVM's
+255 parameter slots (a `Double` takes two) and the class would fail to load with `ClassFormatError`. Per-item documentation is in [`docs/PARAMETERS.md`](../docs/PARAMETERS.md), which covers the whole
 pipeline; the knobs that are not in `NightReadParams` sit outside the module — the detector's binarisation
 threshold, a report-only white-area threshold, the pseudo-bubble growth reference (which the Kotlin port fixes
 to the long edge) and the research-only toggle `BUBBLE_REQUIRE_CLEAN`.
@@ -219,10 +222,20 @@ the guard baselines are pinned to; the three product levels are parameter sets t
 
 `TierParityTest` runs the two fixture pages through all three against `fixtures/baseline/tiers/`.
 
+Two more switches default to on, and stay on in all three levels: `separators` (any-angle gutters and page
+margins, `Separators.kt`; `NIGHTREAD_SEP` on the research side) and `bleedFilter` (the bleed-panel filter,
+`Bleed.kt`; `NIGHTREAD_BLEED`). Separators are painted with the gutter treatment before the sticker layer and
+win over the character mask (layer order: text > bubbles > gutters/margins > characters > background); the
+bleed filter runs after the line-art veto in both gutter paths and drops the pieces that are really bleed-panel
+artwork. Both off reproduces the output from before they were added. See *Any-angle separators* and
+*Bleed-panel filter* in `docs/PARAMETERS.md`, and `docs/DECISIONS.md`.
+
 ## The red line
 
 **Never paint over a face, a hand, a white sleeve or white hair.** The only acceptable failure is "not dark
-enough". Acceptance is 704 hand-annotated foreground boxes; the pipeline currently sits at 18 violations.
+enough". Acceptance is 704 hand-annotated foreground boxes; the pipeline currently sits at 18 violations on
+the 664-box fixture subset (one ch34_006 box turned out to be drawn over a slanted gutter and was re-annotated —
+see `docs/DECISIONS.md`).
 
 Meeting that line requires a semantic character mask. Pure geometry tops out at 37 violations, and pays 14
 percentage points of light area to get there.
@@ -230,7 +243,7 @@ percentage points of light area to get there.
 ## The Python reference
 
 `research/nightread.py` is the same pipeline in Python and is the spec the Kotlin port is written against.
-Its entry point is `run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None)`: pass
+Its entry point is `run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None, diag=None)`: pass
 `regions` and `seg` and detection is skipped, which is the same shape as `NightReadInput`.
 
 The research scripts import yakuyomi-engine's parity tools to do detection, and find them through the

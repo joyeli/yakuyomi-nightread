@@ -14,7 +14,7 @@
 
 ![重建的六個階段](docs/img/showcase.webp)
 
-**現況：桌面研究。** 還沒有東西上機。管線已經收斂——1351 行 Python、665 個守護框裡 18 框違規
+**現況：桌面研究。** 還沒有東西上機。管線已經收斂——1351 行 Python、664 個守護框裡 18 框違規
 ——剩下的是 Kotlin 移植。所有決策與當前數字見 [`docs/DECISIONS.md`](docs/DECISIONS.md)。
 
 ## 為什麼是重繪，不是濾鏡
@@ -61,6 +61,8 @@ CartoonSegmentation 126 MB）。偵測省不掉是量過才定的：連偵測一
 | 路徑 | 內容 |
 |---|---|
 | `research/nightread.py` | 整條管線，一次一頁。所有參數集中在檔頭一個區塊。 |
+| `research/nightread_sep.py` | 任意角度格溝／頁邊偵測（兩條近平行框線夾住的白＝溝），compose 在人物之上塗它。 |
+| `research/nightread_bleed.py` | 出血格過濾：留白帶裡外圈碰到畫的塊拿掉（天空、地面不再被切成鋸齒黑塊）。 |
 | `research/charmask.py` | 人物遮罩探針（CartoonSegmentation、YOLO11-seg、兩者聯集）。它的輸出是管線的**必要輸入**。 |
 | `research/nightread_batch.py` | 跑 11 張 fixture、印亮區表。 |
 | `research/nightread_guard.py` + `nightread_guard.json` | 紅線測試：704 個人工標註前景框。 |

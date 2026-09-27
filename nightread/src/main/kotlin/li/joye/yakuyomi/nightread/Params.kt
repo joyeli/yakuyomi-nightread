@@ -208,6 +208,210 @@ data class NightReadParams(
     val harmonizeInZone: Double = 0.6,
     val harmonizeAreaMax: Double = 0.004,
     val harmonizeCollarInk: Double = 0.3,
+
+    /**
+     * 任意角度格溝／頁邊開關（[Separators]；研究端 `NIGHTREAD_SEP`）。開＝合成一開始算 SEP 圖層：留白填深之後、貼紙層之前
+     * 用留白待遇塗（填 BG、邊界描亮），人物還原跳過它（**格溝壓過人物**：溝是畫面的外面，人物遮罩收邊後越過框線長進溝
+     * 7–15px 才是錯的）；同時給出血過濾當溝／頁邊／任意角度框線的結構證據。關＝[bleedFilter] 的這些證據一律空。
+     * 兩個開關都關＝加入前（研究端 d3cfa92）的輸出。三檔一律開。
+     */
+    val separators: Boolean = true,
+    /**
+     * 任意角度格溝／頁邊（[Separators] ＝ research/nightread_sep.py）的參數組。獨立成一個 data class：
+     * 平鋪進來會讓建構子超過 JVM 的 255 個參數槽上限（Double 佔兩槽），類別載入就 ClassFormatError。
+     */
+    val sep: SeparatorParams = SeparatorParams(),
+    /**
+     * 出血格過濾開關（[Bleed]；研究端 `NIGHTREAD_BLEED`）。開＝兩條留白路徑在線稿密度否決之後，把「其實是出血格畫面」
+     * 的塊拿掉（只拿掉、不新增）。三檔一律開。
+     */
+    val bleedFilter: Boolean = true,
+    /** 出血格過濾（[Bleed] ＝ research/nightread_bleed.py）的參數組；同 [sep] 獨立成 data class。 */
+    val bleed: BleedParams = BleedParams(),
+)
+
+/**
+ * 出血格過濾（[Bleed] ＝ `research/nightread_bleed.py`，2026-09-27）的參數，預設值＝研究端定案值（決策樹 sb1）。
+ * 「白」沿用 [NightReadParams.whiteTh]。
+ *
+ * 留白帶（線稿密度否決之後）的每個 8 連通塊看它的**外圈**（橢圓膨脹 − 塊、扣掉頁緣）碰到什麼：框線／溝＝留、畫＝拿掉。
+ * 47 頁實測撕口 215 → 83 塊；veto 後共 417 塊，拿掉 248（孤島 145＋畫 103）、留 169。值的由來見
+ * docs/PARAMETERS_zh.md「出血格過濾」（英文版 “Bleed-panel filter”）與 docs/DECISIONS.md。
+ */
+data class BleedParams(
+    /** 塊的外圈＝橢圓 (2r+1)² 膨脹 − 塊本身。 */
+    val ringR: Int = 5,
+    /** 外圈扣掉頁緣這麼多 px（頁緣外沒有證據，不能算成「沒碰到框線」）。 */
+    val ringEdge: Int = 4,
+    /** 逐塊運算的 bbox 外擴（≥ [ringR]，外圈才不會被裁掉）。 */
+    val piecePad: Int = 8,
+    /** FR：框線（水平垂直 ∪ 任意角度）方核外擴邊長。 */
+    val frDil: Int = 9,
+    /** SP：溝／頁邊（SEP 扣泡之前的 sepPre）方核外擴邊長。 */
+    val spDil: Int = 5,
+    /** BB：泡 橢圓外擴半徑（中性物）。 */
+    val bbR: Int = 6,
+    /** TX：文字筆畫 橢圓外擴半徑（中性物）。 */
+    val txR: Int = 6,
+    /** CH：人物 橢圓外擴半徑（中性物）。 */
+    val chR: Int = 8,
+    /** 文字區 bbox 外擴（txt 重疊比例用）。 */
+    val textBoxPad: Int = 10,
+    /** 塊的 bbox 距頁緣 ≤ 此 px ＝ 碰頁緣。 */
+    val touchPx: Int = 2,
+    /** 面積 ≥ 此×頁 ＝ 溝網本體，留。 */
+    val netFrac: Double = 0.03,
+    /** 與文字區重疊 ≥ 此，留（字旁的留白）。 */
+    val txtKeep: Double = 0.15,
+    /** frameInf＝(FR+SP)/inf ≥ 此，留（邊界多半是格框／溝）。 */
+    val frameKeep: Double = 0.6,
+    /** 孤島規則（不碰頁緣 ∧ FR+SP＝0 ⇒ 拿掉）的泡比例上限：被泡圍住一半以上的不是孤島（泡外圈的白）。 */
+    val islandBbMax: Double = 0.3,
+    /** inf（外圈扣掉中性物的比例）< 此 ＝ 被人物／泡／字包住、證據不足，留。 */
+    val enclosedMax: Double = 0.15,
+    /** artInf＝(VT+DC+AR)/inf ≥ 此，拿掉（邊界近半是畫）。 */
+    val artDrop: Double = 0.45,
+    /** 頁邊條檢驗：停點＝第一個比此暗的像素（或中性物）。 */
+    val marginOk: Int = 200,
+    /** 頁邊條檢驗：最大深度＝短邊×此（同 [NightReadParams.safeGutterDepth]）。 */
+    val marginFrac: Double = 0.12,
+    /** 頁邊條檢驗：途中亮而非白（[marginOk]–234：淡網點／漸層／雲）≤ max([marginLightMin], 此×深度)。 */
+    val marginLightMaxFrac: Double = 0.02,
+    /** …至少容許這麼多顆（頁緣掃描雜訊）。 */
+    val marginLightMin: Int = 3,
+    /** 頁邊條檢驗：資訊列（停在暗點上的列）至少這麼多；停點直線的跨度也要 ≥ 此。 */
+    val marginMinRows: Int = 30,
+    /** 頁邊條檢驗：停點往內這麼多 px 內碰到中性物也算停在中性物上（泡框／人物輪廓常在外擴遮罩外）。 */
+    val marginNeuLook: Int = 8,
+    /** 頁邊條檢驗：頁邊深度（停點中位數）下限。 */
+    val marginMinDepth: Int = 4,
+    /** 頁邊條檢驗：停點落在擬合直線 ±2px 內的列 ≥ 此比例。 */
+    val marginCover: Double = 0.7,
+    /** 頁邊條檢驗：停點直線與頁緣夾角上限（度）。 */
+    val marginAng: Double = 5.0,
+    /** 頁邊條檢驗：停點亮度中位數上限（是線不是漸層）。 */
+    val marginDark: Int = 190,
+)
+
+/**
+ * 任意角度格溝／頁邊（[Separators] ＝ `research/nightread_sep.py`，2026-09-27）的參數，預設值＝研究端定案值。
+ * 「暗」沿用 [NightReadParams.frameDarkTh]、「白」沿用 [NightReadParams.whiteTh]。
+ *
+ * frame_line_mask 只認水平／垂直，斜格溝、被出血畫面打斷的溝、畫到頁緣的頁邊都進不了留白路徑；這組參數從像素找任意角度的
+ * 格框線，兩線夾住的整條白＝溝、頁緣到框線的白＝頁邊。值的由來見 docs/PARAMETERS_zh.md「任意角度格溝」
+ * （英文版 “Any-angle separators”）與 docs/DECISIONS.md。
+ */
+data class SeparatorParams(
+    /** 框線最短長度＝短邊×此（至少 60px）：格框線是尺畫長線，效果線／線稿多半短於此。 */
+    val lenFrac: Double = 0.15,
+    /** 候選框線像素＝暗 ∧ 距白 ≤ 此（方核）：框線至少一側鄰白溝／白頁邊，線稿內部的暗不進 Hough。 */
+    val nearWhiteR: Int = 3,
+    /** Hough 角度解析度（度）。 */
+    val thStep: Double = 0.5,
+    /** 初走訪與 PCA 精修的法向半窗（px）：容 Hough 1° 內的偏角。 */
+    val walkWin0: Int = 4,
+    /** 精修後定端點的法向半窗（px）。 */
+    val walkWin: Int = 2,
+    /** 走訪容許的斷口（px）：框線被網點／抗鋸齒打出的小缺口。 */
+    val gap: Int = 8,
+    /** 定稿段的命中率下限（初切段只要 0.6；尺畫框線 ≈1.0）。 */
+    val fillMin: Double = 0.85,
+    /** 取峰 NMS 半窗：θ ±此格（±1.5°）。 */
+    val peakNmsT: Int = 3,
+    /** 取峰 NMS 半窗：ρ ±此 px。 */
+    val peakNmsR: Int = 6,
+    /** 最多取這麼多個峰（票數由高到低，numpy 不穩定排序的同票順序）。 */
+    val peakMax: Int = 400,
+    /** 峰的票數下限＝此×最短框線長。 */
+    val peakVoteFrac: Double = 0.8,
+    /** 去重：夾角 ≤ 此（度）… */
+    val dedupeAng: Double = 2.0,
+    /** …且端點到對方直線 ≤ 此 px、沿線重疊 ⇒ 同一條線的兩次偵測，併成聯集。 */
+    val dedupeOff: Double = 6.0,
+    /** 共線分組：夾角 ≤ 此（度）… */
+    val groupAng: Double = 1.0,
+    /** …且端點到群組直線 ≤ 此 px ⇒ 同一條被打斷的框線（多段區間）。 */
+    val groupOff: Double = 6.0,
+    /** 溝：兩線夾角上限（度）。 */
+    val pairAng: Double = 5.0,
+    /** 溝：兩線法向距下限（px；太近＝同一條粗框線的兩緣）。 */
+    val gapMin: Int = 6,
+    /** 剖面白度只看離兩線各 > 此 px 的內部（框線本身＋抗鋸齒）；窄溝自動縮到 ¼ 溝寬。 */
+    val edgeSkip: Int = 4,
+    /** 單一剖面內部白佔比下限。 */
+    val profWhite: Double = 0.9,
+    /** 補橋段（至少一側沒有框線證據）的剖面：幾乎全白才算（出血人物／白衣跨溝時擋下）。 */
+    val profWhiteBridge: Double = 0.98,
+    /** 核心內 ≤ 此站數的補橋段視為框線偵測小斷口（用 [profWhite]）。 */
+    val shortBridge: Int = 24,
+    /** 剖面連續性：≤ 此站數的失敗小缺口（前後都過、不含字）補起來。 */
+    val profGapFill: Int = 2,
+    /** 有證據段裡通過的剖面比例下限（整帶多半是乾淨白＝溝，不是畫）。 */
+    val passMin: Double = 0.6,
+    /** 溝帶端延伸上限（短邊×此）：斜溝通到頁邊的楔形尖端、溝口。 */
+    val stripExtFrac: Double = 0.15,
+    /** 共線斷口補橋上限（短邊×此；同 [NightReadParams.gfcCloseFrac]）。 */
+    val bridgeFrac: Double = 0.30,
+    /** 白緣直線度（溝兩側白緣法向位置的 MAD·1.4826，逐段去線性趨勢）上限（px）。 */
+    val edgeMadMax: Double = 1.0,
+    /** 文字筆畫外擴（方核半徑）。 */
+    val textDil: Int = 3,
+    /** 含字剖面比例上限（超過＝字框／說明框，不是溝）。 */
+    val textProfMax: Double = 0.2,
+    /** 第三條近平行長線的夾角上限（效果線／排線家族；放射狀效果線相鄰夾角可達數度）。 */
+    val familyAng: Double = 10.0,
+    /** 在 a 外側或 b 外側 ≤ 此×溝寬內有第三條平行長線 ⇒ 排線，不是溝。 */
+    val familyReach: Double = 1.5,
+    /**
+     * 溝寬上限（短邊×此）：實測真溝 1.0–1.3%（直）、2.5–3.2%（橫）、斜向寬帶 6.3%／7.9%；
+     * 次寬的候選（demo01 10.7%）是畫面內的平行線、已被剖面白度擋下。
+     */
+    val wmaxFrac: Double = 0.09,
+    /** 兩線重疊長度下限＝此×最短框線長。 */
+    val ovlFrac: Double = 0.5,
+    /** 端延伸／框線延長：先跨過端點處的格角暗像素（≤ 此 px）。 */
+    val extDarkSkip: Int = 8,
+    /** 框線貼泡判定：泡遮罩外擴此 px（方核半徑）。 */
+    val bubLineR: Int = 7,
+    /**
+     * 線上取樣點（每 2px）落在外擴泡遮罩內的比例 ≥ 此 ⇒ 泡／說明框外框，不當格框
+     * （c371_009：方形說明框左緣曾被當頁邊框線 → 效果線之間被塗成條紋）。
+     */
+    val bubLineMax: Double = 0.5,
+    /** 溝網：碰到頁邊帶／頁緣／已收的溝帶（外擴此 px）才算接上網。 */
+    val netTouch: Int = 2,
+    /** 溝網粗黑塊判定：暗像素 chamfer 距離（cv2 DIST_L2 3×3）≥ 此（筆畫寬 ≥ 10px：狀聲詞、實心黑可通行）。 */
+    val netThick: Int = 5,
+    /** 溝帶可沿自身走廊（兩框線之間、沿線延伸 ≤ 短邊×此）經可通行像素接上網。 */
+    val netExtFrac: Double = 0.15,
+    /** 頁邊行程必須連成 ≥ 短邊×此 的列／行段（效果線之間的細白縫＝畫，不是頁邊）。 */
+    val marginRunFrac: Double = 0.015,
+    /** 頁邊行程內「亮但不白」像素比例上限（淡網點／漸層＝畫）。 */
+    val marginLightFrac: Double = 0.02,
+    /** …至少容許這麼多顆（頁緣掃描雜訊）。 */
+    val marginLightMin: Int = 3,
+    /** 撞到溝框線後往前探這麼多 px 看另一側是不是溝（是 ⇒ 這段白在出血格內，不是頁邊）。 */
+    val farProbe: Int = 14,
+    /** 頁邊行程的可通行亮度下限（塗色仍只塗 ≥ [NightReadParams.whiteTh]）。 */
+    val marginOkTh: Int = 200,
+    /** 頁邊最大深度（短邊×此；同 [NightReadParams.safeGutterDepth]）。 */
+    val marginFrac: Double = 0.12,
+    /** 框線點陣化的半寬（給線稿密度否決當格線遮罩、給出血過濾當框線結構）。 */
+    val flR: Int = 3,
+    /** 頁邊「撞到框線」判定的半寬：擬合線落在框線鄰白那一緣，粗框線（≤ 8px）另一緣也要算。 */
+    val flHitR: Int = 8,
+    /** 已成溝的框線當頁邊框線：與頁緣方向夾角上限（度）。 */
+    val marginEdgeAng: Double = 30.0,
+    /** 其餘框線當頁邊框線：必須幾乎平行頁緣（度；格子外框沿版心，斜的排線／效果線不是）。 */
+    val marginAxisAng: Double = 5.0,
+    /** 其餘框線當頁邊框線的命中率下限（尺畫框線 ≈1.0）。 */
+    val marginFillMin: Double = 0.95,
+    /** 圖層：泡遮罩外擴（方核邊長）——SEP 讓開泡與泡框。 */
+    val bubDil: Int = 7,
+    /** 圖層：單條溝被外擴泡遮罩吃掉 > 此比例 ⇒ 整條不塗（剩下的會是梯子狀碎段）；頁邊不受影響。 */
+    val pairSubMax: Double = 0.5,
+    /** 圖層：扣掉泡之後小於此 px 的連通塊不塗（避免斑點）。 */
+    val minCc: Int = 150,
 )
 
 /**
@@ -256,4 +460,9 @@ data class NightReadResult(
     /** 貼紙計畫（除錯／parity 用）：哪些白元件被接受、其中哪些走核心填色。 */
     val stickerAccept: Set<Int> = emptySet(),
     val stickerPromoted: Set<Int> = emptySet(),
+    /**
+     * 實際塗的任意角度格溝／頁邊（[Separators] 圖層的 sep：泡 ⊕7 扣掉、被泡吃過半的溝丟掉、碎塊丟掉）；
+     * [NightReadParams.separators] 關時為 null。
+     */
+    val sep: Mask? = null,
 )

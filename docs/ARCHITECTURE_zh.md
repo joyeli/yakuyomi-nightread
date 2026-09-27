@@ -220,7 +220,7 @@ flowchart LR
 
 | 指標 | 值 |
 |---|---|
-| 守護框違規 | 18 / 665 |
+| 守護框違規 | 18 / 664 |
 | 亮區（成品 ≥110 的比例） | 38.6% |
 | 管線 | 1351 行 Python |
 
@@ -250,6 +250,8 @@ API 也已經對齊：`research/nightread.py` 的 `run_page` 新增 `regions` �
 ```
 research/           桌面管線（規格）
   nightread.py        整條管線，一次一頁
+  nightread_sep.py    任意角度格溝／頁邊
+  nightread_bleed.py  出血格過濾
   nightread_batch.py  跑 11 張 fixture、印亮區表
   nightread_guard.py  紅線測試：704 個守護框
   charmask.py         人物遮罩探針（cseg / yoloseg / 聯集）

@@ -21,6 +21,22 @@ PAGES = os.path.join(os.path.dirname(HERE), "fixtures", "pages")
 DEFAULT_OUT = os.path.join(os.path.dirname(HERE), "nightread", "src", "test", "resources", "page")
 
 
+def sep_masks(name, g, bgr, seg, bubble, o):
+    """任意角度格溝（nightread_sep.build_sep）的期望遮罩，給 Kotlin `SeparatorsParityTest` 單獨比對 SEP。
+
+    輸入與 compose 呼叫 build_sep 時相同：紙白正規化後的灰階、文字遮罩、最終泡遮罩、frame_line_mask 的水平／垂直格線。
+    存 `_sep.png`（要塗的）、`_sep_strip.png`（溝帶）、`_sep_margin.png`（頁邊；sep_pre＝兩者聯集）、
+    `_sep_frame.png`（任意角度框線點陣）。三檔共用同一份（SEP 不吃檔位參數）。"""
+    sys.path.insert(0, HERE)
+    import nightread as pipeline
+    import nightread_sep
+    gn, _ = pipeline.normalize_paper(g, bgr)
+    lhm, lvm = pipeline.frame_line_mask(gn)
+    lay = nightread_sep.build_sep(gn, seg, bubble, (lhm | lvm), veto=pipeline.texture_veto2)
+    for key, suffix in (("sep", "sep"), ("strip", "sep_strip"), ("margin", "sep_margin"), ("frame_arb", "sep_frame")):
+        cv2.imwrite(os.path.join(o, f"{name}_{suffix}.png"), lay[key].astype(np.uint8) * 255, [cv2.IMWRITE_PNG_COMPRESSION, 9])
+
+
 def main():
     ap = argparse.ArgumentParser(description="產整頁 parity fixture")
     ap.add_argument("pages", nargs="*", default=["ch34_011"])
@@ -56,6 +72,9 @@ def main():
             m = cv2.imread(os.path.join(a.results, f"{name}_{stage}.png"), cv2.IMREAD_GRAYSCALE)
             if m is not None:
                 cv2.imwrite(os.path.join(o, f"{name}_{stage}.png"), (m > 127).astype(np.uint8) * 255)
+        bub = cv2.imread(os.path.join(a.results, f"{name}_bubble.png"), cv2.IMREAD_GRAYSCALE)
+        if bub is not None:
+            sep_masks(name, g, bgr, seg > 127, bub > 127, o)
         with open(os.path.join(o, f"{name}_regions.txt"), "w", encoding="utf-8") as f:
             for r in meta["regions"]:
                 x0, y0, x1, y1 = r["bbox"]

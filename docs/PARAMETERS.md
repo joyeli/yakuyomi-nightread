@@ -3,14 +3,16 @@
 English ｜ [中文](PARAMETERS_zh.md)
 
 Every knob in the pipeline: what it controls, what it is set to, and what happens if you push it either
-way. They all live in a single block at the top of `research/nightread.py` — there are no magic numbers
-scattered through the code.
+way. They all live in a single block at the top of `research/nightread.py` (the any-angle separator and
+bleed-panel filter keep theirs at the top of their own modules, `research/nightread_sep.py` and
+`research/nightread_bleed.py`) — there are no magic numbers scattered through the code.
 
 One environment variable is required: `NIGHTREAD_CHARMASK`, pointing at the character-mask directory
 produced by `charmask.py`. If it is missing the run fails outright rather than silently degrading. The three
 product fill levels are also selected through the environment (`NIGHTREAD_STICKER_MODE`,
-`NIGHTREAD_STICKER_ROUGH`, `NIGHTREAD_STICKER_MINFRAC`, `NIGHTREAD_PB`, `NIGHTREAD_HM` — see *Fill tiers*), and a
-few research toggles read it too (`NIGHTREAD_EDGE_INK`, `NIGHTREAD_REQUIRE_CLEAN`, `NIGHTREAD_TEXT_*`).
+`NIGHTREAD_STICKER_ROUGH`, `NIGHTREAD_STICKER_MINFRAC`, `NIGHTREAD_PB`, `NIGHTREAD_HM` — see *Fill tiers*), the
+any-angle separator and the bleed-panel filter each have a switch (`NIGHTREAD_SEP`, `NIGHTREAD_BLEED`, on by
+default), and a few research toggles read it too (`NIGHTREAD_EDGE_INK`, `NIGHTREAD_REQUIRE_CLEAN`, `NIGHTREAD_TEXT_*`).
 Everything else is edited in the file, so a run reproduces.
 
 Where each value came from, and which alternatives were measured and rejected, is in
@@ -354,6 +356,9 @@ backgrounds measure 1.8–8.3, the tearing components 17.8–173.
 The `simple` thresholds. L2 uses 10 and 0.5%; L3 uses 20 and no area floor. Guard: L1 12, L2 12, L3 16 of
 665, against 18 for the default. Mean bright fraction (pixels ≥ 110) over the 8 tearing device pages: L1
 40.7%, L2 40.2%, L3 40.0%, default 35.7% (40.3 / 39.8 / 39.6 / 35.6 before the outline gate existed).
+These were measured before the any-angle separator and the bleed-panel filter (next two sections); with them
+the guard reads L1 13, L2 13, L3 17, default 19 (each +1 is the same ch34_006 annotation drawn over a gutter)
+and the bright fraction L1 38.8%, L2 38.3%, L3 38.1%, default 36.3%.
 
 ### `STICKER_PLAIN_RING_R` = 7 · `STICKER_PLAIN_ART_MAX` = 0.05 · `STICKER_PLAIN_FRAME_DIL` = 7
 The `plain` test. The ring is the component dilated with a 15×15 ellipse minus the component; "artwork" is
@@ -369,6 +374,151 @@ open research.
 Switches for the pseudo-bubble and floating-head layers. All three product levels turn both off:
 pseudo-bubbles grow from the text into the background and cost 2 guard boxes; harmonization has no effect on
 the guard but digs black holes into panel backgrounds. The default keeps both on.
+
+---
+
+## Any-angle separators (`nightread_sep.py`)
+
+`frame_line_mask` only sees long horizontal and vertical lines, so slanted gutters, gutters broken by a bubble
+or a sound effect, and page margins drawn to the edge never reach the margin path. This layer finds frame
+lines at any angle straight from the pixels: the white strip between two near-parallel frame lines is a gutter,
+and the artwork-free white between the page edge and a frame line is a margin. The result (`sep`) is painted
+with the margin treatment (BG fill, edge stroke) before the sticker layer, and it **sits above the character
+mask**: only bubbles are subtracted, never the character, and compose's final character restore skips it
+(layer order: text > bubble > gutter/margin > character > background). Over 47 pages the white still left grey
+inside gutters drops from 314,591 to 554 px (against a first round that subtracted the character mask).
+
+### `SEP_ON` = 1 (`NIGHTREAD_SEP`)
+Switch for the whole layer. Off (together with `BLEED_ON`) reproduces the output from before it existed,
+pixel for pixel.
+
+### `LEN_FRAC` = 0.15 · `NEAR_WHITE_R` = 3 · `DARK_TH` = 100
+Frame-line candidates and minimum length. A candidate pixel is darker than `DARK_TH` with white inside a 7×7
+square (a frame line borders a white gutter or margin on at least one side; dark pixels inside linework never
+enter the Hough). The shortest frame line is 0.15 × the short side (at least 60 px): panel frames are ruled
+long lines, speed lines and linework are mostly shorter.
+
+### `TH_STEP` = 0.5 · `PEAK_NMS_T` = 3 · `PEAK_NMS_R` = 6 · `PEAK_MAX` = 400 · `PEAK_VOTE_FRAC` = 0.8
+Hough. 0.5° per angle bin, 1 px per ρ bin, summed over 3 ρ bins (a 3 px wide white-adjacent band); a peak is a
+local maximum over θ ±1.5° and ρ ±6 px with at least 0.8 × the minimum line length in votes; the 400 strongest
+are kept. θ wraps around (0° and 179.5° are neighbours).
+
+### `WALK_WIN0` = 4 · `WALK_WIN` = 2 · `GAP` = 8 · `FILL_MIN` = 0.85
+Walking along the line. The first walk and the PCA refinement use a ±4 px normal window (absorbing the Hough
+angle error); the final walk uses ±2 px; gaps up to 8 px are allowed. Initial runs need a hit rate of 0.6 and a
+final segment 0.85 (ruled lines ≈1.0). Each segment is refined twice on its own,
+so collinear pieces on the same ρ are not tilted by the longest one.
+
+### `DEDUPE_ANG` = 2.0 · `DEDUPE_OFF` = 6.0 · `GROUP_ANG` = 1.0 · `GROUP_OFF` = 6.0
+De-duplication and collinear grouping. Two overlapping segments within 2° and 6 px are the same line found
+twice; segments within 1° and 6 px join one interrupted frame line (a list of intervals), so a frame cut by a
+bubble, a sound effect or a bleeding figure stays one line.
+
+### `BUB_LINE_R` = 7 · `BUB_LINE_MAX` = 0.5
+A line hugging a bubble or caption box is not a panel frame: sampled every 2 px, if half the samples fall in
+the bubble mask ⊕7 it is discarded (the left edge of a square caption in c371_009 was once taken for a margin
+frame and the speed lines beside it came out striped).
+
+### `PAIR_ANG` = 5.0 · `GAP_MIN` = 6 · `WMAX_FRAC` = 0.09 · `OVL_FRAC` = 0.5
+Which two lines can bound a gutter: at most 5° apart, 6 px to 0.09 × short side apart along the normal, and
+overlapping by at least 0.5 × the minimum line length. Measured gutters are 1.0–1.3% wide (vertical), 2.5–3.2%
+(horizontal), 6.3% / 7.9% for the wide slanted bands; the next widest candidate (demo01, 10.7%) is a pair of
+parallel lines inside the artwork, which the profile test rejects anyway.
+
+### `EDGE_SKIP` = 4 · `PROF_WHITE` = 0.9 · `PROF_WHITE_BRIDGE` = 0.98 · `SHORT_BRIDGE` = 24 · `PROF_GAP_FILL` = 2 · `PASS_MIN` = 0.6
+Profile whiteness, station by station along the gutter with a 3-station window. Only the interior more than 4 px
+from both lines counts (a quarter of the width in narrow gutters). A station with frame evidence on both sides
+needs 0.9 white (or at most 3 non-white pixels in the window — one anti-aliased pixel drops a narrow gutter to
+0.89); a bridged station inside the core needs 0.98 and the whole bridge must pass, so a bleeding figure or white
+clothing crossing the gutter blocks the bridge entirely; bridges of up to 24 stations are treated as small
+detection gaps and use 0.9. Isolated failures of up to 2 stations are filled. A strip whose evidence stations
+pass less than 60% of the time is rejected.
+
+### `STRIP_EXT_FRAC` = 0.15 · `BRIDGE_FRAC` = 0.30 · `EXT_DARK_SKIP` = 8
+Extension. Collinear gaps up to 0.30 × the short side may be bridged (as `GFC_CLOSE_FRAC`); where only one side's
+line continues, a strip extends outward by up to 0.15 × the short side (the tip of a slanted gutter meeting the
+page edge, a gutter mouth), first stepping over up to 8 px of dark panel corner and stopping at the first
+non-white station.
+
+### `EDGE_MAD_MAX` = 1.0 · `TEXT_DIL` = 3 · `TEXT_PROF_MAX` = 0.2
+Shape rejects. The normal position of the white edge on each side, detrended per segment, with MAD × 1.4826 above
+1 px is curved, not a ruled gutter. More than 20% of stations touching the text mask ⊕7 means a caption box.
+
+### `FAMILY_ANG` = 10.0 · `FAMILY_REACH` = 1.5
+Hatching reject: a third long line within 10° lying outside either line within 1.5 × the gutter width and
+overlapping more than half the span marks a family of speed lines or hatching (neighbouring radial speed lines
+can differ by several degrees).
+
+### `NET_TOUCH` = 2 · `NET_THICK` = 5 · `NET_EXT_FRAC` = 0.15
+Network connectivity. A strip must connect, along its own corridor (between its two lines, extended by 0.15 ×
+the short side at each end) and through passable pixels, to a margin, the page-edge band or an accepted strip.
+Passable is white, or a solid dark blob with stroke width ≥ 10 px (sound effects, solid black). Parallel-line
+white isolated inside a panel (title double rules, window frames) cannot connect and is dropped.
+
+### `MARGIN_FRAC` = 0.12 · `MARGIN_OK_TH` = 200 · `MARGIN_RUN_FRAC` = 0.015 · `MARGIN_LIGHT_FRAC` = 0.02 · `MARGIN_LIGHT_MIN` = 3
+Margins. Walking inward from the page edge along the axis, through pixels ≥ 200, text or bubble only, the white
+up to a margin frame line (or its sealing extension) within 0.12 × the short side is margin. Runs must form
+segments of at least 0.015 × the short side (thin white slits between speed lines are artwork), and "light but
+not white" pixels (200–234) along the way must stay within max(3, 2% × depth). The result passes texture_veto2.
+
+### `FAR_PROBE` = 14 · `FL_R` = 3 · `FL_HIT_R` = 8 · `MARGIN_EDGE_ANG` = 30.0 · `MARGIN_AXIS_ANG` = 5.0 · `MARGIN_FILL_MIN` = 0.95
+Margin frame lines. A line that already bounds a gutter qualifies within 30° of the page edge; any other line
+must be nearly parallel to it (≤ 5°) with a hit rate ≥ 0.95. A run "hits" the line within ±8 px (the fitted line
+sits on the white side of the frame, and the far side of a thick frame must count too); after hitting a gutter's
+line the walk probes 14 px further, and a gutter on the other side means this white belongs inside a bleed
+panel, not the margin. The ±3 px frame raster doubles as texture_veto2's frame mask and as frame evidence for the
+bleed filter.
+
+### `SEP_BUB_DIL` = 7 · `PAIR_SUB_MAX` = 0.5 · `SEP_MIN_CC` = 150
+Layering. SEP subtracts the bubbles ⊕7 (square); a strip that loses more than half to that is dropped whole
+(what remained would be a ladder of fragments) — **bubbles only, never the character mask**; fragments under
+150 px after the subtraction are not painted. The character mask is never subtracted.
+
+---
+
+## Bleed-panel filter (`nightread_bleed.py`)
+
+In a bleed panel (the artwork runs to the page edge with no frame) the sky, the ground or a tablecloth is the
+same white component as the margin. The margin path's only defence is texture_veto2, sparse linework passes its
+density gate, and the panel gets cut into jagged black blocks near the frame lines. This layer runs after
+texture_veto2 on both margin paths and looks at what each piece's **outer ring** touches: frame lines or
+gutters (keep) or artwork (drop). It only removes; SEP is painted afterwards regardless. Over 47 pages the
+tears went from 215 blocks to 83.
+
+The ring (ellipse r5, minus 4 px at the page edge) is classified pixel by pixel, highest priority first: FR frame
+line (horizontal/vertical ∪ any angle, ⊕9) > SP gutter/margin (before bubble subtraction, ⊕5) > BB bubble (⊕r6)
+> TX text (⊕r6) > CH character (⊕r8) > VT white removed by the veto > DC white beyond the depth band > WO other
+white > AR non-white. `inf` is the fraction left after BB/TX/CH; `frame_inf` = (FR + SP) / inf;
+`art_inf` = (VT + DC + AR) / inf. Every fraction is rounded to 3 decimals before it is compared.
+
+### `BLEED_ON` = 1 (`NIGHTREAD_BLEED`)
+Switch for the whole layer. With SEP off the filter still runs, with empty gutter, margin and any-angle frame
+evidence.
+
+### `RING_R` = 5 · `RING_EDGE` = 4 · `FR_DIL` = 9 · `SP_DIL` = 5 · `BB_R` = 6 · `TX_R` = 6 · `CH_R` = 8 · `TEXT_BOX_PAD` = 10
+Ring and classification geometry. There is no evidence beyond the page edge, so 4 px there are left out, lest a
+piece touching the margin look like it touches no frame.
+
+### `NET_FRAC` = 0.03 · `TXT_KEEP` = 0.15 · `FRAME_KEEP` = 0.6
+Kept first: pieces of at least 3% of the page (the gutter network itself), pieces overlapping text-region boxes
+⊕10 by 15% or more (white beside text), and `frame_inf` ≥ 0.6 (bounded mostly by frames or gutters). A piece
+lying entirely inside SEP is also kept (SEP paints it anyway).
+
+### `ISLAND_BB_MAX` = 0.3
+Island in the artwork: not touching the page edge, a ring with no frame or gutter at all (FR + SP = 0), bubbles
+under 30% ⇒ dropped.
+
+### `ENCLOSED_MAX` = 0.15 · `ART_DROP` = 0.45
+`inf` < 0.15 means the piece is wrapped in bubbles, text or character and the evidence is too thin: keep.
+Otherwise `art_inf` ≥ 0.45 (nearly half the boundary is artwork) is dropped, and the rest is kept.
+
+### `MARGIN_OK` = 200 · `MARGIN_COVER` = 0.7 · `MARGIN_ANG` = 5.0 · `MARGIN_DARK` = 190 · `MARGIN_MIN_ROWS` = 30 · `MARGIN_MIN_DEPTH` = 4 · `MARGIN_NEU_LOOK` = 8
+Margin-strip test (pieces touching the page edge; any side passing keeps the piece): walk inward along the edge
+to the first pixel below 200 or the first neutral pixel; rows that stop on a neutral (including one within 8 px
+past the stop) do not count. For the rest, 70% of the stops must lie within ±2 px of a line at most 5° off the
+page edge, the median stop brightness must be ≤ 190 (a line, not a gradient), informative rows and the line's
+span must reach 30, the depth must be at least 4 px, and "light but not white" pixels on the way must stay within
+max(3, 2% × depth). Maximum depth is `SAFE_GUTTER_DEPTH` (0.12 × the short side).
 
 ---
 

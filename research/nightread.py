@@ -13,13 +13,14 @@
       ├ 頁型      長直格框線密度 → 有框頁／無框頁
       ├ 白元件    整頁白連通元件一次算完 → 留白／格內白／其餘
       ├ 氣泡      白元件 ∩ 文字區 → 面積與局部性守門 → 文字種子核心填色
-      └ 合成      場景曲線 → 留白填深 → 貼紙式背景 → 氣泡 → 偽泡
-                  → 人頭一致化 → 剩餘填色 → 人物還原
+      ├ 格溝      任意角度框線 → 兩線夾白＝分鏡溝、頁緣到框線＝頁邊（nightread_sep.py）
+      └ 合成      場景曲線 → 留白填深（出血格過濾，nightread_bleed.py）→ 格溝／頁邊
+                  → 貼紙式背景 → 氣泡 → 偽泡 → 人頭一致化 → 剩餘填色 → 人物還原（跳過泡與格溝）
     暗色頁
 
 分區的待遇：
 
-    留白（頁邊距／格溝）  填 BG、邊界描亮
+    留白（頁邊距／格溝）  填 BG、邊界描亮（任意角度的溝／頁邊另由 nightread_sep.py 補上）
     純白背景             填 BG、前景白描邊抬出立體感
     氣泡內部             填 BG、文字筆畫畫亮到 INK（原圖墨度當 alpha ⇒ 天然抗鋸齒）
     人物                 場景曲線壓暗，任何填色都要讓開
@@ -30,7 +31,8 @@
      驗收靠 `nightread_guard.py` 的 704 個人工標註框，目視不算數。
   2. **畫面絕不反相**。畫面區只允許單調映射，墨線永遠比紙面暗。
 
-圖層優先權（決定衝突時誰贏）：**字 > 對話框 > 人物 > 背景**。
+圖層優先權（決定衝突時誰贏）：**字 > 對話框 > 格溝／頁邊 > 人物 > 背景**。格溝是畫面的外面，人物不可能在那裡
+（人物遮罩收邊後越過框線長進溝的灰帶才是錯的；見 docs/DECISIONS.md「任意角度格溝＋出血格過濾＋格溝壓過人物」）。
 
 人物語意遮罩是**必要輸入**：守護框證明沒有它紅線不可達（純幾何最好也有 37 框違規，
 且要付 14 個百分點的亮區代價）。先跑 `charmask.py`，再把輸出夾給 `NIGHTREAD_CHARMASK`。
@@ -45,6 +47,9 @@ detect-20241225.ckpt）torch 前向 ＋ m-i-t `SegDetectorRepresenter` 後處理
     L1  NIGHTREAD_STICKER_MODE=plain  NIGHTREAD_PB=0 NIGHTREAD_HM=0
     L2  NIGHTREAD_STICKER_MODE=simple NIGHTREAD_STICKER_ROUGH=10 NIGHTREAD_STICKER_MINFRAC=0.005 NIGHTREAD_PB=0 NIGHTREAD_HM=0
     L3  NIGHTREAD_STICKER_MODE=simple NIGHTREAD_STICKER_ROUGH=20 NIGHTREAD_STICKER_MINFRAC=0     NIGHTREAD_PB=0 NIGHTREAD_HM=0
+格溝與出血格過濾各有開關（預設都開；兩個都關＝加入前 d3cfa92 的輸出，逐像素相同）：
+    NIGHTREAD_SEP=0     不偵測任意角度格溝／頁邊（nightread_sep.py）
+    NIGHTREAD_BLEED=0   不做出血格過濾（nightread_bleed.py）
 輸出（皆帶頁名前綴）：_final.png ／ _regions.json ／ _seg.png ／ _bubble.png ／
 _gutter.png ／ _cmp.png（三聯：原圖｜成品｜遮罩視覺化）。批次見 nightread_batch.py。
 
@@ -55,6 +60,7 @@ import importlib.util
 import json
 import os
 import sys
+import time
 
 import cv2
 import numpy as np
@@ -63,6 +69,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import paths                                                      # noqa: E402  ← 先：把 engine parity 加進 sys.path
 import export_dbnet_ncnn as ex                                    # noqa: E402  （來自 yakuyomi-engine/parity）
 from mit_grouping import Quadrilateral, merge_bboxes_text_region  # noqa: E402  （來自 yakuyomi-engine/parity）
+import nightread_bleed                                            # noqa: E402  出血格過濾
+import nightread_sep                                              # noqa: E402  任意角度格溝／頁邊
 
 OUT_DEFAULT = os.path.join(paths.OUT, "nightread")
 
@@ -203,6 +211,16 @@ STICKER_PLAIN_ART_MAX = 0.05    # plain：外圈上「非格線的墨」（g < I
 STICKER_PLAIN_FRAME_DIL = 7 # plain：格線遮罩外擴的方核邊長（7×7），框線本身不算線稿
 PSEUDO_BUBBLES = os.environ.get("NIGHTREAD_PB", "1") == "1"   # 偽泡開關（三檔＝0；偽泡沿字往背景長，是撕裂黑塊來源之一）
 HARMONIZE = os.environ.get("NIGHTREAD_HM", "1") == "1"        # 亮島填黑開關（三檔＝0；會把格內背景挖成黑塊）
+
+# 任意角度格溝＋出血格過濾＋格溝壓過人物（2026-09-27；常數在 nightread_sep.py／nightread_bleed.py，見 docs/DECISIONS.md）
+#   SEP：frame_line_mask 只認水平／垂直，斜格溝、被打斷的溝、畫到頁緣的頁邊進不了留白路徑（三檔都灰）。改從像素找任意角度
+#        框線，兩線夾住的整條白＝溝、頁緣到框線的白＝頁邊；貼紙層之前用 paint_gutter 塗，人物還原跳過它（格溝壓過人物）。
+#   BLEED：留白帶 veto 之後，看每塊外圈碰到的是框線／溝（留）還是畫（拿掉）——出血格的天空／地面不再被切成鋸齒黑塊。
+#   47 頁（11 fixture＋8 真機＋28 補充）：溝裡仍灰的原白 314,591 → 554 px；撕口 215 → 83 塊；守護框 標準／L1／L2／L3
+#   18／12／12／16 → 19／13／13／17（+1 都是 ch34_006 一個畫在格溝上的標註框；使用者確認後修正標註 ⇒ 18／12／12／16，/664）；
+#   8 張撕裂頁 L2 亮區 40.2% → 38.3%。
+SEP_ON = os.environ.get("NIGHTREAD_SEP", "1") == "1"        # 任意角度格溝／頁邊（0＝關）
+BLEED_ON = os.environ.get("NIGHTREAD_BLEED", "1") == "1"    # 出血格過濾（0＝關）
 
 # 核心填色（從格框種子出發、不擠過窄頸的寬闊背景）
 CORE_NECK_R = 12        # 開運算半徑：切斷臉／白衣連進背景的線稿缺口
@@ -1341,10 +1359,37 @@ def harmonize_enclosed_whites(out, g, lab, stats, skip_mask):
 
 def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
             core_ids=(), frame=None, regions=None, charmask=None, char_raw=None,
-            bubble_rest=None, lost_bubble=None):
-    """整頁合成：場景曲線 →（有框頁才）留白填深 → 貼紙式背景 → 氣泡重繪 → 人物還原。"""
+            bubble_rest=None, lost_bubble=None, diag=None):
+    """整頁合成：場景曲線 → 留白填深（出血格過濾）→ 格溝／頁邊 → 貼紙式背景 → 氣泡重繪 → 人物還原。
+
+    [diag] 給 dict 就把格溝與出血過濾的中間遮罩、逐塊決策、耗時存進去（parity／除錯用，不影響輸出）。"""
     out = scene_final(g, seg).astype(np.float32)
     scene_keep = out.copy()                     # 人物區最終一律還原成場景調
+    # 任意角度格溝／頁邊（SEP）：先算好——出血過濾要拿它當結構證據，貼紙層之前塗、人物還原跳過它
+    t_ = time.perf_counter()
+    sep_layer = nightread_sep.build_sep(g, seg, bubble, frame, veto=texture_veto2) if SEP_ON else None
+    sepm = sep_layer["sep"] if sep_layer is not None else None
+    if diag is not None:
+        diag["t_sep"] = time.perf_counter() - t_
+        diag["t_bleed"] = 0.0
+        # 這兩層的輸入（Kotlin 分段 parity：同一份輸入單獨比 SEP／出血過濾）
+        diag.update(in_g=g, in_frame=frame, in_bubble=bubble, in_seg=seg, in_gutter=gutter, in_charmask=charmask)
+        if sep_layer is not None:
+            for k_ in ("sep", "sep_pre", "strip", "margin", "frame_arb"):
+                diag[k_] = sep_layer[k_]
+            diag["sep_dropped_pairs"] = sep_layer["dropped"]
+
+    def _bleed(band, band0):
+        # 出血格過濾：只拿掉留白帶裡的畫面塊、不新增（SEP 之後照塗，拿不掉溝與頁邊）
+        if not BLEED_ON:
+            return band
+        t0_ = time.perf_counter()
+        res, pcs = nightread_bleed.bleed_filter(band, band0, g, frame, seg, bubble, charmask, regions, gutter, sep_layer)
+        if diag is not None:
+            diag["t_bleed"] += time.perf_counter() - t0_
+            diag["band0"], diag["band_post"], diag["band_final"] = band0, band, res
+            diag["pieces"] = pcs
+        return res
     if frameless and gutter.any():
         # 無框頁只填「真頁邊帶」：留白元件深入頁內的最大距離 ≤ 短邊×FRAMELESS_MARGIN_DEPTH 才是
         # 貼邊薄帶（開放背景會深入頁心、不符）。
@@ -1358,7 +1403,7 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
             m = lb_ == i
             if bd[m].max() <= lim:
                 keep |= m
-        keep = texture_veto2(keep, g, frame, seg, bubble)   # 有線稿的白不是留白
+        keep = _bleed(texture_veto2(keep, g, frame, seg, bubble), keep)   # 有線稿的白不是留白；出血格畫面拿掉
         if keep.any():
             out = paint_gutter(out, g, keep, frame=frame, bubble=bubble)
     elif not frameless and gutter.any():
@@ -1373,7 +1418,7 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
             bd = np.minimum(bd, fd)
         lim = SAFE_GUTTER_DEPTH * min(H2, W2)
         band = gutter_frame_cut(g, gutter) & (bd <= lim)   # 先沿格框線切開再取頁邊帶
-        band = texture_veto2(band, g, frame, seg, bubble)   # 有線稿的白不是留白
+        band = _bleed(texture_veto2(band, g, frame, seg, bubble), band)   # 有線稿的白不是留白；出血格畫面拿掉
         if band.any():
             out = paint_gutter(out, g, band, frame=frame, bubble=bubble)
     elif gutter.any():
@@ -1391,6 +1436,8 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
                 keep |= m
         if keep.any():
             out = paint_gutter(out, g, keep, frame=frame if frame is not None else np.zeros_like(gutter, np.uint8), bubble=bubble)
+    if sepm is not None and sepm.any():                 # 任意角度格溝／頁邊：同留白待遇（填 BG、邊界描亮）
+        out = paint_gutter(out, g, sepm, frame=frame, bubble=bubble)
     if sticker:                                         # 貼紙式背景：純白背景填黑＋前景白描邊
         out = paint_sticker(out, g, lab, stats, sticker, bubble,
                             core_ids=core_ids, frame=frame, seg=seg, charmask=charmask)
@@ -1425,6 +1472,10 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
     # 人物，把它還原成「人物的場景調」等於讓對話框變成淺色底（使用者 2026-09-15 回報）。
     # CHAR_OVER_BUBBLE 只該管**偽泡**（字直接寫在畫面上、人物在字周圍仍看得見）。
     restore &= ~bubble
+    # ★ 格溝／頁邊也贏過人物（使用者 2026-09-27：「格溝畫在人物遮罩上面」）：溝是畫面的外面，人物遮罩經收邊＋平滑會越過
+    # 格框線長進溝 7–15px ⇒ 溝邊灰帶、窄溝被吃過半整條不塗。框線被出血人物打斷的地方本來就不成溝（build_sep 不收）。
+    if sepm is not None:
+        restore &= ~sepm
     # ★ 收邊生長出來的邊緣不得壓過偽泡：restore 用的是**加工後**的遮罩（測地收邊 + 中值平滑
     # 把邊界推到輪廓線上），偽泡內那些「模型原輸出沒蓋到、是加工長出來的」像素屬於畫面不屬於
     # 人物 ⇒ 偽泡贏。判準用未加工的 char_raw。
@@ -1493,12 +1544,12 @@ def mask_viz(img_bgr, gutter, panel_scene, bubble, seg, regions, sticker_mask=No
     return viz
 
 
-def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None):
+def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None, diag=None):
     """單頁一條龍：偵測 → 遮罩 → 合成 → 落檔。回傳統計 dict（批次表用）。
 
     [regions] 與 [seg] 可以由外部提供，跳過偵測——**產品路徑就是這樣走的**：頁面先經過翻譯，
     文字區早就算過（存在翻譯素材裡），譯文的筆畫位置則由排版器自己知道，都不必重測一次。
-    只給其中一個也行，另一個仍走偵測。
+    只給其中一個也行，另一個仍走偵測。[diag] 透傳給 compose（中間遮罩／耗時，parity 用）。
     """
     name = os.path.splitext(os.path.basename(page_path))[0]
     os.makedirs(outdir, exist_ok=True)
@@ -1606,7 +1657,7 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None):
     lost = bubble_before_trim & ~bubble
     final = compose(g, gutter, bubble, seg, frameless, lab, stats, sticker,
                     core_ids=promoted, frame=(lhm | lvm), regions=regions, charmask=charmask,
-                    char_raw=char_raw, bubble_rest=bubble_rest, lost_bubble=lost)
+                    char_raw=char_raw, bubble_rest=bubble_rest, lost_bubble=lost, diag=diag)
 
     pref = os.path.join(outdir, name)
     with open(f"{pref}_regions.json", "w", encoding="utf-8") as f:

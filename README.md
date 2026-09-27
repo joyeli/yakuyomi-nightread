@@ -19,7 +19,7 @@ requirement.
 ![Six stages of the rebuild](docs/img/showcase.webp)
 
 **Status: desktop research.** Nothing ships yet. The pipeline has converged — 1351 lines of Python, 18
-violations out of 665 guard boxes — and the remaining work is the Kotlin port. Decisions and current numbers
+violations out of 664 guard boxes — and the remaining work is the Kotlin port. Decisions and current numbers
 live in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 
 ## Why a rebuild and not a filter
@@ -75,6 +75,8 @@ percentage points of light area; with the mask the same pipeline sits at 18.
 | Path | What |
 |---|---|
 | `research/nightread.py` | The whole pipeline, one page at a time. Every parameter is in one block at the top of the file. |
+| `research/nightread_sep.py` | Any-angle gutter and margin detection (white between two near-parallel frame lines is a gutter); compose paints it above the character mask. |
+| `research/nightread_bleed.py` | Bleed-panel filter: margin pieces whose outer ring touches artwork are dropped (skies and floors no longer torn into jagged black). |
 | `research/charmask.py` | The character-mask probe (CartoonSegmentation, YOLO11-seg, and their union). Its output is a **required input** to the pipeline. |
 | `research/nightread_batch.py` | Run the 11 fixture pages, print the light-area table. |
 | `research/nightread_guard.py` + `nightread_guard.json` | The red-line test: 704 hand-annotated foreground boxes. |

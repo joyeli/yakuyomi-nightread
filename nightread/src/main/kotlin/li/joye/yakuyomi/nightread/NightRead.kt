@@ -21,13 +21,25 @@ object NightRead {
     /**
      * 重繪一頁。
      *
-     * 前半是分析（頁型、白元件、氣泡、貼紙計畫），後半是合成（場景曲線 → 留白 → 貼紙 →
-     * 氣泡 → 偽泡 → 人頭一致化 → 剩餘填色 → 人物還原）。
+     * 前半是分析（頁型、白元件、氣泡、貼紙計畫），後半是合成（場景曲線 → 留白（出血格過濾）→ 格溝／頁邊 → 貼紙 →
+     * 氣泡 → 偽泡 → 人頭一致化 → 剩餘填色 → 人物還原（跳過泡與格溝））。
      */
     fun render(
         input: NightReadInput,
         p: NightReadParams = NightReadParams(),
         debug: NightReadDebug? = null,
+    ): NightReadResult = render(input, p, debug, null)
+
+    /**
+     * 同 [render]，另把格溝與出血過濾的中間結果存進 [diag]（parity／除錯用，不影響輸出）：
+     * `sep`（[Separators.Layer]）、`band0`／`band_post`／`band_final`（[Mask]：veto 前／veto 後／過濾後的留白帶）、
+     * `pieces`（[Bleed.Piece] 清單）、`t_sep`／`t_bleed`（ms）。鍵名同研究端 `compose(diag=)`。
+     */
+    internal fun render(
+        input: NightReadInput,
+        p: NightReadParams,
+        debug: NightReadDebug?,
+        diag: MutableMap<String, Any>?,
     ): NightReadResult {
         val g = Regions.normalizePaper(input.gray, input.chroma, p)
         val seg = input.seg
@@ -111,9 +123,9 @@ object NightRead {
         val lost = bubbleBeforeTrim.andNot(bubble)
 
         // ── 合成 ──────────────────────────────────────────────────────
-        val out = compose(g, seg, gutter, bubble, frameless, wc, plan, frame, lh, lv,
-            input.regions, charMask, charRaw, bubbleRest, lost, p, debug)
-        return NightReadResult(out, gutter, bubble, charMask, frameless, plan.accept, plan.promoted)
+        val (out, sep) = compose(g, seg, gutter, bubble, frameless, wc, plan, frame, lh, lv,
+            input.regions, charMask, charRaw, bubbleRest, lost, p, debug, diag)
+        return NightReadResult(out, gutter, bubble, charMask, frameless, plan.accept, plan.promoted, sep)
     }
 
     /**
@@ -509,17 +521,49 @@ object NightRead {
 
     // ── 合成 ─────────────────────────────────────────────────────────
 
+    /**
+     * 整頁合成：場景曲線 → 留白填深（出血格過濾）→ 格溝／頁邊 → 貼紙式背景 → 氣泡重繪 → 人物還原。
+     * 回傳（成品頁, 實際塗的格溝／頁邊；SEP 關為 null）。
+     */
     private fun compose(
         g: Gray, seg: Mask, gutterIn: Mask, bubble: Mask, frameless: Boolean,
         wc: Regions.WhiteComponents, plan: Sticker.Plan, frame: Mask, lh: Mask, lv: Mask,
         regions: List<TextRegion>, charMask: Mask, charRaw: Mask,
         bubbleRest: Mask?, lost: Mask, p: NightReadParams, debug: NightReadDebug?,
-    ): Gray {
+        diag: MutableMap<String, Any>?,
+    ): Pair<Gray, Mask?> {
         val w = g.w
         val h = g.h
         val out = sceneFinal(g, seg, p)
         debug?.invoke("sceneFinal", 0)
         val sceneKeep = out.copy()              // 人物區最終一律還原成場景調
+
+        // 任意角度格溝／頁邊（SEP）：先算好——出血過濾要拿它當結構證據，貼紙層之前塗、人物還原跳過它。
+        // 圖層規則在 Separators.build 裡：只扣泡 ⊕7（不扣人物）、單條溝被泡吃過半整條丟、碎塊丟。
+        val tSep = System.nanoTime()
+        val layer = if (p.separators) Separators.build(g, seg, bubble, frame, p) else null
+        val sep = layer?.sep
+        if (diag != null) {
+            diag["t_sep"] = (System.nanoTime() - tSep) / 1e6
+            diag["t_bleed"] = 0.0
+            if (layer != null) diag["sep"] = layer
+        }
+        debug?.invoke("separators", sep?.count() ?: 0)
+
+        // 出血格過濾：只拿掉留白帶裡的畫面塊、不新增（SEP 之後照塗，拿不掉溝與頁邊）
+        fun bleed(band: Mask, band0: Mask): Mask {
+            if (!p.bleedFilter) return band
+            val t0 = System.nanoTime()
+            val res = Bleed.filter(band, band0, g, frame, seg, bubble, charMask, regions, gutterIn, layer, p)
+            if (diag != null) {
+                diag["t_bleed"] = (diag["t_bleed"] as Double) + (System.nanoTime() - t0) / 1e6
+                diag["band0"] = band0
+                diag["band_post"] = band
+                diag["band_final"] = res.band
+                diag["pieces"] = res.pieces
+            }
+            return res.band
+        }
 
         // 留白：有框頁只填「深入不超過短邊 12%」的部分；無框頁只填真頁邊帶
         if (gutterIn.any()) {
@@ -537,7 +581,8 @@ object NightRead {
                     val l = cc.labels[i]
                     if (l > 0 && maxDepth[l] <= lim) keep.data[i] = true
                 }
-                val keep2 = Texture.veto(keep, g, frame, seg, bubble, p)   // 有線稿的白不是留白
+                // 有線稿的白不是留白；出血格畫面拿掉
+                val keep2 = bleed(Texture.veto(keep, g, frame, seg, bubble, p), keep)
                 if (keep2.any()) paintGutter(out, g, keep2, p)
             } else {
                 val lim = p.safeGutterDepth * min(h, w)
@@ -545,11 +590,15 @@ object NightRead {
                 val cut = Regions.gutterFrameCut(gutterIn, lh, lv, p)
                 val band = Mask(w, h)
                 for (i in band.data.indices) band.data[i] = cut.data[i] && bd[i] <= lim
-                val band2 = Texture.veto(band, g, frame, seg, bubble, p)   // 有線稿的白不是留白
+                // 有線稿的白不是留白；出血格畫面拿掉
+                val band2 = bleed(Texture.veto(band, g, frame, seg, bubble, p), band)
                 debug?.invoke("gutterBand", band2.count())
                 if (band2.any()) paintGutter(out, g, band2, p)
             }
         }
+
+        // 任意角度格溝／頁邊：同留白待遇（填 BG、邊界描亮），在貼紙層之前
+        if (sep != null && sep.any()) paintGutter(out, g, sep, p)
 
         if (plan.accept.isNotEmpty()) {
             paintSticker(out, g, wc.cc, plan.accept, bubble, plan.promoted, frame, seg, charMask, p)
@@ -591,6 +640,9 @@ object NightRead {
         // ── 人物還原（放最後 ⇒ 任何新填色機制自動受保護）──────────────────
         var restore = charMask.copy()
         restore = restore.andNot(bubble)        // 真泡畫在人物之上，該處看不到人物
+        // 格溝／頁邊也贏過人物：溝是畫面的外面，人物遮罩經收邊＋平滑會越過格框線長進溝 7–15px ⇒ 溝邊灰帶、
+        // 窄溝被吃過半整條不塗。框線被出血人物打斷的地方本來就不成溝（Separators 不收）。
+        if (sep != null) restore = restore.andNot(sep)
         if (pb.any()) {
             // 收邊生長出來的邊緣不得壓過偽泡：那些像素是加工長出來的，屬於畫面不屬於人物
             restore = restore.andNot(pb.andNot(charRaw))
@@ -612,7 +664,7 @@ object NightRead {
             val a = alpha.data[i]
             out.data[i] = out.data[i] * (1f - a) + sceneKeep.data[i] * a
         }
-        return Gray(w, h, IntArray(w * h) { out.data[it].roundToInt().coerceIn(0, 255) })
+        return Gray(w, h, IntArray(w * h) { out.data[it].roundToInt().coerceIn(0, 255) }) to sep
     }
 
     /** 每像素到頁邊（有框頁再併入格線）的距離，決定留白填到多深。 */
