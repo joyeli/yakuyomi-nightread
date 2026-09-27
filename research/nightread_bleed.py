@@ -9,7 +9,7 @@
 做法：留白帶（veto 之後）的每個 8 連通塊，看它的**外圈**（5px 橢圓膨脹、扣掉頁緣 4px）碰到什麼。
 外圈逐像素歸一類，優先序由高到低：
 
-    FR  框線（frame_line_mask ∪ 任意角度框線點陣，⊕ 9×9 方核）
+    FR  框線（frame_line_mask ∪ 任意角度框線點陣，⊕ 9×9 方核）；碰頁緣的塊另加「頁邊條框線」（見下）
     SP  分鏡溝／頁邊（SEP 扣泡之前的 sep_pre，⊕ 5×5 方核）
     BB  泡（⊕ 橢圓 r6）          ┐
     TX  文字筆畫（⊕ 橢圓 r6）    ├ 中性物：不算證據
@@ -35,6 +35,14 @@
     art_inf ≥ 0.45                       拿掉 art     邊界近半是畫
     其餘                                 留  weak
 
+頁邊條框線（2026-09-28，c362_002）：頁邊條檢驗通過的那一邊，停點排成的那條直暗線就是格框線。frame_line_mask 要
+夠長的線，被泡／人物截斷、只在頁緣露出一小段的框線（c362_002 右上框線只露 ~100 px）認不出來，框線另一側那塊白
+（頭髮與泡之間）外圈碰到的就只剩「非白」＝AR，被當成出血格畫面拿掉。所以先對所有碰頁緣的塊做頁邊條檢驗，把通過那邊
+每個在線上的停點、往內連續非白直到走回白（≤ MARGIN_LINE_MAX px；走不回白＝框線跟畫黏在一起，不算）的像素收成
+框線本體；外圈落在它（⊕ 9×9）上、原本不是 FR 的像素，**只在塊碰頁緣、且沿這段框線的接觸長度（上下邊框線數不同的 x、
+左右邊框線數不同的 y）≥ MLINE_MIN_RUN**時改記 FR。不碰頁緣或只擦到一點的（狀聲詞壓框線時字裡的白、框線上方的細縫）
+照原類別。47 頁 417 塊只有 c362_002 那一塊的決策變（DROP-art → framed）；0.9×／1.1× 也只有 c362_002。
+
 只拿掉、不新增；SEP（nightread_sep.py）在過濾之後照塗，過濾器拿不掉溝與頁邊。開關 `NIGHTREAD_BLEED`。
 
 ⚠️ Kotlin 移植的逐位元陷阱：
@@ -48,6 +56,8 @@
   4. 頁邊條的 Theil–Sen 取樣點 `np.linspace(0, n−1, k).astype(int)`：numpy 算 i·step + 0（最後一點強制＝n−1）再截斷，
      Kotlin 要照同一式子，否則 i·step 落在 4.999… 的點會取到不同列。
   5. 塊的標號用 cv2 8 連通；決策只看塊本身，與標號順序無關。
+  6. 頁邊條框線要**先**收齊（所有碰頁緣的塊、四邊都檢驗，不因某邊通過就提早回傳），再算逐塊外圈；框線本體要走回白
+     （< WHITE_TH 的連續像素、長度 ≤ MARGIN_LINE_MAX，下一格 ≥ WHITE_TH）才畫。接觸長度算「不同的 x／y 個數」。
 """
 import cv2
 import numpy as np
@@ -85,19 +95,28 @@ MARGIN_MIN_DEPTH = 4    # 頁邊深度（停點中位數）下限
 MARGIN_COVER = 0.7      # 停點落在擬合直線 ±2px 內的列 ≥ 此比例
 MARGIN_ANG = 5.0        # 停點直線與頁緣夾角上限（度）
 MARGIN_DARK = 190       # 停點亮度中位數上限：是線不是漸層
+MARGIN_LINE_MAX = 12    # 框線本體：停點起往內連續非白（< WHITE_TH），這麼多 px 內要走回白（兩側都是白的細線）才算
+MLINE_MIN_RUN = MARGIN_MIN_ROWS  # 塊沿頁邊條框線的接觸長度（外圈碰到的沿線位置數）≥ 此，那段框線才算它的 FR
 
 
 def ell(r):
     return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
 
 
-def margin_strip(m, g, neutral):
+def margin_strip(m, g, neutral, lines=None):
     """頁邊條檢驗：塊碰頁緣的每一邊，沿頁緣逐列從頁緣往內走。停點＝第一個「暗（g < MARGIN_OK）或中性物」像素；
     停點往內 MARGIN_NEU_LOOK px 內碰到中性物也算中性。停在中性物上的列不計（泡／人物蓋住框線是常態），
     停在暗點上的列＝資訊列，要求：深度 ≤ 短邊×MARGIN_FRAC、途中亮而非白夠少、停點沿頁緣近乎一直線
     （夾角 ≤ MARGIN_ANG、殘差 ≤ 2px 的列 ≥ MARGIN_COVER）、停點夠暗、資訊列與直線跨度 ≥ MARGIN_MIN_ROWS、
-    深度 ≥ MARGIN_MIN_DEPTH。任一邊通過就回 True。"""
+    深度 ≥ MARGIN_MIN_DEPTH。任一邊通過就回 True。
+
+    [lines]＝(上下邊用, 左右邊用) 兩張整頁 bool 陣列；給了就四邊都檢驗（回傳值不變＝任一邊通過），並把**通過那邊**
+    的框線本體畫進去：每個落在擬合直線上的停點，從停點起往內走過連續非白（< WHITE_TH）的像素，MARGIN_LINE_MAX px 內
+    走回白（線的另一側是紙）才畫；走不回白＝框線在這裡跟畫（狀聲詞外框、線稿）黏在一起，不畫。
+    頁邊條停下來的那條直暗線就是格框線——被泡／人物截斷、只露出一小段的框線 frame_line_mask 認不出來，
+    靠這裡補成框線證據，給框線另一側的塊用（c362_002 頂端頭髮與泡之間的白：右框線只露 ~100 px）。"""
     H, W = g.shape; sh = min(H, W); maxd = int(MARGIN_FRAC * sh)
+    ok = False
     for side in ("top", "bottom", "left", "right"):
         if side == "top": cont = m[0:3, :].any(axis=0); G = g; N = neutral
         elif side == "bottom": cont = m[H - 3:H, :].any(axis=0); G = g[::-1, :]; N = neutral[::-1, :]
@@ -142,43 +161,70 @@ def margin_strip(m, g, neutral):
         depth = round(float(np.median(dd[inl])), 1) if inl.any() else -1
         if (cover >= MARGIN_COVER and ang <= MARGIN_ANG and dark <= MARGIN_DARK and span >= MARGIN_MIN_ROWS
                 and depth >= MARGIN_MIN_DEPTH):
-            return True
-    return False
+            if lines is None:
+                return True
+            ok = True
+            line = lines[0] if side in ("top", "bottom") else lines[1]
+            for t_, d_ in zip(ts[cand][inl], d[cand][inl]):     # 停點起往內的連續非白＝框線本體
+                d_ = int(d_); e_ = d_
+                while e_ < min(d_ + MARGIN_LINE_MAX, G.shape[0]) and G[e_, t_] < WHITE_TH:
+                    e_ += 1
+                if e_ >= G.shape[0] or G[e_, t_] < WHITE_TH:          # 上限內沒走回白：不是兩側皆白的細線
+                    continue
+                if side == "top": line[d_:e_, t_] = True
+                elif side == "bottom": line[H - e_:H - d_, t_] = True
+                elif side == "left": line[t_, d_:e_] = True
+                else: line[t_, W - e_:W - d_] = True
+    return ok
 
 
 def piece_features(g, band, band0, gutter, sep, sep_pre, frame_arb, frame_hv, bubble, seg, charmask, regions):
     """留白帶（band＝veto 後）的逐塊特徵。回傳 (塊標號圖, [特徵 dict])。"""
     H, W = g.shape
-    FR = cv2.dilate((frame_hv | frame_arb).astype(np.uint8), np.ones((FR_DIL, FR_DIL), np.uint8)) > 0
-    SP = cv2.dilate(sep_pre.astype(np.uint8), np.ones((SP_DIL, SP_DIL), np.uint8)) > 0
     BB = cv2.dilate(bubble.astype(np.uint8), ell(BB_R)) > 0
     TX = cv2.dilate(seg.astype(np.uint8), ell(TX_R)) > 0
     CH = cv2.dilate(charmask.astype(np.uint8), ell(CH_R)) > 0
+    NEU = BB | TX | CH
+    n, lb, st, _ = cv2.connectedComponentsWithStats(band.astype(np.uint8), 8)
+    t = TOUCH_PX
+    # 頁邊條檢驗先做（碰頁緣的塊）：通過的頁邊條停下來的那條直暗線＝格框線本體（上下邊 mh、左右邊 mv），
+    # 當 FR 證據——短到 frame_line_mask 認不出的框線（被泡／人物截斷）也算框線，框線另一側的塊才有「邊界是框線」
+    # 的證據。只給**碰頁緣、且沿著它夠長**的塊用（逐塊判，見下面的 FM）：框線另一側那條細縫（c371_006 0.9× 狀聲詞
+    # 筆畫與建築線之間 7×22 的縫）只有端點碰到框線；狀聲詞壓在框線上時，字裡的白隔著字的外框也在框線另一側
+    # （demo02 1.1× 沿線 24 px），兩者都不碰頁緣，不算。
+    mh = np.zeros((H, W), bool); mv = np.zeros((H, W), bool)
+    touches, margins = {}, {}
+    for i in range(1, n):
+        x, y, w, h = [int(v) for v in st[i, :4]]
+        touches[i] = x <= t or y <= t or x + w >= W - t or y + h >= H - t
+        margins[i] = False
+        if touches[i]:
+            y0, y1, x0, x1 = max(0, y - PIECE_PAD), min(H, y + h + PIECE_PAD), max(0, x - PIECE_PAD), min(W, x + w + PIECE_PAD)
+            full = np.zeros((H, W), bool); full[y0:y1, x0:x1] = lb[y0:y1, x0:x1] == i
+            margins[i] = margin_strip(full, g, NEU, (mh, mv))
+    FR = cv2.dilate((frame_hv | frame_arb).astype(np.uint8), np.ones((FR_DIL, FR_DIL), np.uint8)) > 0
+    FMH = cv2.dilate(mh.astype(np.uint8), np.ones((FR_DIL, FR_DIL), np.uint8)) > 0   # 同 FR 的外擴
+    FMV = cv2.dilate(mv.astype(np.uint8), np.ones((FR_DIL, FR_DIL), np.uint8)) > 0
+    SP = cv2.dilate(sep_pre.astype(np.uint8), np.ones((SP_DIL, SP_DIL), np.uint8)) > 0
     VT = band0 & ~band                      # 被 texture_veto2 挖掉的白
     DC = gutter & ~band0                    # 同留白元件、超出深度帶的白
     WO = (g >= WHITE_TH) & ~gutter          # 其他白
     cat = np.full((H, W), 8, np.uint8)      # 8 = AR（非白線稿）；由低優先往高優先蓋
     for k, M in reversed(list(enumerate([FR, SP, BB, TX, CH, VT, DC, WO]))):
         cat[M] = k
-    NEU = BB | TX | CH
     names = ["FR", "SP", "BB", "TX", "CH", "VT", "DC", "WO", "AR"]
     tb = np.zeros((H, W), bool)
     q = TEXT_BOX_PAD
     for r_ in (regions or []):
         x0, y0, x1, y1 = [int(v) for v in r_["bbox"]]
         tb[max(0, y0 - q):min(H, y1 + q + 1), max(0, x0 - q):min(W, x1 + q + 1)] = True
-    n, lb, st, _ = cv2.connectedComponentsWithStats(band.astype(np.uint8), 8)
-    t = TOUCH_PX
     out = []
     for i in range(1, n):
         a = int(st[i, cv2.CC_STAT_AREA]); x, y, w, h = [int(v) for v in st[i, :4]]
-        touch = x <= t or y <= t or x + w >= W - t or y + h >= H - t
+        touch = touches[i]
         y0, y1, x0, x1 = max(0, y - PIECE_PAD), min(H, y + h + PIECE_PAD), max(0, x - PIECE_PAD), min(W, x + w + PIECE_PAD)
         mm = lb[y0:y1, x0:x1] == i
-        margin = False
-        if touch:                            # 碰頁緣的塊才做頁邊條檢驗
-            full = np.zeros((H, W), bool); full[y0:y1, x0:x1] = mm
-            margin = margin_strip(full, g, NEU)
+        margin = margins[i]                  # 碰頁緣的塊才做頁邊條檢驗（上面先做了）
         ns = int((mm & ~sep[y0:y1, x0:x1]).sum())
         ring = (cv2.dilate(mm.astype(np.uint8), ell(RING_R)) > 0) & ~mm
         e = RING_EDGE
@@ -187,7 +233,19 @@ def piece_features(g, band, band0, gutter, sep, sep_pre, frame_arb, frame_hv, bu
         if y1 > H - e: ring[ring.shape[0] - (y1 - (H - e)):, :] = False
         if x1 > W - e: ring[:, ring.shape[1] - (x1 - (W - e)):] = False
         rn = max(int(ring.sum()), 1)
-        cnt = np.bincount(cat[y0:y1, x0:x1][ring], minlength=9)
+        cc_ = cat[y0:y1, x0:x1]
+        cnt = np.bincount(cc_[ring], minlength=9)
+        # FM：外圈落在頁邊條框線（外擴後）上、原本不是 FR 的像素。碰頁緣的塊、沿那段框線的接觸長度（上下邊框線數
+        # 不同的 x、左右邊框線數不同的 y）≥ MLINE_MIN_RUN，該方向的 FM 才改記 FR（其餘照原類別）
+        run_h = run_v = 0
+        if touch:
+            fh = ring & FMH[y0:y1, x0:x1] & (cc_ != 0)
+            fv = ring & FMV[y0:y1, x0:x1] & (cc_ != 0)
+            run_h = len(np.unique(np.nonzero(fh)[1])); run_v = len(np.unique(np.nonzero(fv)[0]))
+            fm = (fh if run_h >= MLINE_MIN_RUN else False) | (fv if run_v >= MLINE_MIN_RUN else False)
+            if np.any(fm):
+                cnt = cnt - np.bincount(cc_[fm], minlength=9)
+                cnt[0] += int(np.count_nonzero(fm))
         fr = {nm: round(float(c) / rn, 3) for nm, c in zip(names, cnt)}      # ⚠️KT 陷阱 1：先捨入再比
         inf = rn - cnt[2] - cnt[3] - cnt[4]
         fr["inf"] = round(float(inf) / rn, 3)
@@ -195,7 +253,7 @@ def piece_features(g, band, band0, gutter, sep, sep_pre, frame_arb, frame_hv, bu
         fr["art_inf"] = round(float(cnt[5] + cnt[6] + cnt[8]) / max(inf, 1), 3)
         txt = float((mm & tb[y0:y1, x0:x1]).sum()) / a
         out.append(dict(i=i, area=a, ns=ns, bbox=[x, y, w, h], touch=touch, txt=round(txt, 3),
-                        net=a >= NET_FRAC * H * W, margin=margin, **fr))
+                        net=a >= NET_FRAC * H * W, margin=margin, mrun=[run_h, run_v], **fr))
     return lb, out
 
 

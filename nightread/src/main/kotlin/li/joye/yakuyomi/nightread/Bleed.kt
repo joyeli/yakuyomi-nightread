@@ -19,6 +19,11 @@ import kotlin.math.min
  * AR 非白。`inf`＝外圈扣掉中性物的比例、`frameInf`＝(FR+SP)/inf、`artInf`＝(VT+DC+AR)/inf。決策表見 [decide]。
  * 只拿掉、不新增；SEP 在過濾之後照塗，過濾器拿不掉溝與頁邊。
  *
+ * 頁邊條框線（2026-09-28，c362_002）：頁邊條檢驗通過的那一邊，停點排成的直暗線就是格框線。被泡／人物截斷、只在頁緣
+ * 露出一小段的框線 [Regions.frameLineMask] 認不出來，框線另一側那塊白外圈碰到的只剩 AR，被當成出血格畫面拿掉。
+ * 所以先對所有碰頁緣的塊做頁邊條檢驗、收框線本體（[marginStrip] 的 lineH／lineV）；外圈落在它（⊕ frDil 方核）上、
+ * 原本不是 FR 的像素，只在塊碰頁緣、且沿這段框線的接觸長度 ≥ [BleedParams.mlineMinRun] 時改記 FR。
+ *
  * 逐位元的地方（與 python 同輸入 ⇒ 逐塊決策與輸出逐像素相同，47 頁驗過）：
  *  - 決策用的比例先 `round(·, 3)` **再**比門檻（FR+SP == 0 其實是「兩者都 < 0.0005」）。python `round` 對**精確的
  *    二進位值**半數取偶 ⇒ `BigDecimal(double).setScale(3, HALF_EVEN)`（不是 `BigDecimal.valueOf`：那走最短十進位字串，
@@ -29,6 +34,8 @@ import kotlin.math.min
  *    影像外視為 0，同 cv2），外圈類別只在外圈像素上查打包位元——一頁五趟整頁外擴＋逐塊外圈，逐像素版加整頁類別圖
  *    在 2.6 MPx 上要 ~150 ms。
  *  - 塊的標號用 8 連通；決策只看塊本身，與標號順序無關。
+ *  - 頁邊條框線要**先**收齊（所有碰頁緣的塊、四邊都檢驗，不因某邊通過就提早回傳），再算逐塊外圈；框線本體要走回白
+ *    （< whiteTh 的連續像素、長度 ≤ marginLineMax，下一格 ≥ whiteTh）才畫；接觸長度算「不同的 x／y 個數」。
  */
 internal object Bleed {
 
@@ -67,6 +74,8 @@ internal object Bleed {
         /** FR、SP、BB、TX、CH、VT、DC、WO、AR 各佔外圈的比例（捨入到 3 位）。 */
         val frac: DoubleArray,
         val inf: Double, val frameInf: Double, val artInf: Double, val txt: Double, val net: Boolean,
+        /** 沿頁邊條框線的接觸長度：上下邊框線（不同的 x 個數）、左右邊框線（不同的 y 個數）；不碰頁緣的塊一律 0。 */
+        val mrunH: Int = 0, val mrunV: Int = 0,
     ) {
         /** 決策理由（拿掉的加 `DROP-` 前綴，同 python `why`）。 */
         var why: String = ""
@@ -123,6 +132,24 @@ internal object Bleed {
         val b0 = band0.data
         val gu = gutter.data
         val gv = g.data
+
+        // ── 標號＋頁邊條檢驗（先做：通過那邊停點排成的直暗線＝框線本體 lineH（上下邊）／lineV（左右邊））──
+        val cc = Cv.ccStats(band, 8)
+        val lab = cc.labels
+        val t = b.touchPx
+        val touchOf = BooleanArray(cc.n)
+        val marginOf = BooleanArray(cc.n)
+        val lineH = LongArray(nw * h)                 // 打包位元（同 [Cv.packBits]），框線像素少、省掉整頁 Mask 與打包
+        val lineV = LongArray(nw * h)
+        for (i in 1 until cc.n) {
+            val x = cc.left[i]
+            val y = cc.top[i]
+            touchOf[i] = x <= t || y <= t || x + cc.width[i] >= w - t || y + cc.height[i] >= h - t
+            if (touchOf[i]) marginOf[i] = marginStrip(lab, i, g, neu, nw, p, lineH, lineV)   // 碰頁緣的塊才做
+        }
+        val fmh = if (lineH.any { it != 0L }) Cv.dilateBits(lineH, w, h, Cv.rect(b.frDil, b.frDil)) else null   // 同 FR 的外擴
+        val fmv = if (lineV.any { it != 0L }) Cv.dilateBits(lineV, w, h, Cv.rect(b.frDil, b.frDil)) else null
+
         /** 外圈像素 (x, y) 的類別（優先序由高到低）。 */
         fun category(x: Int, y: Int): Int {
             val i = y * w + x
@@ -155,9 +182,6 @@ internal object Bleed {
         }
 
         // ── 逐塊特徵 ─────────────────────────────────────────────────────
-        val cc = Cv.ccStats(band, 8)
-        val lab = cc.labels
-        val t = b.touchPx
         val e = b.ringEdge
         val ringK = Cv.ellipse(2 * b.ringR + 1)
         val pieces = ArrayList<Piece>(cc.n - 1)
@@ -168,7 +192,7 @@ internal object Bleed {
             val y = cc.top[i]
             val pw = cc.width[i]
             val ph = cc.height[i]
-            val touch = x <= t || y <= t || x + pw >= w - t || y + ph >= h - t
+            val touch = touchOf[i]
             val y0 = max(0, y - b.piecePad)
             val y1 = min(h, y + ph + b.piecePad)
             val x0 = max(0, x - b.piecePad)
@@ -187,13 +211,21 @@ internal object Bleed {
                     if (tb[src + xx]) inTb++
                 }
             }
-            val margin = touch && marginStrip(lab, i, g, neu, nw, p)   // 碰頁緣的塊才做頁邊條檢驗
+            val margin = marginOf[i]                                   // 碰頁緣的塊才做頁邊條檢驗（上面先做了）
             // 外圈＝橢圓 r5 膨脹 − 塊本身，扣掉頁緣 e px（頁緣外沒有證據，不能算成「沒碰到框線」）
             val snw = (sw + 63) ushr 6
             val mmBits = Cv.packBits(mm)
             val dil = Cv.dilateBits(mmBits, sw, sh, ringK)
             val cnt = IntArray(9)
             var rn = 0
+            // FM：外圈落在頁邊條框線（外擴後）上、原本不是 FR 的像素（碰頁緣的塊才看）。按「只在上下邊框線／只在左右邊
+            // 框線／兩者都在」分三組記原類別；沿線接觸長度＝上下邊框線上不同的 x、左右邊框線上不同的 y
+            val useFm = touch && (fmh != null || fmv != null)
+            val cntH = if (useFm) IntArray(9) else null
+            val cntV = if (useFm) IntArray(9) else null
+            val cntB = if (useFm) IntArray(9) else null
+            val colH = if (useFm) BooleanArray(sw) else null
+            val rowV = if (useFm) BooleanArray(sh) else null
             for (yy in 0 until sh) {
                 val gy = y0 + yy
                 if (gy < e || gy >= h - e) continue
@@ -207,11 +239,32 @@ internal object Bleed {
                         val gx = x0 + xx
                         if (gx < e || gx >= w - e) continue
                         rn++
-                        cnt[category(gx, gy)]++
+                        val c = category(gx, gy)
+                        cnt[c]++
+                        if (useFm && c != FR) {
+                            val inH = fmh != null && has(fmh, nw, gx, gy)
+                            val inV = fmv != null && has(fmv, nw, gx, gy)
+                            if (inH) colH!![xx] = true
+                            if (inV) rowV!![yy] = true
+                            if (inH && inV) cntB!![c]++ else if (inH) cntH!![c]++ else if (inV) cntV!![c]++
+                        }
                     }
                 }
             }
             rn = max(rn, 1)
+            var runH = 0
+            var runV = 0
+            if (useFm) {
+                for (v in colH!!) if (v) runH++
+                for (v in rowV!!) if (v) runV++
+                val okH = runH >= b.mlineMinRun
+                val okV = runV >= b.mlineMinRun
+                for (k in 0 until 9) {                 // 接觸夠長的方向：FM 改記 FR
+                    val mv = (if (okH) cntH!![k] else 0) + (if (okV) cntV!![k] else 0) + (if (okH || okV) cntB!![k] else 0)
+                    cnt[k] -= mv
+                    cnt[FR] += mv
+                }
+            }
             val frac = DoubleArray(9) { r3(cnt[it].toDouble() / rn) }
             val inf = rn - cnt[BB] - cnt[TX] - cnt[CH]
             val pc = Piece(
@@ -221,6 +274,7 @@ internal object Bleed {
                 artInf = r3((cnt[VT] + cnt[DC] + cnt[AR]).toDouble() / max(inf, 1)),
                 txt = r3(inTb.toDouble() / a),
                 net = a >= b.netFrac * h * w,
+                mrunH = runH, mrunV = runV,
             )
             val (d, why) = decide(pc, b)
             pc.drop = d
@@ -265,16 +319,25 @@ internal object Bleed {
      * 殘差 ≤ 2px 的列 ≥ marginCover）、停點夠暗、資訊列與直線跨度 ≥ marginMinRows、深度 ≥ marginMinDepth。
      * 任一邊通過就回 true。
      *
+     * [lineH]／[lineV]（整頁打包位元，[Cv.packBits] 格式）給了就四邊都檢驗（回傳值不變），並把**通過那邊**的框線本體
+     * 畫進去（上下邊進 lineH、左右邊進 lineV）：
+     * 每個落在擬合直線上的停點，從停點起往內走過連續非白（< whiteTh），marginLineMax px 內走回白才畫（線的另一側是紙；
+     * 走不回白＝框線在這裡跟畫黏在一起）。
+     *
      * 座標：r＝離頁緣的深度、t＝沿頁緣的位置（上／下邊 t＝x、左／右邊 t＝y），同 python 轉置／翻轉後的 `G[r, t]`。
      */
-    private fun marginStrip(lab: IntArray, id: Int, g: Gray, neutral: LongArray, nw: Int, p: NightReadParams): Boolean {
+    private fun marginStrip(lab: IntArray, id: Int, g: Gray, neutral: LongArray, nw: Int, p: NightReadParams,
+                            lineH: LongArray? = null, lineV: LongArray? = null): Boolean {
         val b = p.bleed
         val w = g.w
         val h = g.h
         val maxd = (b.marginFrac * min(h, w)).toInt()
         val rows = maxd + 1
+        val collect = lineH != null && lineV != null
+        var ok = false
         for (side in 0 until 4) {
             val len = if (side < 2) w else h
+            val depthN = if (side < 2) h else w         // 深度方向的長度（python G.shape[0]）
             // (r, t) → 像素 (x, y)：0 上、1 下（g[::-1]）、2 左（g.T）、3 右（g[:, ::-1].T）
             fun px(r: Int, tt: Int): Int = when (side) {
                 0, 1 -> tt
@@ -357,9 +420,11 @@ internal object Bleed {
             var tMax = -Double.MAX_VALUE
             val stopv = DoubleArray(n)
             val depths = DoubleArray(n)
+            val inK = IntArray(n)                     // 在線上的停點（候選列序號）
             for (k in 0 until n) {
                 val res = abs(dd[k] - (s * tt[k] + c0))
                 if (res > INLIER_PX) continue
+                inK[nIn] = colK[k]
                 val tk = ts[colK[k]]
                 stopv[nIn] = g.data[at(min(d[colK[k]], maxd), tk)].toDouble()
                 depths[nIn] = dd[k]
@@ -375,9 +440,24 @@ internal object Bleed {
             val depth = if (nIn > 0) BigDecimal(median(depths, nIn)).setScale(1, RoundingMode.HALF_EVEN).toDouble() else -1.0
             if (cover >= b.marginCover && ang <= b.marginAng && dark <= b.marginDark && span >= b.marginMinRows &&
                 depth >= b.marginMinDepth) {
-                return true
+                if (!collect) return true
+                ok = true
+                val line = if (side < 2) lineH!! else lineV!!
+                for (j in 0 until nIn) {              // 停點起往內的連續非白＝框線本體（走回白才畫）
+                    val tk = ts[inK[j]]
+                    val d0 = d[inK[j]]
+                    val lim = min(d0 + b.marginLineMax, depthN)
+                    var e = d0
+                    while (e < lim && g.data[at(e, tk)] < p.whiteTh) e++
+                    if (e >= depthN || g.data[at(e, tk)] < p.whiteTh) continue
+                    for (r in d0 until e) {
+                        val x = px(r, tk)
+                        val y = py(r, tk)
+                        line[y * nw + (x ushr 6)] = line[y * nw + (x ushr 6)] or (1L shl (x and 63))
+                    }
+                }
             }
         }
-        return false
+        return ok
     }
 }

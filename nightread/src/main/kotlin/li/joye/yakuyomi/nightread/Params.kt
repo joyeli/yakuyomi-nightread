@@ -303,6 +303,16 @@ data class BleedParams(
     val marginAng: Double = 5.0,
     /** 頁邊條檢驗：停點亮度中位數上限（是線不是漸層）。 */
     val marginDark: Int = 190,
+    /**
+     * 頁邊條框線本體：通過那邊每個在線上的停點，往內連續非白（< [NightReadParams.whiteTh]）這麼多 px 內要走回白才畫
+     * （兩側都是紙的細線；走不回白＝框線跟畫黏在一起）。
+     */
+    val marginLineMax: Int = 12,
+    /**
+     * 頁邊條框線當 FR 證據的接觸長度下限：碰頁緣的塊沿這段框線（上下邊框線數不同的 x、左右邊框線數不同的 y）≥ 此，
+     * 外圈落在它上面的像素才改記 FR（同 [marginMinRows]：頁邊條自己也要這麼多列才算一條線）。
+     */
+    val mlineMinRun: Int = 30,
 )
 
 /**

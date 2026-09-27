@@ -524,7 +524,8 @@ gutters (keep) or artwork (drop). It only removes; SEP is painted afterwards reg
 tears went from 215 blocks to 83.
 
 The ring (ellipse r5, minus 4 px at the page edge) is classified pixel by pixel, highest priority first: FR frame
-line (horizontal/vertical ∪ any angle, ⊕9) > SP gutter/margin (before bubble subtraction, ⊕5) > BB bubble (⊕r6)
+line (horizontal/vertical ∪ any angle, ⊕9; for pieces touching the page edge also margin-strip frame lines, see
+`MARGIN_LINE_MAX`) > SP gutter/margin (before bubble subtraction, ⊕5) > BB bubble (⊕r6)
 > TX text (⊕r6) > CH character (⊕r8) > VT white removed by the veto > DC white beyond the depth band > WO other
 white > AR non-white. `inf` is the fraction left after BB/TX/CH; `frame_inf` = (FR + SP) / inf;
 `art_inf` = (VT + DC + AR) / inf. Every fraction is rounded to 3 decimals before it is compared.
@@ -557,6 +558,19 @@ past the stop) do not count. For the rest, 70% of the stops must lie within ±2 
 page edge, the median stop brightness must be ≤ 190 (a line, not a gradient), informative rows and the line's
 span must reach 30, the depth must be at least 4 px, and "light but not white" pixels on the way must stay within
 max(3, 2% × depth). Maximum depth is `SAFE_GUTTER_DEPTH` (0.12 × the short side).
+
+### `MARGIN_LINE_MAX` = 12 · `MLINE_MIN_RUN` = 30
+Margin-strip frame lines as frame evidence (2026-09-28, c362_002). On a side that passes the margin-strip test, the
+straight dark line the stops sit on is a panel frame — even when a bubble or a character cuts it so short that
+`frame_line_mask` never sees it (c362_002's top-right frame shows only ~96 px). From each stop on the fitted line,
+walk inward over consecutive non-white pixels (< 235); only if white comes back within 12 px is that run recorded
+as frame line (a thin line with paper on both sides; a run that never returns to white is a frame fused with
+artwork and is not recorded). Top/bottom sides go into one map and left/right into another, each dilated ⊕9 like
+FR. For a piece that **touches the page edge**, ring pixels on those maps that are not already FR count as FR,
+but only in a direction where the contact length — distinct x along a top/bottom line, distinct y along a
+left/right line — reaches 30 (the same row count the margin-strip test itself demands). All edge-touching pieces
+run the margin-strip test first, on all four sides, before any ring is classified. Each piece reports the contact
+lengths as `mrun` (Kotlin `mrunH`/`mrunV`). Kotlin: `BleedParams.marginLineMax` / `mlineMinRun`.
 
 ---
 
