@@ -27,21 +27,29 @@ import kotlin.math.sqrt
  *  - PCA：均值成對加總（[Cv.npSum]）、特徵向量 [Cv.eigh2]（dlaev2）。共變異數的乘積和是逐項加（OpenBLAS dsyrk
  *    的加總順序不同）——差在最後一位，47 頁實測不影響任何遮罩（研究端換加總順序也逐像素相同）。
  *  - 框線／延長線／走廊的點陣化用 [Cv.line]／[Cv.fillPoly]（cv2 規則）；粗黑塊用 [Cv.distanceChamfer]（3×3）。
+ *  - 斷框線的聯合擬合（[occGroup]）：成員命中像素依併入順序串接再 PCA（＝python `np.concatenate` 的順序）；
+ *    沿聯合直線的走訪範圍是端點投影 floor／ceil；群組區間一律由成員端點投影（單成員也投影）；併入判準的端點距離
+ *    量到聯合直線（每個成員、兩端），之前的粗篩用 2×groupOff 量到併入前的群組直線；重疊判準是兩端投影到併入前的
+ *    群組直線、min(兩右端) − max(兩左端) > gap；[occLine] 輸出的 fill＝max(沿聯合直線, 該截自己定稿的命中率)。
  */
 internal object Separators {
 
     /** 區間 [lo, hi]（沿線方向座標）。 */
     class Iv(val lo: Double, val hi: Double)
 
-    /** 一段定稿框線（detect_segments 的輸出）。p0/p1 與 t0/t1 會在去重時延伸。 */
+    /**
+     * 一段定稿框線（detect_segments 的輸出）。p0/p1 與 t0/t1 會在去重時延伸。
+     * [ex]／[ey]：定稿走訪的命中像素（站主序、站內法向由負到正；只有斷框線那一趟 keepHits 才存），給聯合擬合。
+     */
     class Seg(
         var p0x: Double, var p0y: Double, var p1x: Double, var p1y: Double,
         val dx: Double, val dy: Double, val nx: Double, val ny: Double,
         val mx: Double, val my: Double,
         var t0: Double, var t1: Double,
         val fill: Double,
+        val ex: IntArray? = null, val ey: IntArray? = null,
     ) {
-        fun copy() = Seg(p0x, p0y, p1x, p1y, dx, dy, nx, ny, mx, my, t0, t1, fill)
+        fun copy(fill: Double = this.fill) = Seg(p0x, p0y, p1x, p1y, dx, dy, nx, ny, mx, my, t0, t1, fill, ex, ey)
         val ang: Double get() = segAngle(dx, dy)
     }
 
@@ -376,11 +384,12 @@ internal object Separators {
 
     /**
      * 預設參數＝主偵測。斷框線那一趟（[occludedFrames]）：[minLen] 切段長度下限（峰的票數門檻仍用最短框線長）、
-     * [axisTol] 只走與水平／垂直夾角 ≤ 此度的峰（θ＝格號×thStep，精確）、[finalWin] 定稿走訪的法向半窗；[cache] 兩趟共用。
+     * [axisTol] 只走與水平／垂直夾角 ≤ 此度的峰（θ＝格號×thStep，精確）、[finalWin] 定稿走訪的法向半窗；[cache] 兩趟共用；
+     * [keepHits] 每段另存定稿走訪的命中像素（[Seg.ex]／[Seg.ey]），給斷框線的聯合擬合。
      */
     fun detectSegments(g: Gray, p: NightReadParams, m0: Mask? = null, debug: MutableMap<String, Any>? = null,
                        minLen: Int? = null, axisTol: Double? = null, finalWin: Int = p.sep.walkWin,
-                       cache: HoughCache? = null): List<Seg> {
+                       cache: HoughCache? = null, keepHits: Boolean = false): List<Seg> {
         val h = g.h
         val w = g.w
         val l = max(60, rint(p.sep.lenFrac * min(h, w)))
@@ -443,10 +452,12 @@ internal object Separators {
                     val t1 = (lohi[0] + r2[1]).toDouble()
                     var c = 0
                     for (i in r2[0]..r2[1]) if (wk3.hit[i]) c++
+                    val hx = if (keepHits) hitsXy(wk3, r2[0], r2[1]) else null
                     segs.add(Seg(
                         f[0] + t0 * f[2], f[1] + t0 * f[3], f[0] + t1 * f[2], f[1] + t1 * f[3],
                         f[2], f[3], f[4], f[5], f[0], f[1], t0, t1,
                         c.toDouble() / (r2[1] - r2[0] + 1),
+                        hx?.let { it.first.copyOf(it.third) }, hx?.let { it.second.copyOf(it.third) },
                     ))
                 }
             }
@@ -456,19 +467,118 @@ internal object Separators {
         return out
     }
 
+    /** 段 s 的範圍投影到直線 (m, d) 上（向外取整），沿線 ±walkWin0 走訪的命中率（`_fill_on`）。 */
+    private fun fillOn(m: Mask, f: DoubleArray, s: Seg, p: NightReadParams): Double {
+        val u0 = dot(s.p0x - f[0], s.p0y - f[1], f[2], f[3])
+        val u1 = dot(s.p1x - f[0], s.p1y - f[1], f[2], f[3])
+        val wk = walk(m, f[0], f[1], f[2], f[3], f[4], f[5], floor(min(u0, u1)).toInt(), ceil(max(u0, u1)).toInt(), p.sep.walkWin0)
+        var c = 0
+        for (v in wk.hit) if (v) c++
+        return c.toDouble() / wk.hit.size
+    }
+
+    /**
+     * 聯合直線（`_joint`）：成員命中像素依成員順序串接後 PCA（＝python `np.concatenate` 的順序），沿它量每一截的命中率。
+     * 回傳 (直線 [mx, my, dx, dy, nx, ny], 各截命中率)。
+     */
+    private fun joint(mem: List<Seg>, m: Mask, p: NightReadParams): Pair<DoubleArray, List<Double>> {
+        var n = 0
+        for (t in mem) n += t.ex!!.size
+        val xs = IntArray(n)
+        val ys = IntArray(n)
+        var k = 0
+        for (t in mem) {
+            val ex = t.ex!!
+            ex.copyInto(xs, k); t.ey!!.copyInto(ys, k); k += ex.size
+        }
+        val f = fitPca(xs, ys, n)
+        return f to mem.map { fillOn(m, f, it, p) }
+    }
+
+    /**
+     * 一組成員 → 群組（`_occ_line`）：直線＝聯合直線；segs＝成員副本（fill＝max(沿聯合直線的命中率, 該截自己定稿的
+     * 命中率)）；區間＝成員兩端投影到聯合直線（單成員也投影），排序後重疊（斷口 ≤ 1）併起。
+     * fill 取兩者較大：頁邊的 marginFillMin 問「這一截是不是尺畫的連續框線」，一截有兩個直線假設——自己的 PCA（換緣的截
+     * 會斜）與聯合直線（粗框線上可能落在另一緣）；共線與否已由併入判準把關，這裡不重複懲罰擬合落在哪一緣。
+     */
+    private fun occLine(mem: List<Seg>, m: Mask, p: NightReadParams): Group {
+        val (f, fills) = joint(mem, m, p)
+        val segs = mem.mapIndexed { i, s -> s.copy(fill = max(fills[i], s.fill)) }
+        val iv = segs.map { s ->
+            val a0 = dot(s.p0x - f[0], s.p0y - f[1], f[2], f[3])
+            val a1 = dot(s.p1x - f[0], s.p1y - f[1], f[2], f[3])
+            doubleArrayOf(min(a0, a1), max(a0, a1))
+        }.sortedWith(compareBy<DoubleArray>({ it[0] }, { it[1] }))
+        val mg = ArrayList<DoubleArray>()
+        mg.add(iv[0].copyOf())
+        for (k in 1 until iv.size) {
+            val a = iv[k][0]
+            val b = iv[k][1]
+            if (a <= mg.last()[1] + 1) mg.last()[1] = max(mg.last()[1], b) else mg.add(doubleArrayOf(a, b))
+        }
+        return Group(f[0], f[1], f[2], f[3], f[4], f[5], segAngle(f[2], f[3]), mg.map { Iv(it[0], it[1]) }, segs)
+    }
+
+    /**
+     * 斷框線的共線分組（`occ_group`）：聯合擬合取代 [groupLines] 的夾角門檻，回傳成員清單（依併入順序）。短段各自 PCA 的
+     * 方向誤差 ∝ 1／段長（粗框線只有鄰白那一緣是候選像素，被蓋住處證據換緣，150px 一截就斜 1–2°），所以改問「有沒有一條
+     * 直線同時解釋兩截的證據」：群組成員＋候選段的命中像素聯集重新 PCA，沿聯合直線 ±walkWin0 走訪每一截的範圍，每一截
+     * 命中率都 ≥ fillMin、而且**每一個**成員的兩端到**聯合直線**的法向距都 ≤ groupOff 才併入，群組直線換成聯合直線。
+     * 端點距離量到併入前的群組直線會把候選段自己的傾斜算成偏移（c371_001 放大 1.245×：第二排上半截擬合斜 1°，遠端點離
+     * 第一排長框線 6.0px，聯合擬合根本沒機會跑）；聯合擬合之前只用 2×groupOff 粗篩。沿線與已收成員重疊 > gap 的段不併：
+     * 被蓋斷的框線在線上是互不重疊的幾截，重疊的段是同一段粗框線的另一緣、或斜切的換緣段，併進來只會把聯合直線拉斜。
+     * 依段長由長到短、先到先併。
+     */
+    private fun occGroup(pieces: List<Seg>, m: Mask, p: NightReadParams): List<List<Seg>> {
+        /** 段 t 兩端投影到直線 f 上的區間 (lo, hi)（`_pj`）。 */
+        fun projIv(t: Seg, f: DoubleArray): Pair<Double, Double> {
+            val a0 = dot(t.p0x - f[0], t.p0y - f[1], f[2], f[3])
+            val a1 = dot(t.p1x - f[0], t.p1y - f[1], f[2], f[3])
+            return min(a0, a1) to max(a0, a1)
+        }
+        class G(var f: DoubleArray, var mem: List<Seg>)
+        val groups = ArrayList<G>()
+        for (s in pieces.sortedBy { -(it.t1 - it.t0) }) {
+            var placed = false
+            for (gp in groups) {
+                val f = gp.f
+                if (abs(dot(s.p0x - f[0], s.p0y - f[1], f[4], f[5])) > 2 * p.sep.groupOff ||
+                    abs(dot(s.p1x - f[0], s.p1y - f[1], f[4], f[5])) > 2 * p.sep.groupOff) continue
+                val (sa, sb) = projIv(s, f)
+                if (gp.mem.any { t -> val (ta, tb) = projIv(t, f); min(sb, tb) - max(sa, ta) > p.sep.gap }) continue
+                val mem = gp.mem + s
+                val (fj, fills) = joint(mem, m, p)
+                if (mem.any { t ->
+                        abs(dot(t.p0x - fj[0], t.p0y - fj[1], fj[4], fj[5])) > p.sep.groupOff ||
+                            abs(dot(t.p1x - fj[0], t.p1y - fj[1], fj[4], fj[5])) > p.sep.groupOff
+                    }) continue
+                if (fills.min() < p.sep.fillMin) continue
+                gp.f = fj; gp.mem = mem
+                placed = true
+                break
+            }
+            if (!placed) groups.add(G(doubleArrayOf(s.mx, s.my, s.dx, s.dy, s.nx, s.ny), listOf(s)))
+        }
+        return groups.map { it.mem }
+    }
+
     /**
      * 頁邊斷框線（`occluded_frames`）：被狀聲詞／出血物蓋斷、每截都短於最短框線長的框線。第二趟只走近軸向的峰、
-     * 切段下限 occPieceFrac×L、定稿走訪 ±walkWin0；共線分組後相鄰兩截斷口 ≤ rint(occGapFrac×短邊) 的串成一條，
-     * 至少兩截、各截長度和 ≥ L 才收。只給頁邊與頁邊否決的格線遮罩，不進溝帶／出血過濾。
+     * 切段下限 occPieceFrac×L、定稿走訪 ±walkWin0；聯合擬合分組（[occGroup]）後，沿群組直線相鄰兩截斷口
+     * ≤ rint(occGapFrac×短邊) 的串成一條；每一串只用自己的截重新聯合擬合（[occLine]）再量區間與命中率——同一條頁邊上
+     * 遠處別格的框線（相鄰格外框常錯開 1–2px）不是這一串的證據。至少兩截、各截長度和 ≥ L 才收。
+     * 只給頁邊與頁邊否決的格線遮罩，不進溝帶／出血過濾。
      */
     fun occludedFrames(g: Gray, p: NightReadParams, cache: HoughCache, debug: MutableMap<String, Any>? = null): List<Group> {
         val sh = min(g.h, g.w)
         val l = max(60, rint(p.sep.lenFrac * sh))
         val gapMax = rint(p.sep.occGapFrac * sh)
         val pieces = detectSegments(g, p, debug = debug, minLen = rint(p.sep.occPieceFrac * l),
-            axisTol = p.sep.marginAxisAng + 1.0, finalWin = p.sep.walkWin0, cache = cache)
+            axisTol = p.sep.marginAxisAng + 1.0, finalWin = p.sep.walkWin0, cache = cache, keepHits = true)
+        val m = cache.m!!
         val out = ArrayList<Group>()
-        for (gp in groupLines(pieces, p)) {
+        for (mem in occGroup(pieces, m, p)) {
+            val gp = occLine(mem, m, p)
             val chains = ArrayList<ArrayList<Iv>>()
             chains.add(arrayListOf(gp.iv[0]))
             for (k in 1 until gp.iv.size) {
@@ -476,17 +586,18 @@ internal object Separators {
                 if (v.lo - chains.last().last().hi <= gapMax) chains.last().add(v) else chains.add(arrayListOf(v))
             }
             for (ch in chains) {
-                var tot = 0.0
-                for (v in ch) tot += v.hi - v.lo
-                if (ch.size < 2 || tot < l) continue
+                if (ch.size < 2) continue
                 val lo = ch.first().lo
                 val hi = ch.last().hi
-                val segs = gp.segs.filter { s ->
-                    val u0 = dot(s.p0x - gp.mx, s.p0y - gp.my, gp.dx, gp.dy)
-                    val u1 = dot(s.p1x - gp.mx, s.p1y - gp.my, gp.dx, gp.dy)
+                val cm = mem.filterIndexed { i, _ ->
+                    val q = gp.segs[i]
+                    val u0 = dot(q.p0x - gp.mx, q.p0y - gp.my, gp.dx, gp.dy)
+                    val u1 = dot(q.p1x - gp.mx, q.p1y - gp.my, gp.dx, gp.dy)
                     min(u0, u1) >= lo - 1 && max(u0, u1) <= hi + 1
                 }
-                out.add(Group(gp.mx, gp.my, gp.dx, gp.dy, gp.nx, gp.ny, gp.ang, ch.toList(), segs))
+                val c = occLine(cm, m, p)                       // 這一串自己的聯合直線
+                if (c.iv.size < 2 || c.len < l) continue
+                out.add(c)
             }
         }
         return out

@@ -424,7 +424,9 @@ so collinear pieces on the same ρ are not tilted by the longest one.
 ### `DEDUPE_ANG` = 2.0 · `DEDUPE_OFF` = 6.0 · `GROUP_ANG` = 1.0 · `GROUP_OFF` = 6.0
 De-duplication and collinear grouping. Two overlapping segments within 2° and 6 px are the same line found
 twice; segments within 1° and 6 px join one interrupted frame line (a list of intervals), so a frame cut by a
-bubble, a sound effect or a bleeding figure stays one line.
+bubble, a sound effect or a bleeding figure stays one line. The margin's occluded-frame pass (`MARGIN_OCC`) does
+not use `GROUP_ANG`: its short pieces are grouped by a joint fit (`occ_group`) that reuses `GROUP_OFF`, `GAP`,
+`FILL_MIN` and `WALK_WIN0`.
 
 ### `BUB_LINE_R` = 7 · `BUB_LINE_MAX` = 0.5
 A line hugging a bubble or caption box is not a panel frame: sampled every 2 px, if half the samples fall in
@@ -494,9 +496,12 @@ a bubble are dropped. **Closed rows** (`_close_rows`): rows (or columns) where a
 stops the walk short of the frame, with margin runs on both sides, also count as margin, and the white behind the
 object up to the (interpolated) frame position that is 4-connected to the margin is taken too. Over 47 pages × 4
 levels 13 pages change, every newly black pixel was white in the original; guard 18 / 12 / 12 / 16 (/664) unchanged.
-Known gap: under upscaling (≥ 1.0675× in the c371_001 sweeps, mostly ≥ 1.09×) the two short pieces' own PCA angles
-can differ by 1–1.8° > `GROUP_ANG`, they never form a group and that margin stays grey (54 of 483 sweep cells;
-every cell ≤ 1.00× passes).
+Occluded pieces are grouped by a **joint fit** instead of comparing their own angles (a short piece of a thick frame
+tilts 1–2° when its evidence switches from one edge to the other): the union of the pieces' hit pixels is refit by
+PCA, every piece must have a hit rate ≥ `FILL_MIN` along the joint line (walked ±`WALK_WIN0`) and both ends within `GROUP_OFF` of it, and a
+piece overlapping an accepted member by more than `GAP` along the line is not merged; a member's hit rate is the
+larger of the one along the joint line and the one along its own line. The c371_001 sweeps (0.80–1.25×, JPEG, flips,
+rotations) pass 248 / 248 and the half-step set 235 / 235.
 
 ### `OCC_PIECE_FRAC` = 0.5 · `OCC_GAP_FRAC` = 0.05 · `MARGIN_HALO_R` = 2
 Each occluded-frame piece must be at least 0.5 × the minimum line length, and the chain at least two pieces whose

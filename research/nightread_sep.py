@@ -20,8 +20,10 @@
       ├ 頁邊           從頁緣沿軸向往內走，途中只經白／字／泡，在 MARGIN_FRAC 內撞到頁邊框線（或其
       │                封口延長線）的那一段白；行程要連成段、淡網點／漸層與出血格內部都否決；
       │                最後過 texture_veto2（有線稿的白不是頁邊）
-      │                ・斷框線：被狀聲詞／出血物蓋斷、每截都短於最短框線長的框線，由第二趟短段偵測＋共線串接
-      │                  補回（只給頁邊與頁邊否決的格線遮罩，不進溝帶／出血過濾）
+      │                ・斷框線：被狀聲詞／出血物蓋斷、每截都短於最短框線長的框線，由第二趟短段偵測＋聯合擬合分組
+      │                  ＋共線串接補回（只給頁邊與頁邊否決的格線遮罩，不進溝帶／出血過濾）。分組不比各截的角度
+      │                  （短段的方向誤差 ∝ 1／段長），改問兩截命中像素的聯集重新 PCA 後，每截沿聯合直線的命中率
+      │                  是否都 ≥ FILL_MIN、每截兩端到聯合直線是否都 ≤ GROUP_OFF；沿線與已收的截重疊的段不併
       │                ・補列：伸進頁邊的物件擋住的幾列（兩側都是頁邊行程、缺口 ≤ OCC_GAP_FRAC）也算頁邊，
       │                  物件後面、框線前、與頁邊白相連的白一起塗
       ├ 溝網連通       溝帶必須經由自己的走廊接上頁邊／頁緣／已收的溝帶，孤立在格內的平行線夾白丟掉
@@ -53,6 +55,13 @@ compose 裡的位置：開頭就算好；留白路徑 texture_veto2 之後給出
   7. PCA 用 `np.cov`＋`np.linalg.eigh`，主軸方向正規化成 d.x ≥ 0（d.x≈0 時 d.y ≥ 0）。
   8. 補列的框線位置內插在 double 算（`da + (db − da)·(r − k + 1)/(e − k + 1)`），與整數 d 直接比；
      `_behind` 用 4 連通（`cv2.connectedComponents(..., connectivity=4)`）。
+  9. 斷框線的聯合擬合（`_joint`／`_occ_line`／`occ_group`）：各截的命中像素（ex／ey）是定稿走訪的逐站命中、
+     站內法向由負到正；聯集依**成員併入順序**串接再 PCA（`np.cov` 的加總順序吃這個；每一串重新擬合時沿用同一順序、
+     只濾掉串外的截）；`_fill_on` 的走訪範圍是端點投影向外取整（floor／ceil）；區間一律由成員端點投影到聯合直線
+     （單成員也投影，不直接用 t0／t1）；輸出成員的 fill＝max(沿聯合直線重量的命中率, 該截自己定稿的命中率)
+     （`group_fill` 與頁邊的 MARGIN_FILL_MIN 吃這個；python `max(f, own)`）；併入判準的端點距離量到聯合直線
+     （每個成員、兩端，`abs(np.dot(p − m, n))`），之前的粗篩用 2×GROUP_OFF 量到併入前的群組直線；重疊判準是候選段與
+     每個成員各自兩端投影到併入前的群組直線、`min(兩右端) − max(兩左端) > GAP` 就不併。
 """
 import os
 
@@ -264,13 +273,13 @@ def _hits_xy(v, xi, yi, a, b):
     return xi[a:b + 1][sel].astype(float), yi[a:b + 1][sel].astype(float)
 
 
-def detect_segments(g, min_len=None, axis_tol=None, final_win=WALK_WIN, hough_cache=None):
+def detect_segments(g, min_len=None, axis_tol=None, final_win=WALK_WIN, hough_cache=None, keep_hits=False):
     """Hough 峰 → 沿線走訪切段 → 每一段**各自** PCA 精修兩次 → 最終窄窗走訪定端點與命中率。
     （各段獨立精修：同一條 ρ 上的幾段共線框線不會被最長那段的微小斜率拖偏。）
 
     預設參數＝主偵測。斷框線那一趟（`occluded_frames`）：[min_len] 切段長度下限（峰的票數門檻仍用最短框線長 L）、
     [axis_tol] 只走與水平／垂直夾角 ≤ 此度的峰、[final_win] 定稿走訪的法向半窗；[hough_cache] dict，兩趟共用
-    候選像素／累加器／峰。"""
+    候選像素／累加器／峰；[keep_hits] 每段另存定稿走訪命中的像素座標 ex／ey（逐站、站內法向由負到正），給斷框線的聯合擬合。"""
     H, W = g.shape
     L = max(60, int(round(LEN_FRAC * min(H, W))))
     Lr = L if min_len is None else min_len
@@ -320,9 +329,12 @@ def detect_segments(g, min_len=None, axis_tol=None, final_win=WALK_WIN, hough_ca
                 vv = v2[a2:b2 + 1]; hh = vv.any(axis=1)
                 cen = (vv * offs[None, :]).sum(axis=1)[hh] / vv.sum(axis=1)[hh]
                 res = float(np.sqrt(np.mean((cen - np.median(cen)) ** 2)))
-                segs.append(dict(p0=P0, p1=P1, d=d2, n=n2, m=m, t0=t0, t1=t1,
-                                 fill=float(hh.mean()), res=res,
-                                 wid=float(vv.sum(axis=1)[hh].mean())))
+                sd = dict(p0=P0, p1=P1, d=d2, n=n2, m=m, t0=t0, t1=t1,
+                          fill=float(hh.mean()), res=res,
+                          wid=float(vv.sum(axis=1)[hh].mean()))
+                if keep_hits:
+                    sd["ex"] = xi2[a2:b2 + 1][vv].astype(float); sd["ey"] = yi2[a2:b2 + 1][vv].astype(float)
+                segs.append(sd)
     return dedupe(segs)
 
 
@@ -389,19 +401,96 @@ def group_lines(segs):
     return groups
 
 
+def _fill_on(M, m, d, n, s):
+    """段 s 的範圍投影到直線 (m, d) 上（向外取整），沿線以 ±WALK_WIN0 走訪的命中率。"""
+    u0 = float(np.dot(s["p0"] - m, d)); u1 = float(np.dot(s["p1"] - m, d))
+    _, hit, _, _, _ = walk(M, m, d, n, int(np.floor(min(u0, u1))), int(np.ceil(max(u0, u1))), WALK_WIN0)
+    return float(hit.mean())
+
+
+def _joint(mem, M):
+    """成員命中像素的聯集（依成員順序串接）重新 PCA ＝聯合直線；沿它量每一截的命中率。回傳 (m, d, n, fills)。⚠️KT 陷阱 9。"""
+    m, d, n = fit_pca(np.concatenate([t["ex"] for t in mem]), np.concatenate([t["ey"] for t in mem]))
+    return m, d, n, [_fill_on(M, m, d, n, t) for t in mem]
+
+
+def _occ_line(mem, M):
+    """一組成員 → 群組（同 group_lines 的格式）：直線＝聯合直線；segs＝成員副本（fill＝max(沿聯合直線的命中率, 該截
+    自己定稿的命中率)、u0／u1＝兩端投影）；iv＝成員投影區間排序後、重疊（斷口 ≤ 1）併起。⚠️KT 陷阱 9。
+    fill 取兩者較大：頁邊的 MARGIN_FILL_MIN 問的是「這一截是不是尺畫的連續框線」，一截有兩個直線假設——自己的 PCA
+    （換緣的截會斜）與聯合直線（粗框線上可能落在另一緣，離這一截的證據 > WALK_WIN0）；是否共線已由併入判準（沿聯合直線
+    ≥ FILL_MIN、端點 ≤ GROUP_OFF）把關，這裡不重複懲罰擬合落在哪一緣（頁邊粗帶 ±FL_HIT_R 本來就兩緣都算）。
+    c371_001 放大 1.2325×（bilinear）：第二排上半截沿聯合直線 0.908、沿自己 0.956。"""
+    m, d, n, fills = _joint(mem, M)
+    segs, iv = [], []
+    for s, f in zip(mem, fills):
+        a0 = float(np.dot(s["p0"] - m, d)); a1 = float(np.dot(s["p1"] - m, d))
+        q = dict(s); q.update(fill=max(f, s["fill"]), u0=min(a0, a1), u1=max(a0, a1))
+        segs.append(q); iv.append((q["u0"], q["u1"]))
+    iv = sorted(iv); mg = [list(iv[0])]
+    for a, b in iv[1:]:
+        if a <= mg[-1][1] + 1:
+            mg[-1][1] = max(mg[-1][1], b)
+        else:
+            mg.append([a, b])
+    return dict(m=m, d=d, n=n, ang=seg_angle({"d": d}), iv=[tuple(x) for x in mg], segs=segs)
+
+
+def occ_group(pieces, M):
+    """斷框線的共線分組：**聯合擬合**取代 group_lines 的 1° 夾角門檻。回傳成員清單的清單（依併入順序）。
+    短段各自 PCA 的方向誤差 ∝ 1／段長：粗框線（≥ 5px）只有鄰白的那一緣是候選像素，被蓋住的地方證據從一緣換到另一緣，
+    150px 的一截就斜 1–2°（c371_001 放大 1.095×：同一條框線的上下兩截擬合成 89.18° 與 90.96°）。所以不比兩截各自的角度，
+    改問「有沒有**一條**直線同時解釋兩截的證據」：群組成員＋候選段的命中像素聯集重新 PCA（`_joint`），沿這條聯合直線以
+    ±WALK_WIN0 走訪每一截的範圍，**每一截**命中率都 ≥ FILL_MIN（＝一截單獨成段的定稿標準）才併入，群組直線換成聯合直線。
+    端點法向距（同 group_lines 的 GROUP_OFF）也量到**聯合直線**、而且量**每一個**成員：量到併入前的群組直線會把候選段自己的
+    傾斜算成偏移（c371_001 放大 1.245×：第二排上半截擬合斜 1°，遠端點離第一排長框線 6.0px，聯合擬合根本沒機會跑）；
+    聯合擬合之前只用 2×GROUP_OFF 粗篩（省下明顯不共線的 PCA）。
+    沿線與已收成員重疊 > GAP 的段不併：被蓋斷的框線在線上是互不重疊的幾截，重疊的段是同一段粗框線的另一緣、或從一緣斜切到
+    另一緣的換緣段，不是新的一截，併進來只會把聯合直線拉斜（c371_001 放大 1.2125×（AREA）：第一排框線上一段 2.1° 的換緣段
+    把聯合直線拉斜，第二排下半截就併不進來）。依段長由長到短、先到先併。"""
+    groups = []
+
+    def _pj(t, gp):
+        a0 = float(np.dot(t["p0"] - gp["m"], gp["d"])); a1 = float(np.dot(t["p1"] - gp["m"], gp["d"]))
+        return min(a0, a1), max(a0, a1)
+    for s in sorted(pieces, key=lambda s: -(s["t1"] - s["t0"])):
+        for gp in groups:
+            if abs(np.dot(s["p0"] - gp["m"], gp["n"])) > 2 * GROUP_OFF or abs(np.dot(s["p1"] - gp["m"], gp["n"])) > 2 * GROUP_OFF:
+                continue
+            sa, sb = _pj(s, gp)
+            if any(min(sb, tb) - max(sa, ta) > GAP for ta, tb in (_pj(t, gp) for t in gp["mem"])):
+                continue
+            mem = gp["mem"] + [s]
+            m, d, n, fills = _joint(mem, M)
+            if any(abs(np.dot(t[k] - m, n)) > GROUP_OFF for t in mem for k in ("p0", "p1")):
+                continue
+            if min(fills) < FILL_MIN:
+                continue
+            gp.update(m=m, d=d, n=n, mem=mem)
+            break
+        else:
+            groups.append(dict(m=s["m"].copy(), d=s["d"].copy(), n=s["n"].copy(), mem=[s]))
+    return [gp["mem"] for gp in groups]
+
+
 def occluded_frames(g, hough_cache=None):
     """頁邊斷框線：被狀聲詞／出血物蓋斷的框線，每截都短於最短框線長 L，主偵測一截都收不到。
     第二趟（共用 Hough）只走近軸向的峰、切段下限降到 OCC_PIECE_FRAC×L、定稿走訪用 ±WALK_WIN0（粗框線 ≥ 5px 只有兩緣是候選
-    像素，擬合中心 ±2 的窄窗在縮放／抗鋸齒下會漏掉一緣、命中率掉到 0.93）；共線分組後，相鄰兩截斷口 ≤ OCC_GAP_FRAC×短邊的
-    串成一條，**至少兩截、各截長度和 ≥ L** 才收——證據量與主偵測的一條框線相同，只是中間被蓋住。
+    像素，擬合中心 ±2 的窄窗在縮放／抗鋸齒下會漏掉一緣、命中率掉到 0.93）；聯合擬合分組（`occ_group`）後，沿群組直線
+    相鄰兩截斷口 ≤ OCC_GAP_FRAC×短邊的串成一條；每一串**只用自己的截**重新聯合擬合（`_occ_line`）再量區間與命中率——
+    同一條頁邊上遠處別格的框線（相鄰格外框常錯開 1–2px）雖然分在同一組，卻不是這一串的證據，混進來會把直線拉斜、命中率
+    掉到頁邊門檻以下（c371_001 放大 1.05× 右頁邊：第三排的框線讓第一、二排兩截沿組直線只剩 0.954／0.936）。
+    **至少兩截、各截長度和 ≥ L** 才收——證據量與主偵測的一條框線相同，只是中間被蓋住。
     只給 margin_mask（撞到框線的粗帶）與頁邊否決的格線遮罩用，不進溝帶／出血過濾。回傳群組（同 group_lines 的格式）。"""
     H, W = g.shape; sh = min(H, W)
     L = max(60, int(round(LEN_FRAC * sh)))
     gap_max = int(round(OCC_GAP_FRAC * sh))                   # ⚠️KT 陷阱 1
+    hc = {} if hough_cache is None else hough_cache
     pieces = detect_segments(g, min_len=int(round(OCC_PIECE_FRAC * L)), axis_tol=MARGIN_AXIS_ANG + 1.0,
-                             final_win=WALK_WIN0, hough_cache=hough_cache)
+                             final_win=WALK_WIN0, hough_cache=hc, keep_hits=True)
     out = []
-    for gp in group_lines(pieces):
+    for mem in occ_group(pieces, hc["M"]):
+        gp = _occ_line(mem, hc["M"])
         chains = [[gp["iv"][0]]]
         for a, b in gp["iv"][1:]:
             if a - chains[-1][-1][1] <= gap_max:
@@ -409,14 +498,16 @@ def occluded_frames(g, hough_cache=None):
             else:
                 chains.append([(a, b)])
         for ch in chains:
-            tot = sum(b - a for a, b in ch)
-            if len(ch) < 2 or tot < L:
+            if len(ch) < 2:
                 continue
             lo, hi = ch[0][0], ch[-1][1]
-            segs = [s for s in gp["segs"]
-                    if min(np.dot(s["p0"] - gp["m"], gp["d"]), np.dot(s["p1"] - gp["m"], gp["d"])) >= lo - 1
-                    and max(np.dot(s["p0"] - gp["m"], gp["d"]), np.dot(s["p1"] - gp["m"], gp["d"])) <= hi + 1]
-            out.append(dict(m=gp["m"], d=gp["d"], n=gp["n"], ang=gp["ang"], iv=list(ch), segs=segs, len=tot))
+            cm = [s for s, q in zip(mem, gp["segs"]) if q["u0"] >= lo - 1 and q["u1"] <= hi + 1]
+            c = _occ_line(cm, hc["M"])                          # 這一串自己的聯合直線
+            tot = sum(b - a for a, b in c["iv"])
+            if len(c["iv"]) < 2 or tot < L:
+                continue
+            c["len"] = tot
+            out.append(c)
     return out
 
 
