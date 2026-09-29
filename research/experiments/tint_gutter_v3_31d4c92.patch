@@ -1,0 +1,1025 @@
+--- a/research/nightread.py
++++ b/research/nightread.py
+@@ -1257,12 +1257,14 @@
+     return out
+ 
+ 
+-def paint_gutter(out, g, gutter, frame=None, bubble=None):
+-    """留白（頁邊距／格溝）填深 + 邊界描亮。"""
++def paint_gutter(out, g, gutter, frame=None, bubble=None, noglow=None):
++    """留白（頁邊距／格溝）填深 + 邊界描亮。[noglow]＝這些像素不描亮（淡色溝的邊界落在前面已填黑的留白裡，見 compose）。"""
+     fill = gutter.copy()
+     out[fill] = BG
+     k = np.ones((STROKE * 2 + 1,) * 2, np.uint8)
+     band = (cv2.dilate(fill.astype(np.uint8), k) > 0) & ~fill
++    if noglow is not None:
++        band &= ~noglow
+     a = ink_alpha(g, 1.6)
+     out[band] = np.maximum(out[band], BG + a[band] * (EDGE_INK - BG))
+     return out
+@@ -1372,7 +1374,7 @@
+ 
+ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
+             core_ids=(), frame=None, regions=None, charmask=None, char_raw=None,
+-            bubble_rest=None, lost_bubble=None, diag=None):
++            bubble_rest=None, lost_bubble=None, diag=None, colour=False):
+     """整頁合成：場景曲線 → 留白填深（出血格過濾）→ 格溝／頁邊 → 貼紙式背景 → 氣泡重繪 → 人物還原。
+ 
+     [diag] 給 dict 就把格溝與出血過濾的中間遮罩、逐塊決策、耗時存進去（parity／除錯用，不影響輸出）。"""
+@@ -1380,8 +1382,10 @@
+     scene_keep = out.copy()                     # 人物區最終一律還原成場景調
+     # 任意角度格溝／頁邊（SEP）：先算好——出血過濾要拿它當結構證據，貼紙層之前塗、人物還原跳過它
+     t_ = time.perf_counter()
+-    sep_layer = nightread_sep.build_sep(g, seg, bubble, frame, veto=texture_veto2) if SEP_ON else None
++    sep_layer = nightread_sep.build_sep(g, seg, bubble, frame, veto=texture_veto2, char=char_raw, colour=colour,
++                                        gutter=gutter) if SEP_ON else None
+     sepm = sep_layer["sep"] if sep_layer is not None else None
++    prev_fill = None                            # SEP 之前 paint_gutter 已填黑的留白（淡色溝描亮用）
+     if diag is not None:
+         diag["t_sep"] = time.perf_counter() - t_
+         diag["t_bleed"] = 0.0
+@@ -1419,6 +1423,7 @@
+         keep = _bleed(texture_veto2(keep, g, frame, seg, bubble), keep)   # 有線稿的白不是留白；出血格畫面拿掉
+         if keep.any():
+             out = paint_gutter(out, g, keep, frame=frame, bubble=bubble)
++            prev_fill = keep
+     elif not frameless and gutter.any():
+         # 安全策略：留白元件「深入格內」的部分不填。出血特寫的臉/白衣與頁白同元件、只有細線稿、
+         # 沒有墨團可觸發灰暈（demo01 臉頰 98% 黑、ch34_015 肩、demo02 貼頁緣的臉皆此型）。
+@@ -1434,6 +1439,7 @@
+         band = _bleed(texture_veto2(band, g, frame, seg, bubble), band)   # 有線稿的白不是留白；出血格畫面拿掉
+         if band.any():
+             out = paint_gutter(out, g, band, frame=frame, bubble=bubble)
++            prev_fill = band
+     elif gutter.any():
+         # 無框頁只填「真頁邊帶」：留白元件深入頁內的最大距離 ≤ 短邊×FRAMELESS_MARGIN_DEPTH 才是
+         # 貼邊薄帶（開放背景會深入頁心、不符）；仍套人物灰暈（出血人物碰邊的保護）。
+@@ -1449,8 +1455,16 @@
+                 keep |= m
+         if keep.any():
+             out = paint_gutter(out, g, keep, frame=frame if frame is not None else np.zeros_like(gutter, np.uint8), bubble=bubble)
++            prev_fill = keep
+     if sepm is not None and sepm.any():                 # 任意角度格溝／頁邊：同留白待遇（填 BG、邊界描亮）
+-        out = paint_gutter(out, g, sepm, frame=frame, bubble=bubble)
++        nog = None
++        tint_m = sep_layer.get("tint")
++        if nightread_sep.TINT_NOGLOW and prev_fill is not None and tint_m is not None and tint_m.any():
++            # 淡色溝（v3 第二輪）：遮罩的邊界落在前面已填黑的留白裡（兩對淡色溝之間差一欄、淡色溝的端點停在白元件格溝中間）時，
++            # 描亮帶會在黑溝裡留下 1px 的 42–44 灰線（紙色 235 的 ink_alpha 不是 0）⇒ 淡色溝旁、已填黑的像素不描。
++            # 只看淡色溝外擴 1px 的範圍：黑白頁與沒有淡色溝的彩頁一個像素都不變
++            nog = prev_fill & (cv2.dilate(tint_m.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0)
++        out = paint_gutter(out, g, sepm, frame=frame, bubble=bubble, noglow=nog)
+     if sticker:                                         # 貼紙式背景：純白背景填黑＋前景白描邊
+         out = paint_sticker(out, g, lab, stats, sticker, bubble,
+                             core_ids=core_ids, frame=frame, seg=seg, charmask=charmask)
+@@ -1670,7 +1684,8 @@
+     lost = bubble_before_trim & ~bubble
+     final = compose(g, gutter, bubble, seg, frameless, lab, stats, sticker,
+                     core_ids=promoted, frame=(lhm | lvm), regions=regions, charmask=charmask,
+-                    char_raw=char_raw, bubble_rest=bubble_rest, lost_bubble=lost, diag=diag)
++                    char_raw=char_raw, bubble_rest=bubble_rest, lost_bubble=lost, diag=diag,
++                    colour=nightread_sep.is_colour_page(img, PAPER_NORM_CHROMA_MAX))
+ 
+     pref = os.path.join(outdir, name)
+     with open(f"{pref}_regions.json", "w", encoding="utf-8") as f:
+--- a/research/nightread_sep.py
++++ b/research/nightread_sep.py
+@@ -26,6 +26,22 @@
+       │                  是否都 ≥ FILL_MIN、每截兩端到聯合直線是否都 ≤ GROUP_OFF；沿線與已收的截重疊的段不併
+       │                ・補列：伸進頁邊的物件擋住的幾列（兩側都是頁邊行程、缺口 ≤ OCC_GAP_FRAC）也算頁邊，
+       │                  物件後面、框線前、與頁邊白相連的白一起塗
++      ├ 淡色溝（彩頁）  第二趟、只多不改：候選＝暗且鄰（白 ∪ 淡色平塗；平塗在中值 3×3 後量、證據可取在溝內 ≤ 5px）、
++      │                自己的 Hough／短截串接／分組；剖面用相對白（紙面水準 P＝下中位數 ≥ TINT_LIGHT_MIN、P±δ 比例門、
++      │                人物否決）；只收至少一站靠相對白才過、漸暗站 ≤ TINT_DIM_MAX 的對；再否決：兩條框線缺 ≥ L 單段、
++      │                候選圖上有第三條近平行線（效果線家族）、延長線上溝轉暗（漸暗溝整對不收）；跨溝物件兩側做同色像素
++      │                生長（只進兩框線都在、被物件佔一部分、不靠字的站）。溝網只准接上絕對白證據的溝網：第一趟已收的
++      │                溝／頁邊、compose 的白元件格溝（不含頁緣帶）。
++      │                v3：端延伸每站也要兩條框線都在（只剩一條框線＝溝變寬；例外：缺線側緊鄰第一趟頁邊＝溝口出到頁邊、
++      │                丁字路口的短缺口）；已收的溝裡兩端都通過、
++      │                兩框線都在、亮、不靠字、無人物、深內部無暗像素的失敗段補起來（窄溝不再斷成黑灰黑）。
++      │                v3 第二輪：補洞只補「兩端那張紙」——段內每站的紙面與兩端內插的 Pref 差 ≤ δ、深內部對 Pref 過一般站門
++      │                （溝裡的淺色煙霧／網點／漸層／平塗物件不再被當成雜訊補黑），補上的站只塗白 ∪ Pref ±δ；淡色溝旁、
++      │                compose 前面已填黑的留白不描亮（黑溝裡不再有 1px 的 42–44 灰線）。
++      │                v3 第三輪：溝是「兩格之間」的空白，兩條框線外側都該是格 ⇒ 兩道外側否決：兩側外側帶都與溝同色（同一片
++      │                平塗上畫的兩條線：無框格底、格內淡色橫帶）、任一側框線外 ≤ 12px 就是背景（第一趟溝帶／頁邊／白元件格溝／
++      │                頁外：格內的邊條、雙框線中間、貼著白背景或頁緣的帶子）。
++      │                開關 NIGHTREAD_TINT_GUTTER
+       ├ 溝網連通       溝帶必須經由自己的走廊接上頁邊／頁緣／已收的溝帶，孤立在格內的平行線夾白丟掉
+       └ 圖層（build_sep）泡 ⊕7 扣掉；單條溝被泡吃掉過半整條不塗；< SEP_MIN_CC 的碎塊不塗；
+                        **人物遮罩不扣**——SEP 畫在人物之上，compose 最後的人物還原也跳過 SEP
+@@ -62,6 +78,40 @@
+      （`group_fill` 與頁邊的 MARGIN_FILL_MIN 吃這個；python `max(f, own)`）；併入判準的端點距離量到聯合直線
+      （每個成員、兩端，`abs(np.dot(p − m, n))`），之前的粗篩用 2×GROUP_OFF 量到併入前的群組直線；重疊判準是候選段與
+      每個成員各自兩端投影到併入前的群組直線、`min(兩右端) − max(兩左端) > GAP` 就不併。
++ 10. 淡色溝：紙面水準 P＝3 站窗 256 格直方圖的**下中位數**（最小的 v 使 2·cum[v] ≥ n，n＝0 ⇒ 0）；P±δ 的計數含兩端、
++     在 [0,255] 截斷；比例門用 `inb ≥ PROF_WHITE·max(n,1)`（double）。同色生長的參考紙面 Pref 在 double 算
++     （左右最近通過站的 P 依站號線性內插；只有一側就取那一側），`|g − Pref| ≤ δ` 以 double 比；生長用 4 連通、
++     頁外連通判定（outside）改成 8 連通塊層級（塊內任一像素在 outside ⇒ 整塊收）。light_flat 先 cv2.medianBlur(3)
++     （BORDER_REPLICATE）、再 3×3 max−min（cv2 dilate/erode 預設邊界：界外對 max／min 不起作用＝只看界內像素）；亮度用原圖。
++ 11. 淡色溝 v2 的否決：tint_family_map 的站號 round(u − lo)（half-to-even）、格號 floor(v − u·tanφ − vmin)、φ 從 −FAMILY_ANG
++     每 TH_STEP 到 +FAMILY_ANG（含兩端、np.arange 的點數）、同覆蓋率取第一個 φ 的第一格；tint_dim_run 沿 a 的 t_range 逐站、
++     中線偏移 sg·w/2、法向偏移整數 −⌈w/2⌉−R…⌈w/2⌉+R；_line_present 取樣 ±2（a 的法向）、門檻 TINT_LINE_TH＝
++     TINT_LIGHT_MIN − 2·TINT_DELTA；network_filter 的淡色溝根＝頁邊 ∪ 白元件格溝 ∪ 已接網的溝帶，不含頁緣帶。
++ 12. 淡色溝 v3（pair_strip 的 tint 分支）：端延伸的站門 ext_ok＝ok ∧ lp ∧ ¬txg ∧ charf ≤ TINT_CHAR_MAX（跨格角暗像素的
++     EXT_DARK_SKIP 仍看 ok）；缺線的站若缺的那一側「框線位置往外 2–8px（整數步、沿 a 的法向）」落在 net0（第一趟頁邊、過了
++     texture 否決）的比例 ≥ ½，也算 ext_ok（oa／ob，兩側都缺就兩側都要）；遇到 ext_ok 假的站 k，往外數 ext_gap＝ok ∧ ¬lp ∧ ¬txg ∧ charf 過 的連續站
++     （|j − k| < SHORT_BRIDGE 時才再走一步，所以 n＝|j − k| ≤ SHORT_BRIDGE；j 停在第一個非 ext_gap 站或數滿）；n ≥ 1 且 j 起連續 n 站（含 j）都 ext_ok（界外不算）才把
++     [k, j) 全收、從 j 繼續，否則停；站缺口補洞放在 npass／nvalid 累加**之後**、白緣 MAD 改用補洞前的 ok_acc（第一趟 ok_acc 就是 ok），
++     只補「核心 ∧ 有證據」的連續 ¬ok 段、段前一站與段後一站都 ok、段內每站 valid ∧ P ≥ TINT_LIGHT_MIN ∧ charf ≤ 0 ∧ lp ∧
++     ¬txg ∧ ¬tx ∧ 深內部（inner ∧ va > skip+1 ∧ vb > skip+1）沒有 < TINT_LINE_TH 的像素（逐站、不是 3 站窗）；不設段長上限；
++     由左往右掃、補完接著從段尾繼續。補上的站之後照常進 ok[ubin]（像素仍只收白 ∪ tpx）與同色生長的 ¬ok 判定。
++     v3 第二輪的補洞另要（全部整數算，段 [k, e)、L＝e − k + 1、站 j 的 Pref·L＝P[k−1]·(e−j) + P[e]·(j−k+1)）：
++     |P[k−1] − P[e]| ≤ δ；段內每站 |P[j]·L − Pref·L| ≤ δ·L 且深內部至少 1 顆；深內部 3 站窗（段外的鄰站 k−1、e 用自己的 P、
++     分母 1）偏離＝|g·den − num| > δ·den 且 g < WHITE_TH，窗內 (n − 偏離) ≥ PROF_WHITE·n（浮點比較，同一般站門）或偏離 ≤ 3；
++     補上的站像素層級 wt 改成 g ≥ WHITE_TH ∨ |g·L − Pref·L| ≤ δ·L（取代該站自己的 tpx）。
++     其他細節（對抗驗證指出）：_beyond_net 的比例門是 v.mean(axis=1) ≥ 0.5、分母固定 t1 − t0 + 1＝7（界外算 False）⇒ Kotlin 寫
++     2·cnt ≥ 7，不能用整數除法；`charf <= 0` 是精確比 0；inner／deep 的邊界 va > skip、va > skip + 1 用 double 算（va、vb、skip
++     都是 float64），Kotlin 用 float 算邊界像素會翻轉；丁字路口的 after 視窗含 j、界外算失敗。
++ 13. 淡色溝的描亮例外（v3 第二輪）：build_sep 多回傳 tint＝收下的淡色對遮罩聯集 ∩ sep；compose 記下 SEP 之前 paint_gutter
++     實際填黑的留白 prev_fill（三個分支各自的 keep／band），SEP 的 paint_gutter 把 prev_fill ∩ dilate(tint, 3×3 方核) 從描亮帶扣掉。
++     tint 全空（黑白頁、沒有淡色溝的彩頁）時不扣＝逐位元同舊版。
++ 14. 淡色溝的外側否決（v3 第三輪，tint_side_stats，在 tint_pairs 的漸暗延長否決之後）：站號 round(u)（u 以 a 為準、half-to-even），
++     只看遮罩有像素的站；Pm＝該站遮罩像素 256 格直方圖的下中位數；外側帶 va（或 vb）∈ [−18, −6]（double 比較，含兩端），
++     站號同樣 round(u)、不在遮罩站範圍或該站沒有遮罩像素的不算；同色站＝外側帶 ≥ 4 顆且 inb ≥ PROF_WHITE·cnt（double），
++     比例的分母＝外側帶 ≥ 4 顆的站數（0 ⇒ 比例 0）；兩側比例都 ≥ TINT_SAME_MAX 就否決（sameside）。緊鄰背景：P_a＝a.m + u·a.d、
++     P_b＝P_a 沿 a.n 投到 b（同 _line_present），取樣點 P ∓ t·sg·a.n（a 側減、b 側加），t＝3…TINT_BG_REACH 整數，座標 half-to-even；
++     出頁算命中；bg＝第一趟溝帶（溝網前、pair_strip 收下的聯集 strip_pre）∪ 頁邊（否決前 mar）∪ 白元件格溝；任一側比例 ≥ TINT_BG_MAX
++     否決（bgside；先判 sameside）。
+ """
+ import os
+ 
+@@ -144,15 +194,94 @@
+ PAIR_SUB_MAX = 0.5      # 單條溝被外擴泡遮罩吃掉 > 此比例 ⇒ 整條不塗（剩下的會是梯子狀碎段）；頁邊不受影響
+ SEP_MIN_CC = 150        # 扣掉泡之後小於此 px 的連通塊不塗（避免斑點）
+ 
++# ── 淡色溝（tint）：彩頁的淡色／漸層格溝（demo03 第 1、2 排之間：薰衣草→白、灰階 207–250、彩度 15–22）──────
++# 絕對白（≥ WHITE_TH）認不到淡色溝：框線旁沒有白 ⇒ 候選像素沒有、Hough 斷掉；剖面白度不過；頁外連通也不過。
++# 第二趟（只多、不改第一趟；只在彩頁跑）：候選框線改成「暗且鄰（白 ∪ 淡色平塗）」、框線可由 ≥ ½L 的共線短截串成；
++# 剖面改成「相對白」＝逐站紙面水準 P（3 站窗內部的下中位數）≥ TINT_LIGHT_MIN、內部在 P ±TINT_DELTA 內的比例過門
++# （有證據站 PROF_WHITE、補橋站 PROF_WHITE_BRIDGE——同白模式）、且不在人物上。**只在核心（兩框線重疊段）**用相對白；
++# 端延伸照舊只認絕對白。補橋整段不過時從兩端有證據的站逐站長進去、部分被佔的站再做像素層級的同色生長（跨溝物件）。
++# 第一趟的溝帶／頁邊／框線群組／信任框線一律不動，淡色溝只併進溝網（network_filter）與 build_sep 的逐對規則。
++# v2（2026-09-28 對抗驗證後）：① JPEG：框線旁 1–3px 是振鈴最強處（q72/75/80 溝又斷成黑灰黑）⇒ 平塗在中值 3×3 後量、
++# 候選多走 TINT_REACH px 取溝內部的平塗；② 效果線：上色黑白頁（c362_011 乘紙色）兩條放射效果線被當溝塗成黑斜條 ⇒
++# 溝網錨（只准接第一趟的溝網）＋實線＋候選圖家族＋漸暗延長四道否決；生長收緊（框線都在、被物件佔、不靠字）。
++# v3（2026-09-28 對抗驗證後）：上色掃描感黃紙 c362_012 × JPEG 在上框線下塗出 8px 浮空黑條（端延伸 200 站落在只剩上框線的寬溝
++# 上、下緣切在 b 的外推位置）、窄溝斷成黑灰黑虛線 ⇒ ③ 端延伸每站也過生長的站門（兩框線都在、不靠字、不在人物上；
++# 缺線側緊鄰第一趟頁邊的站照延伸＝溝口；丁字路口只缺一條線的短段、後面兩線又連續出現時跨過去）；
++# ④ 已收的溝裡被 JPEG 振鈴打掉的失敗段補起來（兩端都通過、兩框線都在、亮、不靠字、無人物、深內部無暗像素；不改收不收）。
++# v3 第二輪（2026-09-29 對抗驗證後）：④ 會把溝裡的淺色物件（煙霧 200–219、網點、漸層、淡粉平塗）當成「只差雜訊的紙」補黑，
++# 而且像素用該站自己的 P（物件佔過半時 P＝物件）⇒ 塗黑物件、留灰真紙 ⇒ 補洞只補與兩端同一張紙的段（見 pair_strip）。
++# v3 第三輪（2026-09-29 對抗驗證後）：框線外側不看 ⇒ 無框格底上的兩條平行線（M／M2：格底 217、線畫到無框的格邊接上白頁邊）、
++# 格內的淡色橫帶／雙框線中間／貼著白背景或頁緣的淡色帶（syn3、真實頁插入 E2）都被當成溝塗黑，而且 v2 起就是這樣 ⇒ 外側否決
++# （tint_side_stats）。溝網連通照舊可穿過粗黑塊：上色掃描 c362_012 的寬溝被狀聲詞「ザ」切斷，右段要經狀聲詞才接得上頁邊。
++TINT = os.environ.get("NIGHTREAD_TINT_GUTTER", "1") != "0"
++TINT_LIGHT_MIN = int(os.environ.get("NIGHTREAD_TINT_LIGHT_MIN", "200"))  # 紙面水準下限（同 MARGIN_OK_TH：「亮」）
++TINT_DELTA = int(os.environ.get("NIGHTREAD_TINT_DELTA", "10"))           # 同一紙面的容差（±，灰階）
++TINT_FLAT_RANGE = int(os.environ.get("NIGHTREAD_TINT_FLAT", "8"))        # 淡色平塗：（中值 3×3 後的）3×3 視窗 max−min ≤ 此
++TINT_FLAT_MEDIAN = os.environ.get("NIGHTREAD_TINT_FLAT_MEDIAN", "1") != "0"  # 平坦度先過中值 3×3（JPEG 振鈴）
++TINT_REACH = int(os.environ.get("NIGHTREAD_TINT_REACH", "2"))           # 淡色候選多走的距離（px，加在 NEAR_WHITE_R 上）
++# 站內部落在紙面 ±δ 的比例門：同白模式的結構——有證據站 PROF_WHITE（或非紙面 ≤ 3 顆：擬合線偏 1px 時抗鋸齒列會進內部，
++# translated.webp 實見 0.95）、補橋站 PROF_WHITE_BRIDGE（或 ≤ 1 顆）
++TINT_CHAR_MAX = float(os.environ.get("NIGHTREAD_TINT_CHAR_MAX", "0.5"))   # 站內部落在人物遮罩（模型原輸出）的比例上限：
++                        # 彩圖裡「兩條近平行線夾一條淡色平塗」多半是頭髮高光／衣服條紋（demo05、c362_005 的近失誤 100% 在人物上），
++                        # 淡色的證據比絕對白弱，所以這一趟讓語意遮罩否決（白溝仍照「格溝壓過人物」）
++TINT_COLOR_ONLY = os.environ.get("NIGHTREAD_TINT_COLOR_ONLY", "1") != "0"   # 只在彩頁跑（見 is_colour_page）
++TINT_COLOR_FRAC = 0.05  # 彩頁：彩度 > PAPER_NORM_CHROMA_MAX（8）的像素 ≥ 此比例（47 頁：黑白 44 頁 0%、彩頁 demo03/04/05 ≥ 57%）
++TINT_GROW = os.environ.get("NIGHTREAD_TINT_GROW", "1") != "0"
++TINT_OCC_MIN = 2        # 同色生長只進「站內部有 ≥ 此顆非紙面像素」（被物件佔了一部分）的站
++TINT_LINE_TH = TINT_LIGHT_MIN - 2 * TINT_DELTA   # 生長的「框線還在」判定：框線位置 ±2px 有 < 此（明顯不是紙）的像素
++TINT_FLOOD = os.environ.get("NIGHTREAD_TINT_FLOOD", "1") != "0"
++TINT_EXT_OPEN = os.environ.get("NIGHTREAD_TINT_EXT_OPEN", "1") != "0"     # v3：缺線側緊鄰第一趟頁邊的站照延伸（溝口出到頁邊）
++TINT_EXT_LINES = os.environ.get("NIGHTREAD_TINT_EXT_LINES", "1") != "0"   # v3：端延伸每站也過生長的站門（兩框線都在 lp、不靠字、不在人物上）
++TINT_HOLE = os.environ.get("NIGHTREAD_TINT_HOLE", "1") != "0"      # v3：已收淡色溝裡只差雜訊的失敗站段補起來（見 pair_strip）
++TINT_NOGLOW = os.environ.get("NIGHTREAD_TINT_NOGLOW", "1") != "0"  # v3 第二輪：淡色溝旁、compose 前面已填黑的留白不描亮（見 nightread.compose）
++TINT_SIDES = os.environ.get("NIGHTREAD_TINT_SIDES", "1") != "0"   # v3 第三輪：框線外側否決（兩側同色、外側緊鄰背景；見 tint_side_stats）
++TINT_SIDE_OFF = 6       # 兩側同色：外側帶從框線中心往外 TINT_SIDE_OFF…TINT_SIDE_OFF + TINT_SIDE_W px（跳過框線厚度，同 TINT_FAM_OFF）
++TINT_SIDE_W = 12
++TINT_SAME_MAX = float(os.environ.get("NIGHTREAD_TINT_SAME_MAX", "0.8"))   # 兩側「與溝同色」的站比例都 ≥ 此 ⇒ 平塗上畫的兩條線，不是溝
++TINT_BG_REACH = int(os.environ.get("NIGHTREAD_TINT_BG_REACH", "12"))     # 外側緊鄰背景：框線中心往外 3…此 px 內碰到背景（第一趟溝／頁邊／白元件格溝／頁外）
++TINT_BG_MAX = float(os.environ.get("NIGHTREAD_TINT_BG_MAX", "0.5"))       # 任一側「緊鄰背景」的站比例 ≥ 此 ⇒ 溝旁已是背景＝格內的邊條／雙框線，不是兩格之間的溝
++TINT_TEXT_NEAR = 8      # 淡色溝：框線外側 ≤ 此 px 的字也算「靠字」，並沿溝向外擴 max(溝寬, 此) 站——這些站不生長（見 pair_strip）
++TINT_ANCHOR = os.environ.get("NIGHTREAD_TINT_ANCHOR", "1") != "0"        # 淡色溝只准接上絕對白證據的溝網（第一趟溝／頁邊＋白元件格溝；見 network_filter）
++TINT_SOLID = os.environ.get("NIGHTREAD_TINT_SOLID", "1") != "0"          # 兩條框線各自要有一段 ≥ L 的單段（短截只能延長）
++TINT_FAM_COVER = float(os.environ.get("NIGHTREAD_TINT_FAM_COVER", "0.5"))  # 候選圖家族否決：第三條線沿核心的覆蓋率 ≥ 此
++TINT_FAM_OFF = 6        # 家族搜尋從框線外 ≥ 此 px 起（跳過框線本身的厚度：擬合線在暗帶中央、粗框線 ≤ 8px ⇒ 半寬 ≤ 4）
++TINT_DIMCONT_MIN = int(os.environ.get("NIGHTREAD_TINT_DIMCONT", "20"))    # 延長線上「兩框線都在＋平但不夠亮」站數 ≥ 此 ⇒ 漸暗溝整對不收
++TINT_DIMCONT_R = 8      # 延長線上找框線內緣的容許漂移（px）
++TINT_DIM_MAX = float(os.environ.get("NIGHTREAD_TINT_DIM_MAX", "0.1"))   # 「平但不夠亮」站（DARK_TH ≤ 紙面 < TINT_LIGHT_MIN）
++                        # 佔核心有效站的比例上限：超過＝這條帶是漸暗的畫面色調（demo03 第 2 排直溝下段 200→113），
++                        # 只塗亮的那段會在同一條溝中間切出黑／灰兩截——整對不收（寧可整條留灰）。暗於 DARK_TH 的平塊是
++                        # 跨溝的物件（demo03 橫溝 x 820–930 的深色枕角），不算。
++
+ 
+ # ── 框線段偵測 ──────────────────────────────────────────────────────────────
+ 
+-def candidate_pixels(g):
+-    """候選框線像素：暗且距白 ≤ NEAR_WHITE_R（方核膨脹）。"""
++def light_flat(g):
++    """淡色平塗像素：亮（原圖 ≥ TINT_LIGHT_MIN）且平（3×3 中值濾波後的 3×3 max−min ≤ TINT_FLAT_RANGE：無線稿、無網點）。
++
++    平坦度量在**中值濾波後**的圖上：JPEG 的振鈴（框線旁整個 8×8 區塊 ±5–10 的交錯）會讓原圖的 3×3 極差在溝內緣 1–7px
++    全部破表（demo03 q50：溝內第 2–6 列只剩 3–19% 算平），中值 3×3 把一顆一顆的交錯削掉、邊界（框線）保留
++    （同一處 97–100%）。亮度仍用原圖判：1px 細線被中值抹掉，但細線本身不會因此變成「亮」。⚠️KT：cv2.medianBlur(3)
++    的邊界是 BORDER_REPLICATE。"""
++    m = cv2.medianBlur(g, 3) if TINT_FLAT_MEDIAN else g
++    k = np.ones((3, 3), np.uint8)
++    rng = cv2.dilate(m, k).astype(np.int16) - cv2.erode(m, k).astype(np.int16)
++    return (g >= TINT_LIGHT_MIN) & (rng <= TINT_FLAT_RANGE)
++
++
++def candidate_pixels(g, tint=False, lf=None):
++    """候選框線像素：暗且距白 ≤ NEAR_WHITE_R（方核膨脹）。
++
++    tint（第二趟；⊇ 第一趟）：另外接受「距淡色平塗 ≤ NEAR_WHITE_R + TINT_REACH」——淡色的證據取在溝的**內部**：
++    框線旁 1–3px 是抗鋸齒＋JPEG 振鈴最強的地方（demo03 q72/75/80 框線旁的平坦像素掉到 27–57%，Hough 斷成兩群），
++    多走 TINT_REACH px 取溝內部的平塗。[lf] 給就用（light_flat 的結果，避免重算）。"""
+     dark = g < DARK_TH
+     white = (g >= WHITE_TH).astype(np.uint8)
+     k = np.ones((2 * NEAR_WHITE_R + 1,) * 2, np.uint8)
+     nearw = cv2.dilate(white, k) > 0
++    if tint:
++        lf = light_flat(g) if lf is None else lf
++        kt = np.ones((2 * (NEAR_WHITE_R + TINT_REACH) + 1,) * 2, np.uint8)
++        nearw |= cv2.dilate(lf.astype(np.uint8), kt) > 0
+     return dark & nearw
+ 
+ 
+@@ -273,7 +402,7 @@
+     return xi[a:b + 1][sel].astype(float), yi[a:b + 1][sel].astype(float)
+ 
+ 
+-def detect_segments(g, min_len=None, axis_tol=None, final_win=WALK_WIN, hough_cache=None, keep_hits=False):
++def detect_segments(g, min_len=None, axis_tol=None, final_win=WALK_WIN, hough_cache=None, keep_hits=False, tint=False):
+     """Hough 峰 → 沿線走訪切段 → 每一段**各自** PCA 精修兩次 → 最終窄窗走訪定端點與命中率。
+     （各段獨立精修：同一條 ρ 上的幾段共線框線不會被最長那段的微小斜率拖偏。）
+ 
+@@ -285,7 +414,7 @@
+     Lr = L if min_len is None else min_len
+     hc = {} if hough_cache is None else hough_cache
+     if "pk" not in hc:
+-        M = candidate_pixels(g)
++        M = hc["M"] if "M" in hc else candidate_pixels(g, tint=tint)
+         acc, thetas, D = hough(M)
+         hc.update(M=M, thetas=thetas, D=D, pk=peaks(acc, min_votes=int(PEAK_VOTE_FRAC * L)))
+     M, thetas, D, pk = hc["M"], hc["thetas"], hc["D"], hc["pk"]
+@@ -572,8 +701,58 @@
+     return dict(da=float(da), sg=1.0 if offs[0] > 0 else -1.0, gap=float(np.abs(offs).mean()))
+ 
+ 
+-def pair_strip(g, a, b, geo, ovl_min, bridge, textd=None, outside=None):
+-    """一對平行框線之間的溝帶。沿 a 的方向逐站（1px）量剖面白度，回傳 (遮罩 或 None, 統計)。"""
++def _line_present(g, a, b, uu, r=2, split=False):
++    """逐站（a 的方向座標 uu）看 a、b 兩條框線的位置 ±r px（沿 a 的法向）內有沒有「明顯不是紙」的像素（< TINT_LINE_TH：
++    框線本身，或蓋住框線的跨溝物件——demo03 ×1.5 時枕角蓋住上框的是亮一點的高光邊，灰階 120–170）。回傳 a 有 ∧ b 有
++    （split＝True 回傳 (a 有, b 有)，v3 端延伸用）。
++    ⚠️KT：取樣座標 half-to-even；界外不算。"""
++    H, W = g.shape
++    Pa = a["m"][None, :] + uu[:, None] * a["d"][None, :]
++    s_ = -((Pa - b["m"][None, :]) @ b["n"]) / float(np.dot(a["n"], b["n"]))
++    Pb = Pa + s_[:, None] * a["n"][None, :]
++    offs = np.arange(-r, r + 1, dtype=np.float64)
++
++    def dark_any(P):
++        xy = P[:, None, :] + offs[None, :, None] * a["n"][None, None, :]
++        xi = np.round(xy[..., 0]).astype(np.int64); yi = np.round(xy[..., 1]).astype(np.int64)
++        inb = (xi >= 0) & (xi < W) & (yi >= 0) & (yi < H)
++        v = np.full(xi.shape, 255, np.int32)
++        v[inb] = g[yi[inb], xi[inb]]
++        return (v < TINT_LINE_TH).any(axis=1)
++    if split:
++        return dark_any(Pa), dark_any(Pb)
++    return dark_any(Pa) & dark_any(Pb)
++
++
++def _beyond_net(net0, a, b, uu, sg, t0=2, t1=8):
++    """逐站看缺線那一側「框線位置再往外 t0–t1 px」（a 往溝外、b 往溝外，沿 a 的法向、整數步）落在第一趟頁邊（net0＝過了
++    texture 否決的 margin）的比例是否 ≥ ½。回傳 (a 外側, b 外側)。⚠️KT：取樣座標 half-to-even；界外不算（分母仍是 t1−t0+1）。"""
++    H, W = net0.shape
++    Pa = a["m"][None, :] + uu[:, None] * a["d"][None, :]
++    s_ = -((Pa - b["m"][None, :]) @ b["n"]) / float(np.dot(a["n"], b["n"]))
++    Pb = Pa + s_[:, None] * a["n"][None, :]
++    ts = np.arange(t0, t1 + 1, dtype=np.float64)
++    nv = sg * a["n"]
++
++    def frac(P, sign):
++        xy = P[:, None, :] + (sign * ts)[None, :, None] * nv[None, None, :]
++        xi = np.round(xy[..., 0]).astype(np.int64); yi = np.round(xy[..., 1]).astype(np.int64)
++        inb = (xi >= 0) & (xi < W) & (yi >= 0) & (yi < H)
++        v = np.zeros(xi.shape, bool)
++        v[inb] = net0[yi[inb], xi[inb]]
++        return v.mean(axis=1) >= 0.5
++    return frac(Pa, -1.0), frac(Pb, 1.0)
++
++
++def pair_strip(g, a, b, geo, ovl_min, bridge, textd=None, outside=None, tint=False, tctx=None):
++    """一對平行框線之間的溝帶。沿 a 的方向逐站（1px）量剖面白度，回傳 (遮罩 或 None, 統計)。
++
++    tint＝淡色溝模式（tctx＝{"char": 人物遮罩（模型原輸出）或 None}）：核心站另外接受「相對白」剖面——紙面水準 P＝3 站窗
++    內部像素的下中位數 ≥ TINT_LIGHT_MIN、落在 P ±TINT_DELTA 的比例 ≥ PROF_WHITE（非紙面 ≤ 3 顆也過；補橋站 PROF_WHITE_BRIDGE／≤ 1 顆）、
++    人物像素比例 ≤ TINT_CHAR_MAX；這些站的紙面像素也進遮罩。補橋整段不過時從兩端有證據且通過的站逐站長進去；
++    部分被佔的站做像素層級同色生長（見下）。兩種生長都只進「兩條框線的位置都還有暗」（_line_present）、且不靠字
++    （字在溝內或框線外側 ≤ TINT_TEXT_NEAR、沿溝擴 max(溝寬, TINT_TEXT_NEAR) 站）的站；同色生長另要求站內有物件
++    （≥ TINT_OCC_MIN 顆非紙面像素）。[outside] 改成連通塊層級：遮罩的 8 連通塊碰到頁外連通的白∪淡色平塗就整塊收。"""
+     H, W = g.shape
+     sg = geo["sg"]
+     ub = _proj_iv(b, a)
+@@ -601,8 +780,9 @@
+             return P + s * a["n"]
+         pb0, pb1 = on_b(pa0), on_b(pa1)
+         xs = np.array([pa0[0], pa1[0], pb0[0], pb1[0]]); ys = np.array([pa0[1], pa1[1], pb0[1], pb1[1]])
+-        x0, x1 = max(0, int(np.floor(xs.min())) - 1), min(W, int(np.ceil(xs.max())) + 2)
+-        y0, y1 = max(0, int(np.floor(ys.min())) - 1), min(H, int(np.ceil(ys.max())) + 2)
++        ex = TINT_TEXT_NEAR if tint else 0          # 淡色溝：外接框多留 ex（量框線外側貼著的字；第一趟不變）
++        x0, x1 = max(0, int(np.floor(xs.min())) - 1 - ex), min(W, int(np.ceil(xs.max())) + 2 + ex)
++        y0, y1 = max(0, int(np.floor(ys.min())) - 1 - ex), min(H, int(np.ceil(ys.max())) + 2 + ex)
+         if x1 <= x0 or y1 <= y0:
+             continue
+         yy, xx = np.mgrid[y0:y1, x0:x1]
+@@ -631,10 +811,56 @@
+         # 窄溝（內部只剩 ~8px）時一顆抗鋸齒就掉到 0.89：每站容許 ≤1 顆非白（3 站窗 ≤ 3 顆）與比例門取寬者
+         few = (c3 - w3) <= 3
+         ok = valid & np.where(ev | ~core, (frac >= PROF_WHITE) | few, (frac >= PROF_WHITE_BRIDGE) | ((c3 - w3) <= 1))
++        if tint:
++            # 相對白：逐站 256 格直方圖（3 站窗），下中位數＝紙面水準 P；內部在 P±δ 的比例
++            gv = g[y0:y1, x0:x1]
++            hist = np.bincount(ubin[inner] * 256 + gv[inner].astype(np.int64), minlength=nb * 256).reshape(nb, 256)
++            z1 = np.zeros((1, 256), np.int64)
++            h3 = hist + np.vstack([z1, hist[:-1]]) + np.vstack([hist[1:], z1])
++            cum = np.cumsum(h3, axis=1)
++            n3 = cum[:, -1]
++            P = np.argmax(cum * 2 >= n3[:, None], axis=1)            # 下中位數（n3＝0 ⇒ 0，valid 會擋）
++            lo_ = np.clip(P - TINT_DELTA, 0, 255); hi_ = np.clip(P + TINT_DELTA, 0, 255)
++            ar_ = np.arange(nb)
++            inb = cum[ar_, hi_] - np.where(lo_ > 0, cum[ar_, np.maximum(lo_ - 1, 0)], 0)
++            lightP = P >= TINT_LIGHT_MIN
++            n3c = np.maximum(n3, 1)
++
++            def win3(m):
++                c_ = np.bincount(ubin[inner & m], minlength=nb).astype(np.float64)
++                return c_ + np.r_[0, c_[:-1]] + np.r_[c_[1:], 0]
++            charf = win3(tctx["char"][y0:y1, x0:x1]) / n3c if tctx.get("char") is not None else np.zeros(nb)
++            # ⚠️ 不另加 3×3 平坦度門：框線旁的筆刷抗鋸齒（demo03 丁字路口 y 408：222–236 交錯）會讓它掉到 0.8，
++            # 而 ±δ 帶的比例門（有證據 90%、補橋 98%）已經把網點／線稿（對比 > δ）擋在外面
++            band_ = (inb >= PROF_WHITE * n3c) | ((n3 - inb) <= 3)
++            band_b = (inb >= PROF_WHITE_BRIDGE * n3c) | ((n3 - inb) <= 1)
++            tok = valid & lightP & band_ & (charf <= TINT_CHAR_MAX)       # 一般門：有證據站、短斷口、補橋內生長
++            ok_t = core & np.where(ev, tok, tok & band_b)                  # 補橋站：0.98
++            st["ndim"] = st.get("ndim", 0) + int((valid & ev & core & band_ & ~lightP & (P >= DARK_TH)).sum())
++            st["ncore"] = st.get("ncore", 0) + int((valid & ev & core).sum())
++            st["ntint"] = st.get("ntint", 0) + int((ok_t & ~ok).sum())
++            ok = ok | ok_t
++            # 兩條框線都還在的站（a、b 的位置 ±2px 內都有明顯不是紙的像素；蓋住框線的跨溝物件也算）：補橋生長與同色生長只准進
++            # 這些站＝「框線沒斷、只是溝裡有東西」（demo03 深色枕角）。框線已收尾、只剩紙的地方（c371_001：人物前的留白＝人物的
++            # 外圍；說明框蓋住上框的那段＝框的底色）不往裡長——第一趟在同樣幾何也不收
++            la, lb = _line_present(g, a, b, uu, split=True)
++            lp = la & lb
++            tpx = (np.abs(gv.astype(np.int16) - P[ubin]) <= TINT_DELTA) & (core & lightP)[ubin]
++            wt = wt | tpx
+         if textd is not None:
+             tx = np.bincount(ubin[quad & textd[y0:y1, x0:x1]], minlength=nb) > 0
+             st["ntext"] += int((tx & valid & ev).sum())
+             ok &= ~tx
++            if tint:
++                # 靠字的站：字在溝內或貼著框線外側 ≤ TINT_TEXT_NEAR px、再沿溝向外擴 max(溝寬, TINT_TEXT_NEAR) 站。這些站**不做**
++                # 補橋生長與同色生長（逐站本身照一般門）：壓在溝上的說明框（c371_001「在後續的發表參觀之後」）是跨溝物件，
++                # 生長會沿著說明框的波浪底邊把字框兩端的紙塗掉——第一趟在那裡整段不收
++                near = (u >= lo) & (u <= hi) & (va >= -TINT_TEXT_NEAR) & (vb >= -TINT_TEXT_NEAR)
++                txn = np.bincount(ubin[near & textd[y0:y1, x0:x1]], minlength=nb) > 0
++                pad = max(int(round(geo["gap"])), TINT_TEXT_NEAR)                # ⚠️KT 陷阱 1
++                txg = cv2.dilate(txn.astype(np.uint8)[None, :], np.ones((1, 2 * pad + 1), np.uint8))[0] > 0
++        elif tint:
++            txg = np.zeros(nb, bool)
+         # 小缺口（≤ PROF_GAP_FILL 站、前後都過）補起來：避免溝帶被零星一站切成斷續；含字的站不補
+         k = 0
+         while k < nb:
+@@ -656,6 +882,8 @@
+                 e += 1
+             if e - k <= SHORT_BRIDGE:     # 短斷口（框線偵測本身的小斷）：用一般白度門、不必 0.98
+                 okk = valid[k:e] & ((frac[k:e] >= PROF_WHITE) | few[k:e])
++                if tint:
++                    okk |= tok[k:e]
+                 if textd is not None:
+                     okk &= ~tx[k:e]
+                 ok[k:e] = okk
+@@ -663,31 +891,159 @@
+             st["nbridge"] += 1; st["nbridge_ok"] += int(run_ok)
+             if not run_ok:
+                 ok[k:e] = False
++                if tint and TINT_GROW:
++                    # 淡色溝：從兩端「有證據且通過」的站往補橋內逐站生長（一般門），第一站不過就停——跨溝物件
++                    # （demo03 x 820–930 的深色枕角）把框線蓋掉的那段，物件兩側的淡色溝仍接上（同端延伸的規則）
++                    for start, step, prev in ((k, 1, k - 1), (e - 1, -1, e)):
++                        if 0 <= prev < nb and ev[prev] and ok[prev]:
++                            j = start
++                            while k <= j < e and tok[j] and lp[j] and not txg[j] and not (textd is not None and tx[j]):
++                                ok[j] = True; j += step
++                                st["ngrow"] = st.get("ngrow", 0) + 1
+             k = e
+         # 端延伸：從核心邊界往外逐站，先跨過格角的框線像素（≤ EXT_DARK_SKIP 站），遇到第一個不過（或無效）就停
+         kc = np.nonzero(core)[0]
+         if len(kc):
+             keep = core.copy()
++            # 淡色溝（TINT_EXT_LINES）：端延伸的每一站另外要過生長的站門——兩條框線都還在（lp）、不靠字（txg）、不在人物上。
++            # 只剩一條框線的地方不是溝口，是溝變寬／格角（上色 c362_012：a 橫跨全頁、b 只到 x 1063，延伸 200 站切在 b 的
++            # 外推位置＝浮空黑條）。例外＝丁字路口：只缺一條框線的一段（剖面仍全白、≤ SHORT_BRIDGE 站，同核心的短補橋）之後
++            # 兩條框線又都在、而且至少連續這麼長，就跨過去（上色 c362_010：b 的偵測區間在 x 623 斷掉、像素裡兩線都在，
++            # 延伸到 x 625–634 碰上面格的直溝口、a 缺 10 站，之後兩線連續 75 站以上）
++            if tint and TINT_EXT_LINES:
++                ext_ok = ok & lp & ~txg & (charf <= TINT_CHAR_MAX)
++                ext_gap = ok & ~lp & ~txg & (charf <= TINT_CHAR_MAX)
++                if TINT_EXT_OPEN and tctx.get("net0") is not None:
++                    # 缺線那一側緊鄰的就是第一趟的頁邊（過了否決、會塗黑）＝溝口出到頁邊，延伸段的外緣接著黑、不懸空，照延伸
++                    # （上色 Bl c371_018 橫溝右端、Blq75 c362_013 斜溝下端：一條框線沿頁邊繼續、另一條在格角結束）
++                    oa, ob = _beyond_net(tctx["net0"], a, b, uu, sg)
++                    ext_ok = ext_ok | (ext_gap & (la | oa) & (lb | ob))
++            else:
++                ext_ok = ok; ext_gap = None
+             for start, step in ((kc[0] - 1, -1), (kc[-1] + 1, 1)):
+                 k = start; skipped = 0
+                 while 0 <= k < nb and not ok[k] and skipped < EXT_DARK_SKIP:
+                     k += step; skipped += 1
+-                while 0 <= k < nb and ok[k]:
+-                    keep[k] = True; k += step
++                while 0 <= k < nb:
++                    if ext_ok[k]:
++                        keep[k] = True; k += step; continue
++                    if ext_gap is None:
++                        break
++                    j = k
++                    while 0 <= j < nb and ext_gap[j] and abs(j - k) < SHORT_BRIDGE:
++                        j += step
++                    n_ = abs(j - k)
++                    after = [j + step * i for i in range(n_)]
++                    if not (n_ and 0 <= j < nb and ext_ok[j] and all(0 <= i < nb and ext_ok[i] for i in after)):
++                        break
++                    for i in range(k, j, step):
++                        keep[i] = True
++                    k = j
+             ok &= keep
+             st["ext"] = st.get("ext", 0) + int((ok & ~core).sum())
+         st["ovl"] += hi_core - lo_core; st["npass"] += int((ok & ev).sum()); st["nvalid"] += int((valid & ev).sum())
++        ok_acc = ok          # 收不收（白緣 MAD）用補洞前的 ok；第一趟就是 ok 本身
++        if tint and TINT_HOLE:
++            # 淡色溝的站缺口（v3，第二輪收緊）：有證據的核心內、兩端都通過的連續失敗站，每站都是「兩端那張紙、只差雜訊」才整段補：
++            # ① 兩條框線都在（lp）、亮、不靠字、3 站窗內沒有人物像素、valid；
++            # ② 紙面水準＝兩端通過站的 P 沿站號線性內插（Pref）：兩端 |Pl − Pr| ≤ δ、段內每站自己的 P 與 Pref 差 ≤ δ
++            #    （淺色平塗物件佔站內部過半時 P＝物件的灰階，會偏離兩端的紙；半透明霧蓋溝時兩端一邊是紙、一邊是霧）；
++            # ③ 深內部（離兩框線各 > skip+1：扣掉框線的抗鋸齒列）沒有 < TINT_LINE_TH 的像素；3 站窗內偏離 Pref ±δ 的非白像素
++            #    ≤ 3 顆或 ≥ PROF_WHITE 落在帶內——就是一般站門，只是紙面換成 Pref、扣掉框線旁一列（溝裡的淺色煙霧／網點／漸層／
++            #    排線：偏離 20–50 的像素佔一片，過不了；窄溝的 JPEG 振鈴：每窗 ≤ 3 顆）。
++            # 補上的站像素層級改收「白 ∪ Pref ±δ」（不是該站自己的 P）。放在 npass 之後、白緣 MAD 也用補洞前的 ok：pair_strip 的收不收
++            # 不變；但遮罩變大，build_sep 的溝網連通／被泡吃掉過半／SEP_MIN_CC 仍可能因此改判（見 README_v3）。
++            # ⚠️KT：Pref 用整數算——段兩端站號 k−1、e，L＝e−k+1，站 j 的 Pref·L＝P[k−1]·(e−j) + P[e]·(j−k+1)；像素比較一律乘 L。
++            ok_acc = ok.copy()
++            deep = inner & (va > skip + 1) & (vb > skip + 1)
++            hole_ok = valid & lightP & (charf <= 0) & lp & ~txg
++            if textd is not None:
++                hole_ok &= ~tx
++            dsel = np.nonzero(deep)
++            gd = gv[dsel].astype(np.int64); ud = ubin[dsel]
++            nd = np.bincount(ud, minlength=nb)
++            wtd = gd >= WHITE_TH
++            k = 0
++            hole_num = np.zeros(nb, np.int64); hole_den = np.zeros(nb, np.int64)
++            while k < nb:
++                if ok[k] or not (core[k] and ev[k]):
++                    k += 1; continue
++                e = k
++                while e < nb and not ok[e] and core[e] and ev[e]:
++                    e += 1
++                if k > 0 and e < nb and ok[k - 1] and ok[e] and hole_ok[k:e].all() and abs(int(P[k - 1]) - int(P[e])) <= TINT_DELTA:
++                    L_ = e - k + 1
++                    js = np.arange(k, e)
++                    num = int(P[k - 1]) * (e - js) + int(P[e]) * (js - k + 1)          # Pref·L（整數）
++                    good = bool((np.abs(P[k:e].astype(np.int64) * L_ - num) <= TINT_DELTA * L_).all()) and bool((nd[k:e] >= 1).all())
++                    if good:
++                        # 參考紙面（分子／分母）：段內＝Pref、兩端鄰站＝自己的 P（3 站窗會用到）
++                        rn = np.zeros(e - k + 2, np.int64); rd = np.ones(e - k + 2, np.int64)
++                        rn[0] = int(P[k - 1]); rn[-1] = int(P[e]); rn[1:-1] = num; rd[1:-1] = L_
++                        m_ = (ud >= k - 1) & (ud <= e)
++                        i_ = ud[m_] - (k - 1); g_ = gd[m_]
++                        dev = (np.abs(g_ * rd[i_] - rn[i_]) > TINT_DELTA * rd[i_]) & ~wtd[m_]
++                        inseg = (i_ >= 1) & (i_ <= e - k)
++                        if ((g_ < TINT_LINE_TH) & inseg).any():
++                            good = False
++                        else:
++                            c1 = np.bincount(i_, minlength=e - k + 2); d1 = np.bincount(i_[dev], minlength=e - k + 2)
++                            c3 = c1[:-2] + c1[1:-1] + c1[2:]; d3 = d1[:-2] + d1[1:-1] + d1[2:]
++                            good = bool((((c3 - d3) >= PROF_WHITE * c3) | (d3 <= 3)).all())
++                    if good:
++                        ok[k:e] = True
++                        hole_num[k:e] = num; hole_den[k:e] = L_
++                        st["nhole"] = st.get("nhole", 0) + (e - k)
++                        st.setdefault("hole_runs", []).append(e - k)
++                k = max(e, k + 1)
++            if (hole_den > 0).any():
++                # 補上的站：像素層級改收「白 ∪ Pref ±δ」
++                hs = quad & (hole_den > 0)[ubin]
++                hn = hole_num[ubin[hs]]; hd = hole_den[ubin[hs]]; gh = gv[hs].astype(np.int64)
++                wt[hs] = (gh >= WHITE_TH) | (np.abs(gh * hd - hn) <= TINT_DELTA * hd)
+         # 白緣：每站最靠近 a／b 的白像素的法向距（量直線度用）
+         big = 1e9
+         ea = np.full(nb, big); eb = np.full(nb, big)
+         sel = quad & wt
+         np.minimum.at(ea, ubin[sel], va[sel]); np.minimum.at(eb, ubin[sel], vb[sel])
+         for e_, key in ((ea, "mad_a"), (eb, "mad_b")):
+-            m_ = ok & (e_ < big)
++            m_ = ok_acc & (e_ < big)
+             st[key].append((uu[m_], e_[m_]))
+         mk = quad & wt & ok[ubin]
+-        if outside is not None:
++        if tint and TINT_FLOOD and mk.any():
++            # 部分被佔的站（跨溝物件只蓋住剖面的一部分：demo03 深色枕角 V 字下的兩片楔形淡色溝）：逐站判一律不過，
++            # 改成像素層級——從已收的溝像素 4 連通地長進「核心內未過的站」裡、與最近通過站紙面水準 ±δ 內、
++            # 不在人物／字上的像素（物件邊緣＝色調斷崖就停；只在兩框線之間的四邊形內，出不了溝）
++            pos = np.arange(nb)
++            lft = np.maximum.accumulate(np.where(ok, pos, -1))
++            rgt = np.minimum.accumulate(np.where(ok, pos, nb)[::-1])[::-1]
++            # 參考紙面：左右最近通過站的 P 沿站號線性內插（漸層溝裡紙面會漂；只有一側有通過站就用那一側）
++            hasl, hasr = lft >= 0, rgt < nb
++            Pl = P[np.clip(lft, 0, nb - 1)].astype(np.float64); Pr = P[np.clip(rgt, 0, nb - 1)].astype(np.float64)
++            wr = np.where(hasl & hasr, (pos - lft) / np.maximum(rgt - lft, 1), np.where(hasr, 1.0, 0.0))
++            Pref = Pl + (Pr - Pl) * wr
++            near_p = np.abs(gv.astype(np.int16) - Pref[ubin]) <= TINT_DELTA
++            # 只長進「被物件佔了一部分」的站：站內部有 ≥ TINT_OCC_MIN 顆偏離紙面 ±δ 的像素（跨溝物件本身）。整站都是紙、只因
++            # 補橋整段不過而沒收的站不長——那是補橋規則的決定（c371_001：說明框蓋住上框的那段，紙一路長到說明框的波浪底邊）
++            occ = np.bincount(ubin[inner & ~near_p], minlength=nb) >= TINT_OCC_MIN
++            allow = quad & (core & ~ok & occ & ~txg & (Pref >= TINT_LIGHT_MIN))[ubin] & near_p
++            if tctx.get("char") is not None:
++                allow &= ~tctx["char"][y0:y1, x0:x1]
++            allow &= lp[ubin]
++            if textd is not None:
++                allow &= ~textd[y0:y1, x0:x1] & ~tx[ubin]       # 含字的站整站不收（同第一趟），不只是字的像素
++            if allow.any():
++                nf, lbf = cv2.connectedComponents((mk | allow).astype(np.uint8), connectivity=4)
++                idf = np.unique(lbf[mk]); idf = idf[idf > 0]
++                grown = np.isin(lbf, idf) & ~mk
++                st["nflood"] = st.get("nflood", 0) + int(grown.sum())
++                mk = mk | grown
++        if outside is not None and not tint:
+             mk &= outside[y0:y1, x0:x1]
++        elif outside is not None:
++            n0, lb0 = cv2.connectedComponents(mk.astype(np.uint8), 8)
++            ids0 = np.unique(lb0[mk & outside[y0:y1, x0:x1]])
++            mk = np.isin(lb0, ids0[ids0 > 0])
+         # 只收「兩側都碰到框線」（離 a、b 各 ≤ skip+3）的白連通塊
+         n, lb = cv2.connectedComponents(mk.astype(np.uint8), 8)
+         ta = np.unique(lb[mk & (va <= skip + 3)]); tb = np.unique(lb[mk & (vb <= skip + 3)])
+@@ -747,23 +1103,27 @@
+     return None
+ 
+ 
+-def outside_white(g):
+-    """碰得到頁邊的白連通元件（8 連通）——溝／頁邊一定連到頁外緣。"""
+-    white = (g >= WHITE_TH).astype(np.uint8)
++def outside_white(g, tint=False, lf=None):
++    """碰得到頁邊的白連通元件（8 連通）——溝／頁邊一定連到頁外緣。tint＝白 ∪ 淡色平塗（[lf] 給就用）。"""
++    white = (g >= WHITE_TH)
++    if tint:
++        white = white | (light_flat(g) if lf is None else lf)
++    white = white.astype(np.uint8)
+     n, lab = cv2.connectedComponents(white, 8)
+     border = np.unique(np.concatenate([lab[0, :], lab[-1, :], lab[:, 0], lab[:, -1]]))
+     border = border[border > 0]
+     return np.isin(lab, border)
+ 
+ 
+-def separator_mask(g, groups, wmax, ovl_min, bridge, seg=None):
++def separator_mask(g, groups, wmax, ovl_min, bridge, seg=None, tint=False, char=None, lf=None, net0=None):
+     """所有群組兩兩配對 → 溝帶。回傳 (溝帶聯集, 逐對統計)。長的那條當 a（逐站量測的參考方向）。"""
+     H, W = g.shape
+     out = np.zeros((H, W), bool)
+     textd = None
+     if seg is not None:
+         textd = cv2.dilate(seg.astype(np.uint8), np.ones((2 * TEXT_DIL + 1,) * 2, np.uint8)) > 0
+-    outside = outside_white(g)
++    outside = outside_white(g, tint=tint, lf=lf)
++    tctx = dict(char=None if char is None else np.asarray(char).astype(bool), net0=net0) if tint else None
+     pairs = []
+     for i in range(len(groups)):
+         for j in range(i + 1, len(groups)):
+@@ -773,8 +1133,9 @@
+             if geo is None:
+                 continue
+             fam = family_hit(groups, ii, jj, geo, a, b)
+-            mk, st = pair_strip(g, a, b, geo, ovl_min, bridge, textd, outside)
++            mk, st = pair_strip(g, a, b, geo, ovl_min, bridge, textd, outside, tint=tint, tctx=tctx)
+             st["i"], st["j"] = i, j
++            st["tint"] = tint
+             if fam is not None and mk is not None:
+                 st["why"] = f"family{fam}"; mk = None
+             st["acc"] = mk is not None
+@@ -807,7 +1168,7 @@
+     return out
+ 
+ 
+-def network_filter(pairs, margin, g):
++def network_filter(pairs, margin, g, anchor_extra=None):
+     """溝帶一定是「溝網」的一段：從頁緣／頁邊出發，沿彼此相接的溝帶一路連進來。
+     接法＝溝帶本身、或沿自己的走廊（兩框線之間往兩端延伸）經白像素，碰到頁邊／頁緣帶／已收的溝帶。
+     孤立在格內的平行線夾白（標題裝飾雙線、格內的窗框）接不上網 ⇒ 丟（pairs 就地改 acc=False）。"""
+@@ -823,9 +1184,23 @@
+     core = cv2.distanceTransform(dark, cv2.DIST_L2, 3) >= NET_THICK        # ⚠️KT 陷阱 5：chamfer 3×3
+     passable = white | (cv2.dilate(core.astype(np.uint8), np.ones((2 * NET_THICK + 1,) * 2, np.uint8)) > 0)
+     todo = [q for q in pairs if q.get("acc")]
++    # 淡色溝的根（錨）：只有第一趟（絕對白證據）已收的頁邊／溝帶——**不含頁緣帶**。淡色證據比絕對白弱，只准延伸已由
++    # 白證據建立的溝網，不准自己從頁緣起一張新網（上色黑白頁 c362_011：兩條放射效果線夾的紙經頁緣接上網 → 被塗成黑斜條）。
++    # 第一趟的對照舊用 root；接上網的溝帶（兩趟皆然）同時成為兩種根。[anchor_extra]＝其他絕對白證據的溝（compose 的
++    # 白元件格溝 gutter：demo03 ×0.8 時第一趟 SEP 沒收下白的那段、白元件格溝有，只看 SEP 會整條留灰）。
++    anchor = margin.copy()
++    if anchor_extra is not None:
++        anchor |= np.asarray(anchor_extra).astype(bool)
++    passable_t = None
+     for q in todo:
+         cor = corridor((H, W), q["geo"], ext)
+-        reach = (cor & passable) | q["mask"]
++        if q.get("tint"):                      # 淡色溝：走廊內的淡色平塗也可通行（淡色頁邊／淡色溝口）
++            if passable_t is None:
++                lf_ = q.get("lf")
++                passable_t = passable | (light_flat(g) if lf_ is None else lf_)
++            reach = (cor & passable_t) | q["mask"]
++        else:
++            reach = (cor & passable) | q["mask"]
+         n, lb = cv2.connectedComponents(reach.astype(np.uint8), 8)
+         ids = np.unique(lb[q["mask"]]); ids = ids[ids > 0]
+         q["reach"] = np.isin(lb, ids)
+@@ -834,13 +1209,14 @@
+         grown = False
+         rest = []
+         for q in todo:
+-            if (cv2.dilate(q["reach"].astype(np.uint8), k) > 0)[root].any():
+-                root |= q["mask"]; q["net"] = True; grown = True
++            r_ = anchor if (q.get("tint") and TINT_ANCHOR) else root
++            if (cv2.dilate(q["reach"].astype(np.uint8), k) > 0)[r_].any():
++                root |= q["mask"]; anchor |= q["mask"]; q["net"] = True; grown = True
+             else:
+                 rest.append(q)
+         todo = rest
+     for q in todo:
+-        q["net"] = False; q["acc"] = False; q["why"] = "isolated"
++        q["net"] = False; q["acc"] = False; q["why"] = "isolated_t" if q.get("tint") else "isolated"
+     out = np.zeros((H, W), bool)
+     for q in pairs:
+         if q.get("acc"):
+@@ -1088,10 +1464,263 @@
+ 
+ # ── 總遮罩 ──────────────────────────────────────────────────────────────────
+ 
+-def separators(g, seg=None, bubble=None, frame_hv=None, veto=None):
++def _off_bubble(gs, bubble, shape):
++    """貼著對白框／說明框外框的直線不是格框（線上取樣點 ≥ BUB_LINE_MAX 落在泡 ⊕BUB_LINE_R）。"""
++    H, W = shape
++    bd = cv2.dilate(np.asarray(bubble).astype(np.uint8), np.ones((2 * BUB_LINE_R + 1,) * 2, np.uint8)) > 0
++    keep = []
++    for gp in gs:
++        pts = [gp["m"] + t * gp["d"] for t0, t1 in gp["iv"] for t in np.arange(t0, t1 + 1, 2.0)]
++        xy = np.round(np.array(pts)).astype(int)
++        xy[:, 0] = np.clip(xy[:, 0], 0, W - 1); xy[:, 1] = np.clip(xy[:, 1], 0, H - 1)
++        if float(bd[xy[:, 1], xy[:, 0]].mean()) < BUB_LINE_MAX:
++            keep.append(gp)
++    return keep
++
++
++def is_colour_page(img_bgr, chroma_max=8):
++    """彩頁判定（淡色溝第二趟的頁級開關）。灰色紙（近無彩）已由 nightread.normalize_paper 拉成白、第一趟就認得到；
++    淡色溝要處理的正是 normalize_paper 刻意不動的「有彩的淡色紙面」——黑白頁不跑，零成本、零變化。
++    chroma_max＝nightread.PAPER_NORM_CHROMA_MAX。"""
++    if img_bgr is None or img_bgr.ndim != 3:
++        return False
++    ch = img_bgr.max(axis=2).astype(np.int16) - img_bgr.min(axis=2).astype(np.int16)
++    return float((ch > chroma_max).mean()) >= TINT_COLOR_FRAC
++
++
++def _uv(a, xs, ys):
++    """點 → a 的 (沿線 u, 法向 v) 座標（v 不含 sg；double）。"""
++    px = xs - a["m"][0]; py = ys - a["m"][1]
++    return px * a["d"][0] + py * a["d"][1], px * a["n"][0] + py * a["n"][1]
++
++
++def tint_family_map(M, a, geo, core, reach=FAMILY_REACH):
++    """候選圖版家族否決（淡色溝）：a 外側 [−reach·w, −TINT_FAM_OFF] 與 b 外側 [w + TINT_FAM_OFF, (1+reach)·w]（v 以 a 為準、
++    溝那一側為正）的候選像素裡，找一條與 a 夾角 ≤ FAMILY_ANG 的直線，沿核心（兩框線重疊段）的覆蓋率 ≥ TINT_FAM_COVER ⇒ 排線／效果線家族。
++
++    群組版（family_hit）只看得到 ≥ L 的長線；放射效果線的第三條常因錐形收尾、斷續而短於 L（上色 c362_011 的 7/8 對），
++    直接在候選像素上做小 Hough：角度 φ ∈ [−FAMILY_ANG, FAMILY_ANG] 每 0.5°、v' ＝ v − u·tanφ 取 1px 格（±1 格合併），
++    一格內「有候選的相異站數」／核心總站數＝覆蓋率。回傳 (最大覆蓋率, 該線的 v)。⚠️KT：站號 round(u)、格號 floor(v')（向下取整）。"""
++    w = geo["gap"]; sg = geo["sg"]
++    if not core:
++        return 0.0, None
++    lo = min(c[0] for c in core); hi = max(c[1] for c in core)
++    ncore = sum(int(np.floor(c1) - np.ceil(c0)) + 1 for c0, c1 in core)
++    # 取候選像素：核心 u 範圍、外側兩條帶的外接框
++    H, W = M.shape
++    corners = []
++    for u in (lo, hi):
++        for v in (-reach * w, (1 + reach) * w):
++            P = a["m"] + u * a["d"] + sg * v * a["n"]; corners.append(P)
++    corners = np.array(corners)
++    x0, x1 = max(0, int(np.floor(corners[:, 0].min())) - 1), min(W, int(np.ceil(corners[:, 0].max())) + 2)
++    y0, y1 = max(0, int(np.floor(corners[:, 1].min())) - 1), min(H, int(np.ceil(corners[:, 1].max())) + 2)
++    if x1 <= x0 or y1 <= y0:
++        return 0.0, None
++    ys, xs = np.nonzero(M[y0:y1, x0:x1])
++    if len(xs) == 0:
++        return 0.0, None
++    u, v = _uv(a, xs.astype(np.float64) + x0, ys.astype(np.float64) + y0)
++    v = sg * v
++    inc = np.zeros(len(u), bool)
++    for c0, c1 in core:
++        inc |= (u >= c0) & (u <= c1)
++    side = ((v >= -reach * w) & (v <= -TINT_FAM_OFF)) | ((v >= w + TINT_FAM_OFF) & (v <= (1 + reach) * w))
++    sel = inc & side
++    if not sel.any():
++        return 0.0, None
++    u, v = u[sel], v[sel]
++    ui = np.round(u - lo).astype(np.int64)                      # ⚠️KT 陷阱 1
++    best, bv = 0.0, None
++    vmin = -reach * w - (hi - lo) * np.tan(np.deg2rad(FAMILY_ANG)) - 2
++    for phi in np.arange(-FAMILY_ANG, FAMILY_ANG + 1e-9, TH_STEP):
++        vp = v - (u - lo) * np.tan(np.deg2rad(phi))
++        vb = np.floor(vp - vmin).astype(np.int64)
++        nbin = int(vb.max()) + 3
++        key = np.unique(ui * nbin + vb)                        # 相異 (站, 格)
++        # 「±1 格內有候選的相異站數」：(格, 站) 點陣上下各位移一格取聯集，再逐格數站
++        k0 = key // nbin; kb = key % nbin
++        m = np.zeros((nbin + 2, int(hi - lo) + 2), bool)
++        m[kb + 1, k0] = True
++        cov = (m[:-2] | m[1:-1] | m[2:]).sum(axis=1) / max(ncore, 1)
++        j = int(np.argmax(cov))
++        if cov[j] > best:
++            best, bv = float(cov[j]), float(j + vmin)
++    return best, bv
++
++
++def tint_dim_run(g, a, b, geo, reach=TINT_DIMCONT_R):
++    """延長線上的漸暗溝：沿 a 的整條（到出頁為止）逐站看「兩框線都在＋內部平（在紙面 P ±TINT_DELTA 的比例 ≥ PROF_WHITE）＋
++    DARK_TH ≤ P < TINT_LIGHT_MIN」的站數。v1 的 TINT_DIM_MAX 只量核心；淡色候選只長在亮的那段（demo03 第 2 排直溝：
++    y 414–730 亮、y 1080 以後 200→110 漸暗、中間夾頭髮與對白框），核心量不到暗段 ⇒ 塗亮段、留暗段＝同一條溝黑／灰兩截。
++
++    延長線只用 a 的方向（a 是較長的那條、角度最準）＋核心量到的溝寬：中線 C(u)＝a(u) + sg·(w/2)·a.n。b 自己的角度常由
++    幾截短段擬合、偏 0.4–0.6°，外推 500px 就偏離真框線 4–8px（demo03 q60/q66/w69/s11 的暗段因此量不到）。逐站在中線兩側
++    [w/2 − min(reach, w/2 − 2), w/2 + reach] 內找離中線最近的暗像素當兩條框線的內緣（容許延長線再漂 reach px），內部＝兩內緣
++    各內縮 2px。回傳站數。⚠️KT：取樣座標 half-to-even；界外不算。"""
++    H, W = g.shape
++    w = float(geo["gap"]); sg = geo["sg"]
++    tr = t_range(a["m"], a["d"], H, W)
++    if tr is None:
++        return 0
++    us = np.arange(tr[0], tr[1] + 1, dtype=np.float64)
++    nv = sg * a["n"]
++    C = a["m"][None, :] + us[:, None] * a["d"][None, :] + (0.5 * w) * nv[None, :]
++    half = int(np.ceil(0.5 * w)) + reach
++    offs = np.arange(-half, half + 1, dtype=np.float64)
++    xy = C[:, None, :] + offs[None, :, None] * nv[None, None, :]
++    xi = np.round(xy[..., 0]).astype(np.int64); yi = np.round(xy[..., 1]).astype(np.int64)
++    inb = (xi >= 0) & (xi < W) & (yi >= 0) & (yi < H)
++    v = np.full(xi.shape, -1, np.int32)
++    v[inb] = g[yi[inb], xi[inb]]
++    dark = inb & (v < DARK_TH)
++    inner_lim = 0.5 * w - min(float(reach), 0.5 * w - 2.0)
++    wa = (offs <= -inner_lim)[None, :] & dark                    # a 側窗
++    wb = (offs >= inner_lim)[None, :] & dark                     # b 側窗
++    fa = wa.any(axis=1); fb = wb.any(axis=1)
++    oa = np.where(wa, offs[None, :], -np.inf).max(axis=1)       # a 側離中線最近的暗
++    ob = np.where(wb, offs[None, :], np.inf).min(axis=1)        # b 側離中線最近的暗
++    inner = inb & (offs[None, :] > (oa + 2.0)[:, None]) & (offs[None, :] < (ob - 2.0)[:, None])
++    n = inner.sum(axis=1)
++    vs = np.where(inner, v, 256)
++    srt = np.sort(vs, axis=1)
++    P = srt[np.arange(len(us)), np.maximum((n - 1) // 2, 0)]     # 下中位數（同 pair_strip 的定義）
++    inb_ = (inner & (np.abs(v - P[:, None]) <= TINT_DELTA)).sum(axis=1)
++    flat = (n >= 4) & (inb_ >= PROF_WHITE * np.maximum(n, 1))
++    dim = fa & fb & flat & (P >= DARK_TH) & (P < TINT_LIGHT_MIN)
++    return int(dim.sum())
++
++
++def tint_side_stats(g, geo, mask, bg):
++    """淡色溝的框線外側（v3 第三輪）。沿 a 的方向逐站（站號 round(u)，u 以 a 為準），只看遮罩有像素的站：
++
++      ・同色：溝紙面 Pm＝該站遮罩像素的下中位數；a 外側帶（va ∈ [−(OFF+W), −OFF]）、b 外側帶（vb 同）裡 ≥ 4 顆、
++        且 ≥ PROF_WHITE 在 Pm ±TINT_DELTA 內 ⇒ 該側同色站。回傳兩側同色站佔（外側帶 ≥ 4 顆的站）的比例。
++        兩側都同色＝兩條線畫在同一片平塗上（無框格底的兩條平行線、格內的淡色橫帶；驗證代理 M／M2／syn3）。
++      ・緊鄰背景：從 a、b 的位置沿 a 的法向往溝外走 3…TINT_BG_REACH px（整數步），任一點落在 bg（第一趟溝帶 ∪ 頁邊 ∪
++        白元件格溝）或出頁 ⇒ 該側緊鄰背景的站。回傳兩側的比例。溝是兩格之間的空白，框線外側應該是格；
++        外側已是背景的帶子是格內的邊條、雙框線中間、貼著白背景的淡色帶（驗證代理 E2、syn3 的 fps／double）。
++    ⚠️KT：站號與取樣座標 half-to-even；同色比例用 inb ≥ PROF_WHITE·cnt（double）；va、vb 同 pair_strip（double）。"""
++    a, b, sg, sb, _U = geo
++    H, W = g.shape
++    ys, xs = np.nonzero(mask)
++    if len(xs) == 0:
++        return 0.0, 0.0, 0.0, 0.0
++    u = (xs - a["m"][0]) * a["d"][0] + (ys - a["m"][1]) * a["d"][1]
++    ui = np.round(u).astype(np.int64)                            # ⚠️KT 陷阱 1
++    u0 = int(ui.min()); nb = int(ui.max()) - u0 + 1
++    hist = np.bincount((ui - u0) * 256 + g[ys, xs].astype(np.int64), minlength=nb * 256).reshape(nb, 256)
++    cum = np.cumsum(hist, axis=1); n = cum[:, -1]
++    has = n > 0
++    Pm = np.argmax(cum * 2 >= n[:, None], axis=1)                # 下中位數（同 pair_strip 的 P）
++    # 外側帶：遮罩外接框往外擴
++    ex = TINT_SIDE_OFF + TINT_SIDE_W + 2
++    x0, x1 = max(0, int(xs.min()) - ex), min(W, int(xs.max()) + ex + 1)
++    y0, y1 = max(0, int(ys.min()) - ex), min(H, int(ys.max()) + ex + 1)
++    yy, xx = np.mgrid[y0:y1, x0:x1]
++    ub = np.round((xx - a["m"][0]) * a["d"][0] + (yy - a["m"][1]) * a["d"][1]).astype(np.int64) - u0
++    va = sg * ((xx - a["m"][0]) * a["n"][0] + (yy - a["m"][1]) * a["n"][1])
++    vb = sb * ((xx - b["m"][0]) * b["n"][0] + (yy - b["m"][1]) * b["n"][1])
++    inr = (ub >= 0) & (ub < nb)
++    ubc = np.clip(ub, 0, nb - 1)
++    inr &= has[ubc]
++    G = g[y0:y1, x0:x1].astype(np.int64)
++    near = np.abs(G - Pm[ubc]) <= TINT_DELTA
++    same = []
++    for v in (va, vb):
++        sel = inr & (v >= -(TINT_SIDE_OFF + TINT_SIDE_W)) & (v <= -TINT_SIDE_OFF)
++        c = np.bincount(ubc[sel], minlength=nb); k = np.bincount(ubc[sel & near], minlength=nb)
++        val = c >= 4
++        same.append(float(((k >= PROF_WHITE * c) & val).sum()) / max(int(val.sum()), 1))
++    # 緊鄰背景：逐站（遮罩有像素的站）取樣
++    st = np.nonzero(has)[0].astype(np.float64) + u0
++    Pa = a["m"][None, :] + st[:, None] * a["d"][None, :]
++    s_ = -((Pa - b["m"][None, :]) @ b["n"]) / float(np.dot(a["n"], b["n"]))
++    Pb = Pa + s_[:, None] * a["n"][None, :]
++    ts = np.arange(3, TINT_BG_REACH + 1, dtype=np.float64)
++    nv = sg * a["n"]
++    adj = []
++    for P, sign in ((Pa, -1.0), (Pb, 1.0)):
++        xy = P[:, None, :] + (sign * ts)[None, :, None] * nv[None, None, :]
++        xi = np.round(xy[..., 0]).astype(np.int64); yi = np.round(xy[..., 1]).astype(np.int64)   # ⚠️KT 陷阱 1
++        inb = (xi >= 0) & (xi < W) & (yi >= 0) & (yi < H)
++        hit = ~inb
++        if bg is not None:
++            hb = np.zeros(xi.shape, bool)
++            hb[inb] = bg[yi[inb], xi[inb]]
++            hit |= hb
++        adj.append(float(hit.any(axis=1).mean()) if len(st) else 0.0)
++    return same[0], same[1], adj[0], adj[1]
++
++
++def tint_pairs(g, seg=None, bubble=None, char=None, net0=None, bg=None):
++    """淡色溝第二趟：候選框線＝暗且鄰（白 ∪ 淡色平塗）、自己的 Hough／切段／分組（第一趟不受影響），
++    群組兩兩配對用 tint 模式量剖面。收下的對必須至少有一站是「只靠相對白才過」（否則是白溝，歸第一趟），且「平但
++    不夠亮」的站 ≤ TINT_DIM_MAX。回傳 pairs（st["tint"]＝True），只給溝網連通與 build_sep 用。
++
++    v2 另加三道否決（淡色證據比絕對白弱，效果線／排線家族在上色黑白頁、粉彩格底頁都會長得像溝）：
++      ・實線：兩條框線各自至少有一段 ≥ L 的單段（TINT_SOLID；短截只能延長一條真框線，不能自己湊成一條）
++      ・候選圖家族：tint_family_map（第三條近平行線，不必 ≥ L）
++      ・漸暗延長：tint_dim_run ≥ TINT_DIMCONT_MIN
++    並且溝網連通只准接上絕對白證據的溝網（network_filter 的 anchor：第一趟的溝帶／頁邊＋白元件格溝；TINT_ANCHOR）。
++
++    v3 第三輪另加外側否決（TINT_SIDES；[bg]＝第一趟溝帶 ∪ 頁邊 ∪ 白元件格溝，見 tint_side_stats）：
++      ・兩側同色：兩條框線外側帶都與溝同色（≥ TINT_SAME_MAX 的站）⇒ 同一片平塗上畫的兩條線
++      ・外側緊鄰背景：任一側框線外 ≤ TINT_BG_REACH px 就是背景或頁外（≥ TINT_BG_MAX 的站）⇒ 格內邊條／雙框線中間"""
++    H, W = g.shape; sh = min(H, W)
++    L = max(60, int(round(LEN_FRAC * sh)))
++    lf = light_flat(g)
++    hc = dict(M=candidate_pixels(g, tint=True, lf=lf))
++    # 淡色溝的框線常被丁字路口／跨溝物件切成短於 L 的幾截（demo03 第 2 排上框 x 676–830）：同斷框線，每截 ≥ OCC_PIECE_FRAC×L、
++    # 共線串成一組、總長 ≥ L 才收
++    segs_t = detect_segments(g, min_len=int(round(OCC_PIECE_FRAC * L)), hough_cache=hc, tint=True)
++    groups_t = [gp for gp in group_lines(segs_t) if gp["len"] >= L]
++    if bubble is not None and np.any(bubble):
++        groups_t = _off_bubble(groups_t, bubble, g.shape)
++    for gp in groups_t:
++        gp["solid"] = max(s["t1"] - s["t0"] for s in gp["segs"]) >= L
++    _, tp = separator_mask(g, groups_t, WMAX_FRAC * sh, OVL_FRAC * LEN_FRAC * sh, BRIDGE_FRAC * sh, seg=seg, tint=True,
++                           char=char, lf=lf, net0=net0)
++    for q in tp:
++        q["groups"] = groups_t; q["lf"] = lf
++        if not q["acc"]:
++            continue
++        a, b, sg_, sb_, U = q["geo"]
++        if q.get("ntint", 0) == 0:
++            # 整條都是絕對白就過的對＝白溝，歸第一趟管（第二趟的群組幾何不同，不重收、不多收）
++            q["acc"] = False; q["why"] = "notint"
++        elif q.get("ndim", 0) > TINT_DIM_MAX * max(q.get("ncore", 0), 1):
++            q["acc"] = False; q["why"] = "dim"
++        elif TINT_SOLID and not (a["solid"] and b["solid"]):
++            q["acc"] = False; q["why"] = "notsolid"
++        if q["acc"]:
++            fam, fv = tint_family_map(hc["M"], a, dict(gap=q["gap"], sg=sg_), U)
++            q["fam3"] = fam
++            if fam >= TINT_FAM_COVER:
++                q["acc"] = False; q["why"] = "fammap"
++        if q["acc"]:
++            dr = tint_dim_run(g, a, b, dict(gap=q["gap"], sg=sg_))
++            q["dimrun"] = dr
++            if dr >= TINT_DIMCONT_MIN:
++                q["acc"] = False; q["why"] = "dimcont"
++        if q["acc"] and TINT_SIDES:
++            sa_, sb2, ba_, bb_ = tint_side_stats(g, q["geo"], q["mask"], bg)
++            q["side"] = (sa_, sb2, ba_, bb_)
++            if min(sa_, sb2) >= TINT_SAME_MAX:
++                q["acc"] = False; q["why"] = "sameside"
++            elif max(ba_, bb_) >= TINT_BG_MAX:
++                q["acc"] = False; q["why"] = "bgside"
++        if not q["acc"]:
++            q.pop("mask", None)
++    return tp
++
++
++def separators(g, seg=None, bubble=None, frame_hv=None, veto=None, char=None, colour=False, gutter=None):
+     """回傳 (溝帶, 頁邊, 框線群組, 逐對統計)。
+ 
+     veto＝texture_veto2 同款函式（頁邊要過線稿密度否決；溝帶已逐剖面驗白、不過）。
++    char＝人物遮罩（模型原輸出 char_raw，淡色溝的人物否決）；colour＝is_colour_page（淡色溝第二趟只在彩頁跑；預設不跑）；
++    gutter＝compose 的白元件格溝（只當淡色溝的溝網錨，第一趟不用）。
+     frame_hv＝nightread.frame_line_mask 的水平／垂直格線，只併進頁邊否決的格線遮罩。"""
+     H, W = g.shape; sh = min(H, W)
+     hcache = {}
+@@ -1119,17 +1748,27 @@
+             trusted |= {q["i"], q["j"]}
+             strip_pre |= q["mask"]
+     mar = margin_mask(g, groups, seg=seg, bubble=bubble, trusted=trusted, strip_pre=strip_pre, extra=ogroups)
+-    strip = network_filter(pairs, mar, g)
++    mar_v = mar
+     if veto is not None and mar.any():
+         # 斷框線也當格線隔板：否則頁邊與格內經斷口連成同一區，格內線稿的密度滲到頁邊
+         fr = frame_raster(g, groups + ogroups).astype(np.uint8)
+         if frame_hv is not None:
+             fr |= (np.asarray(frame_hv) > 0).astype(np.uint8)
+-        mar = veto(mar, g, fr, seg, bubble)
+-    return strip, mar, groups, pairs
++        mar_v = veto(mar, g, fr, seg, bubble)
++    # 淡色溝的端延伸拿「過了否決的頁邊」當溝口證據（net0）；溝網連通照舊用否決前的 mar（第一趟不變）
++    tpairs = []
++    if TINT and (colour or not TINT_COLOR_ONLY):
++        # 外側緊鄰背景的否決用第一趟的溝帶（溝網前）∪ 頁邊（否決前，同溝網的根）∪ 白元件格溝
++        bg_t = strip_pre | mar
++        if gutter is not None:
++            bg_t = bg_t | np.asarray(gutter).astype(bool)
++        tpairs = tint_pairs(g, seg=seg, bubble=bubble, char=char, net0=mar_v, bg=bg_t)
++    pairs = pairs + tpairs
++    strip = network_filter(pairs, mar, g, anchor_extra=gutter if tpairs else None)
++    return strip, mar_v, groups, pairs
+ 
+ 
+-def build_sep(g, seg, bubble, frame=None, veto=None):
++def build_sep(g, seg, bubble, frame=None, veto=None, char=None, colour=False, gutter=None):
+     """compose 用的 SEP 圖層。回傳 dict：
+ 
+       sep       要塗的溝＋頁邊（泡 ⊕7 扣掉、被泡吃過半的整條溝丟掉、< SEP_MIN_CC 碎塊丟掉）
+@@ -1138,13 +1777,16 @@
+       margin    頁邊（已過 texture_veto2）
+       frame_arb 任意角度框線點陣（出血過濾拿它當框線結構證據）
+       groups / pairs / dropped  診斷用
++      tint      淡色溝對（第二趟）收下的遮罩 ∩ sep（compose 的描亮例外用；沒有淡色溝＝全 False）
+ 
+     **人物遮罩不扣**（圖層：SEP 在人物之上）——對照實驗過的變體（L2、47 頁、溝核心內仍灰的原白）：扣加工後遮罩
+     314,591 px（溝邊灰帶、窄溝整條不塗）、只扣模型原輸出 2,781 px、不扣（採用）554 px。"""
+-    strip, mar, groups, pairs = separators(g, seg=seg, bubble=bubble, frame_hv=frame, veto=veto)
++    strip, mar, groups, pairs = separators(g, seg=seg, bubble=bubble, frame_hv=frame, veto=veto, char=char, colour=colour,
++                                           gutter=gutter)
+     bub = cv2.dilate(bubble.astype(np.uint8), np.ones((SEP_BUB_DIL, SEP_BUB_DIL), np.uint8)) > 0 \
+         if bubble.any() else np.zeros_like(strip)
+     keep_strip = np.zeros_like(strip)
++    keep_tint = np.zeros_like(strip)
+     dropped = []
+     for q in pairs:
+         if not q.get("acc"):
+@@ -1155,6 +1797,8 @@
+             dropped.append((q["i"], q["j"], round(sub / tot, 3)))
+             continue
+         keep_strip |= m
++        if q.get("tint"):
++            keep_tint |= m
+     strip = strip & keep_strip
+     sep_pre = strip | mar
+     sep = sep_pre & ~bub
+@@ -1165,4 +1809,4 @@
+         if len(small):
+             sep &= ~np.isin(lb_, small)
+     return dict(sep=sep, sep_pre=sep_pre, strip=strip, margin=mar, frame_arb=frame_raster(g, groups),
+-                groups=groups, pairs=pairs, dropped=dropped)
++                groups=groups, pairs=pairs, dropped=dropped, tint=keep_tint & sep)
+--- a/research/make_page_fixture.py
++++ b/research/make_page_fixture.py
+@@ -21,7 +21,7 @@
+ DEFAULT_OUT = os.path.join(os.path.dirname(HERE), "nightread", "src", "test", "resources", "page")
+ 
+ 
+-def sep_masks(name, g, bgr, seg, bubble, o):
++def sep_masks(name, g, bgr, seg, bubble, o, char=None, gutter=None):
+     """任意角度格溝（nightread_sep.build_sep）的期望遮罩，給 Kotlin `SeparatorsParityTest` 單獨比對 SEP。
+ 
+     輸入與 compose 呼叫 build_sep 時相同：紙白正規化後的灰階、文字遮罩、最終泡遮罩、frame_line_mask 的水平／垂直格線。
+@@ -32,7 +32,8 @@
+     import nightread_sep
+     gn, _ = pipeline.normalize_paper(g, bgr)
+     lhm, lvm = pipeline.frame_line_mask(gn)
+-    lay = nightread_sep.build_sep(gn, seg, bubble, (lhm | lvm), veto=pipeline.texture_veto2)
++    lay = nightread_sep.build_sep(gn, seg, bubble, (lhm | lvm), veto=pipeline.texture_veto2, char=char,
++                                  colour=nightread_sep.is_colour_page(bgr, pipeline.PAPER_NORM_CHROMA_MAX), gutter=gutter)
+     for key, suffix in (("sep", "sep"), ("strip", "sep_strip"), ("margin", "sep_margin"), ("frame_arb", "sep_frame")):
+         cv2.imwrite(os.path.join(o, f"{name}_{suffix}.png"), lay[key].astype(np.uint8) * 255, [cv2.IMWRITE_PNG_COMPRESSION, 9])
+ 
+@@ -74,7 +75,8 @@
+                 cv2.imwrite(os.path.join(o, f"{name}_{stage}.png"), (m > 127).astype(np.uint8) * 255)
+         bub = cv2.imread(os.path.join(a.results, f"{name}_bubble.png"), cv2.IMREAD_GRAYSCALE)
+         if bub is not None:
+-            sep_masks(name, g, bgr, seg > 127, bub > 127, o)
++            gm = cv2.imread(os.path.join(a.results, f"{name}_gutter.png"), cv2.IMREAD_GRAYSCALE)
++            sep_masks(name, g, bgr, seg > 127, bub > 127, o, char=cm > 127, gutter=None if gm is None else gm > 127)
+         with open(os.path.join(o, f"{name}_regions.txt"), "w", encoding="utf-8") as f:
+             for r in meta["regions"]:
+                 x0, y0, x1, y1 = r["bbox"]
