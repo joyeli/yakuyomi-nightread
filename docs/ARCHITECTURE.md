@@ -128,6 +128,15 @@ A real bubble is packed with text; a component where text sits on a cheek is a w
 denominator is the long side squared rather than the text box area, because a single vertical line of text has
 a box only one line wide, and the area form would blow past the ratio spuriously.
 
+**Bubble-leak sealing.** A 1–2 px crack in a bubble outline joins the bubble's white to the panel background
+outside it, and the whole bubble is rejected as too large or as margin / in-panel white. Such components get a
+second look: erode their white once with a 3×3 cross (sealing cracks whose white is ≤ 2 px wide); if the white
+holding the text becomes a piece of its own, it is restored into a unit (never across an ink line) and sent
+down the same bubble path, with extra gates for the page edge, the number of cracks, whether the text is inside,
+how far the cracks are from the bubble body, and the character mask. Accepted units only join the bubble layer,
+not the structural layers (gutters, margins, stickers). Details in PARAMETERS (Bubble-leak sealing) and
+DECISIONS.
+
 **Sticker-style background.** Once plain white background is filled black the page loses its depth, so the
 foreground needs a white outline to lift it out — the same vocabulary as the bubble's bright text on a dark
 backing. Foreground and background separate on connectivity: white enclosed by ink (a face, clothing) is not

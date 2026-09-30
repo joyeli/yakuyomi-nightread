@@ -12,7 +12,8 @@ produced by `charmask.py`. If it is missing the run fails outright rather than s
 product fill levels are also selected through the environment (`NIGHTREAD_STICKER_MODE`,
 `NIGHTREAD_STICKER_ROUGH`, `NIGHTREAD_STICKER_MINFRAC`, `NIGHTREAD_PB`, `NIGHTREAD_HM` — see *Fill tiers*), the
 any-angle separator and the bleed-panel filter each have a switch (`NIGHTREAD_SEP`, `NIGHTREAD_BLEED`, on by
-default), and a few research toggles read it too (`NIGHTREAD_EDGE_INK`, `NIGHTREAD_REQUIRE_CLEAN`, `NIGHTREAD_TEXT_*`).
+default), bubble-leak sealing has its radius there (`NIGHTREAD_BUBBLE_SEAL_R`, 1 by default, 0 = off), and a few
+research toggles read it too (`NIGHTREAD_EDGE_INK`, `NIGHTREAD_REQUIRE_CLEAN`, `NIGHTREAD_TEXT_*`).
 Everything else is edited in the file, so a run reproduces.
 
 Where each value came from, and which alternatives were measured and rejected, is in
@@ -212,7 +213,93 @@ changes nothing: the 11 fixture pages and the 8 device pages are pixel-identical
 ### `BUBBLE_REQUIRE_CLEAN` = off (`NIGHTREAD_REQUIRE_CLEAN`)
 Research toggle: demand a clean container (non-text ink below `BUBBLE_CLEAN_WINS`) before accepting a
 component as a bubble at all, instead of only when deciding whether to fill it whole. It had no effect on the
-guard in the tier ablation, so no product level uses it.
+guard in the tier ablation, so no product level uses it. (Not ported to Kotlin.)
+
+---
+
+## Bubble-leak sealing
+
+A 1–2 px crack in a bubble outline puts the bubble's white and whatever lies outside the crack (panel sky, a
+margin) into one white component. That component is then too large (`BUBBLE_COMP_MAX_FRAC`, `BUBBLE_LOCAL_K`)
+or classified as margin / in-panel white, the whole bubble is rejected, and in L1–L3 (no pseudo-bubbles) it
+stays scene grey — c362_005:3, reported from the phone. Sealing only revisits the components that were rejected
+for those two reasons, and does not grow anything:
+
+1. Erode the component's white with a (2R+1) ellipse (R=1: a 3×3 cross) → "deep white", white more than R from
+   ink. The page edge does not count as ink.
+2. Each deep-white block the text touches (dilated strokes inside that region's `BUBBLE_PAD` window), largest
+   first, is restored into a unit: the block plus component white within R of it, minus the pixels that another
+   block's R-neighbourhood also reaches (the arc that seals the crack); keep the part 8-connected to the block;
+   fill holes (text, pockets between characters). The restore only lands inside ink-free discs of radius R, so a
+   unit never crosses an ink line.
+3. A crack is component white outside the filled unit and 8-adjacent to it; its 8-connected groups are counted.
+4. The unit goes down the unchanged bubble path as if it were a component (page share, locality, ratio, core
+   fill for large units, the ink-outline gate), plus the gates below. Each (component, block) is judged once, by
+   the first region that touches it; blocks inside an accepted unit are pockets and are skipped; a rejected unit
+   does not hide the blocks inside it.
+
+Accepted units go only into the bubble layer (bubble repaint, pseudo-bubble coverage, bright-island skip, and
+bubbles winning over the character restore). They are kept out of the structural layers — any-angle separators,
+texture_veto2, the bleed filter, stickers and `BUBBLE_REST_NEAR` — because a bubble is a partition or evidence
+there and a new one would change pixels outside it. Over 47 pages × 4 levels only c362_004, c362_005 and
+c362_011 change; the guard stays 18 / 12 / 12 / 16 (/664). Kotlin: `NightReadParams.bubbleSeal`
+(`BubbleSealParams`). Numbers and the rejected v1/v2 designs are in [DECISIONS.md](DECISIONS.md) (Bubble-leak
+sealing).
+
+Extra gates, in order: **edge** (the unit's bbox within 2 px of the page edge — such a unit would be a margin
+candidate itself), **no-split** (`BUBBLE_SEAL_REST_MIN`), **porous** (`BUBBLE_SEAL_MAX_GAPS`), **text-in**
+(`BUBBLE_SEAL_TEXT_IN`), then the usual page-share and locality gates, **cut-far** (`BUBBLE_SEAL_CUT_GEO`),
+the usual ratio / core fill, **chromatic** (a unit whose 1–3 px ring has mean chroma above
+`STICKER_CHROMA_MAX` is rejected, not skipped; a Kotlin caller that passes no chroma is treated as a grey page,
+chroma 0), the **ink-outline gate for small units too**, and **character** (`BUBBLE_SEAL_CHAR_MAX`). Fractions
+are rounded like python's `round()` (text-in, outline and character to 4 decimals, ring chroma to 2) before they
+are compared, and the outline distance is the 3×3 chamfer distance (`cv2.DIST_L2, 3`). In python both outline gates
+use that distance. In Kotlin only this gate does: the HEAD outline gate in `buildBubbleMask` has always used the exact
+Euclidean distance (noted in the code; the bubble masks match python pixel for pixel on every parity case), while
+the sealing gate needs the chamfer distance because the exact one crosses the threshold 6 at offsets like (5,3).
+
+### `BUBBLE_SEAL_R` = 1 (`NIGHTREAD_BUBBLE_SEAL_R`; Kotlin `r`)
+Erosion radius. Erosion seals a crack whose actual white width is ≤ 2R, independent of how thick the line is
+(synthetic lines w = 2/3/4 at 0/30/45/90° and an ellipse, gaps 1–10 px, hard and 4× anti-aliased: R=1 seals
+d ≤ 2 — only d = 1 for binary-drawn 45° lines of every width and the w = 2 line at 30°, up to 3 when
+anti-aliased — and never d ≥ 4). Closing (dilate → erode) was rejected: on a 2 px line it sealed 0 of 91 cracked
+cases, because the erode wears the bridge away again. Every leaking bubble on the 47 pages has cracks ≤ 2 px.
+R=2 was rejected: it seals the 4 px channel between the two lines of a double-line frame (the verifier's
+W_dbl_i12_o5b turns 43 px black between the frames in L1), and it pushes c362_004:5 past the porous limit.
+0 turns sealing off (pixel-identical to the output before it existed).
+
+### `BUBBLE_SEAL_REST_MIN` = 50 (Kotlin `restMin`)
+After sealing, the component must still have ≥ 50 px of deep white outside the unit — the seal really cut a
+piece off rather than shaving a ring off the edge of a large component.
+
+### `BUBBLE_SEAL_MAX_GAPS` = 8 (Kotlin `maxGaps`)
+At most 8 cracks. A bubble with one or two hairline cracks qualifies; a rough frame leaking everywhere does
+not. Measured at 1× and across JPEG q60–95 / 0.9× / 1.1×: c362_005:3 has 2–5, c362_011:5 3–5, c362_004:5 6–12
+(8 at 1×; three variants exceed 8 and stay as before), the demo02 caption box c2236 13–23, the smeared-hand
+attack H1 27. The margin is narrow on both sides (c362_004:5 at 12 against c2236 at 13), so raising it is not
+free.
+
+### `BUBBLE_SEAL_TEXT_IN` = 0.5 (Kotlin `textIn`)
+At least half of the stroke pixels inside the region's box must fall inside the filled unit: the bubble has to
+hold the text. A unit that is only a small pocket beside the text scores 0; every accepted real bubble scores
+1.0.
+
+### `BUBBLE_SEAL_CUT_GEO` = 3 × `BUBBLE_NECK_R` = 24 (Kotlin `cutGeo`; `null` = 3 × `bubbleNeckR`)
+Every crack must lie within 24 px (geodesic, 8-connected, 1 px per step, inside the unit plus the cracks) of the
+bubble body — the unit opened with `BUBBLE_NECK_R`, keeping the pieces that contain region-box pixels. The crack
+has to be on the bubble's own outline. Real bubbles: 2–3 px (c362_005:3), 8–9 (c362_004:5), 14–16 (c362_011:5,
+at the tail tip). The double-line frame W_dbl_i12_o5b is sealed by R=1 at a diagonal narrow point of the channel
+between its frames, 36 px from the body; before this gate that page turned 11,560 px black in L1. It is only
+half a guarantee: if the narrow point of such a channel were within 24 px of the inner frame's gap, that short
+stretch of channel would be sealed into the unit (no synthetic case covers it). The limit follows the neck radius
+on both sides: python defines it as `3 * BUBBLE_NECK_R`, and Kotlin's default `null` means 3 × `bubbleNeckR`; set
+an integer to pin it.
+
+### `BUBBLE_SEAL_CHAR_MAX` = 0.25 (Kotlin `charMax`)
+Share of the area actually painted that lies on the raw character mask (model output, before snapping and
+smoothing). Real bubbles: ≤ 0.062 (c362_011:5, its tail covers hair); units accepted in the loose virtual-box
+scan ≤ 0.0798; units this gate stopped in that scan 0.30 (c362_004 c125) and 1.0 (three); character whites in
+the earlier audits 0.9977–1.0. The smoothed mask cannot be used: c362_011:5 already scores 0.26 on it.
 
 ---
 

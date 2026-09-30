@@ -158,7 +158,7 @@ val charMask = Mask(w, h, BooleanArray(w * h) { a[it] || b[it] })
 
 ## 參數
 
-`NightReadParams` 是一個 data class，裝著這個模組的 122 個參數，外加兩組巢狀參數：任意角度格溝 `sep: SeparatorParams`（57 個）與出血格過濾 `bleed: BleedParams`（26 個），合計 205 個。預設值就是定案值。巢狀是不得已：平鋪進來建構子會超過 JVM 的 255 個參數槽（`Double` 佔兩槽），類別載入就 `ClassFormatError`。逐項說明見 [`docs/PARAMETERS_zh.md`](../docs/PARAMETERS_zh.md)，那份涵蓋整條管線；沒進 `NightReadParams` 的在模組外面——偵測遮罩的二值化門檻、只用於回報的白面積統計門檻、偽泡生長的參照邊（Kotlin 版固定取長邊），以及純研究開關 `BUBBLE_REQUIRE_CLEAN`。
+`NightReadParams` 是一個 data class，裝著這個模組的 122 個參數，外加三組巢狀參數：任意角度格溝 `sep: SeparatorParams`（57 個）、出血格過濾 `bleed: BleedParams`（28 個）與漏泡封縫 `bubbleSeal: BubbleSealParams`（6 個），合計 213 個。預設值就是定案值。巢狀是不得已：平鋪進來建構子會超過 JVM 的 255 個參數槽（`Double` 佔兩槽），類別載入就 `ClassFormatError`。逐項說明見 [`docs/PARAMETERS_zh.md`](../docs/PARAMETERS_zh.md)，那份涵蓋整條管線；沒進 `NightReadParams` 的在模組外面——偵測遮罩的二值化門檻、只用於回報的白面積統計門檻、偽泡生長的參照邊（Kotlin 版固定取長邊），以及純研究開關 `BUBBLE_REQUIRE_CLEAN`。
 
 改它等於改演算法，不是調風格。門檻之間是連動的：分區方案建立在白元件的判斷上，動了前面一段的值，後面每一段都會跟著變。
 
@@ -176,6 +176,9 @@ val charMask = Mask(w, h, BooleanArray(w * h) { a[it] || b[it] })
 `bleedFilter`（出血格過濾，`Bleed.kt`；研究端 `NIGHTREAD_BLEED`）。格溝在貼紙層之前用留白待遇塗，而且壓過人物遮罩（圖層：
 字 > 對話框 > 格溝／頁邊 > 人物 > 背景）；出血格過濾在兩條留白路徑的線稿密度否決之後，把其實是出血格畫面的塊拿掉。兩個都關＝
 加入前的輸出。見 `docs/PARAMETERS_zh.md`「任意角度格溝」「出血格過濾」與 `docs/DECISIONS.md`。
+
+漏泡封縫（`bubbleSeal`，半徑 `r = 1`；研究端 `NIGHTREAD_BUBBLE_SEAL_R`）三檔也一律開：泡只因框上 1–2 px 的縫與背景連在一起而被拒時，
+把縫封起來、再走一次泡路徑，救回的只進泡的重繪層。`BubbleSealParams(r = 0)`＝加入前的輸出。見 `docs/PARAMETERS_zh.md`「漏泡封縫」。
 
 ## 紅線
 

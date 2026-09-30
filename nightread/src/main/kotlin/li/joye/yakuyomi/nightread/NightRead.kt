@@ -57,8 +57,12 @@ object NightRead {
         val wc = Regions.classifyWhiteComponents(g, p)
         debug?.invoke("classifyWhite", 0)
         val excluded = wc.gutterIds + wc.panelIds
-        val bubbleRes = Regions.buildBubbleMask(g, input.regions, seg, wc.cc, excluded, p, input.chroma, debug)
+        val bubbleRes = Regions.buildBubbleMask(g, input.regions, seg, wc.cc, excluded, p, input.chroma, debug, charRaw)
         var bubble = bubbleRes.bubble
+        // 漏泡封縫救回的泡：只進泡的重繪層（泡重繪、偽泡、亮島、人物還原的泡優先），不進格溝／留白／出血過濾／線稿密度否決／
+        // 貼紙／泡外圈這些結構層——泡是它們的隔板或證據，新泡餵進去會改到泡外。
+        val sealedOnly = bubbleRes.sealed
+        val anySealed = sealedOnly.any()
         debug?.invoke("buildBubble", 0)
         // 貼紙計畫過安全網後再過三檔篩選（StickerMode；ALL＝原樣）。人物用**原始**遮罩（未收邊）、格線用 lh|lv
         val plan = Sticker.filterPlan(
@@ -73,9 +77,11 @@ object NightRead {
         var bubbleRest: Mask? = null
         if (restIds.isNotEmpty()) {
             var rest = maskOfIds(wc.cc, restIds, w, h).andNot(bubble)
-            if (bubble.any()) {
+            // 「泡附近」只看原本的泡（封縫救回的泡不延伸泡外那一圈）
+            val bubbleS0 = if (anySealed) bubble.andNot(sealedOnly) else bubble
+            if (bubbleS0.any()) {
                 // 只填泡框周圍這一圈：全部取消會吃掉白鬍老人的鬍鬚
-                rest = rest and Cv.dilate(bubble, Cv.ellipse(p.bubbleRestNear * 2 + 1))
+                rest = rest and Cv.dilate(bubbleS0, Cv.ellipse(p.bubbleRestNear * 2 + 1))
             }
             rest = rest.andNot(charMask)          // 背景填色一律讓開人物
             bubbleRest = rest
@@ -123,8 +129,9 @@ object NightRead {
         val lost = bubbleBeforeTrim.andNot(bubble)
 
         // ── 合成 ──────────────────────────────────────────────────────
-        val (out, sep) = compose(g, seg, gutter, bubble, frameless, wc, plan, frame, lh, lv,
-            input.regions, charMask, charRaw, bubbleRest, lost, p, debug, diag)
+        val (out, sep) = compose(g, seg, gutter, if (anySealed) bubble.andNot(sealedOnly) else bubble, frameless, wc, plan,
+            frame, lh, lv, input.regions, charMask, charRaw, bubbleRest, lost, p, debug, diag,
+            bubbleLocal = if (anySealed) bubble and sealedOnly else null)
         return NightReadResult(out, gutter, bubble, charMask, frameless, plan.accept, plan.promoted, sep)
     }
 
@@ -524,6 +531,9 @@ object NightRead {
     /**
      * 整頁合成：場景曲線 → 留白填深（出血格過濾）→ 格溝／頁邊 → 貼紙式背景 → 氣泡重繪 → 人物還原。
      * 回傳（成品頁, 實際塗的格溝／頁邊；SEP 關為 null）。
+     *
+     * [bubbleLocal]＝漏泡封縫救回的泡（已扣人物修剪）：從泡重繪起（泡重繪、偽泡、亮島、人物還原）才當泡，
+     * 上面的結構層（格溝、線稿密度否決、出血過濾、貼紙）只看 [bubble]。null＝沒有。
      */
     private fun compose(
         g: Gray, seg: Mask, gutterIn: Mask, bubble: Mask, frameless: Boolean,
@@ -531,6 +541,7 @@ object NightRead {
         regions: List<TextRegion>, charMask: Mask, charRaw: Mask,
         bubbleRest: Mask?, lost: Mask, p: NightReadParams, debug: NightReadDebug?,
         diag: MutableMap<String, Any>?,
+        bubbleLocal: Mask? = null,
     ): Pair<Gray, Mask?> {
         val w = g.w
         val h = g.h
@@ -604,14 +615,16 @@ object NightRead {
             paintSticker(out, g, wc.cc, plan.accept, bubble, plan.promoted, frame, seg, charMask, p)
         }
         debug?.invoke("paintSticker", 0)
-        paintBubbles(out, g, bubble, seg, p)
+        // 封縫救回的泡從這裡以後（泡重繪、偽泡、亮島、人物還原）才當泡；上面的結構層只看 bubble
+        val bubAll = if (bubbleLocal == null) bubble else bubble or bubbleLocal
+        paintBubbles(out, g, bubAll, seg, p)
         debug?.invoke("paintBubbles", 0)
         // 偽泡：開口泡／字壓背景／字壓留白救回（三檔一律關：偽泡沿字往背景長，是撕裂黑塊來源之一，守護框 +2）
-        val pb = if (p.pseudoBubbles) buildPseudoBubbles(g, regions, bubble, seg, p) else Mask(w, h)
+        val pb = if (p.pseudoBubbles) buildPseudoBubbles(g, regions, bubAll, seg, p) else Mask(w, h)
         debug?.invoke("pseudoBubble", pb.count())
         if (pb.any()) paintBubbles(out, g, pb, seg, p)
         // 亮島填黑（三檔一律關：會把格內背景挖成黑塊；守護框對它零敏感）
-        if (p.harmonize) harmonize(out, g, bubble or pb or gutterIn, p)
+        if (p.harmonize) harmonize(out, g, bubAll or pb or gutterIn, p)
         debug?.invoke("harmonize", 0)
 
         // 字永遠在最上層：被人物扣掉的泡區裡，字筆畫及其貼身帶維持深底亮字
@@ -639,7 +652,7 @@ object NightRead {
 
         // ── 人物還原（放最後 ⇒ 任何新填色機制自動受保護）──────────────────
         var restore = charMask.copy()
-        restore = restore.andNot(bubble)        // 真泡畫在人物之上，該處看不到人物
+        restore = restore.andNot(bubAll)        // 真泡畫在人物之上，該處看不到人物
         // 格溝／頁邊也贏過人物：溝是畫面的外面，人物遮罩經收邊＋平滑會越過格框線長進溝 7–15px ⇒ 溝邊灰帶、
         // 窄溝被吃過半整條不塗。框線被出血人物打斷的地方本來就不成溝（Separators 不收）。
         if (sep != null) restore = restore.andNot(sep)

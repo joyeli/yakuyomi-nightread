@@ -115,8 +115,9 @@ class ProfileTest {
         val comps = wc!!
         var bubble: Regions.BubbleResult? = null
         ms("buildBubbleMask") {
+            // 同 compose：帶彩度與原始人物遮罩（沒帶人物遮罩就不跑封縫，量不到它的成本）
             bubble = Regions.buildBubbleMask(
-                g, input.regions, input.seg, comps.cc, comps.gutterIds + comps.panelIds, p,
+                g, input.regions, input.seg, comps.cc, comps.gutterIds + comps.panelIds, p, input.chroma, null, input.charMask,
             )
         }
         ms("thickInkAura") { Regions.thickInkAura(g, input.seg, p) }

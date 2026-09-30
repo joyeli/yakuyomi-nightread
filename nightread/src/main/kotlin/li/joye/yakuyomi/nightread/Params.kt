@@ -102,6 +102,13 @@ data class NightReadParams(
     val bubbleOutlineMinPx: Int = 100,
     /** 閘門量測窗外擴（距離變換要看得到元件 bbox 外的墨）。 */
     val bubbleOutlinePad: Int = 8,
+    /**
+     * 漏泡封縫（v3，2026-09-30；研究端 `NIGHTREAD_BUBBLE_SEAL_R` 等）的參數組：字碰到的白元件因「太大」或「列為留白／格內白」
+     * 被拒時，只封 ≤ 2R px 的極窄縫，看字所在的白會不會自成一塊；會的話那一塊當成新元件走原本的泡路徑（另加幾道閘）。
+     * 獨立成 data class，與 [sep]／[bleed] 一致、給建構子留餘裕（現在最大的建構子 189／255 槽，平鋪這 6 個也放得下）。
+     * 見 [BubbleSealParams] 與 docs/DECISIONS.md。
+     */
+    val bubbleSeal: BubbleSealParams = BubbleSealParams(),
 
     // 偽泡
     val pbCovMax: Double = 0.85,
@@ -240,6 +247,44 @@ data class NightReadParams(
     val bleedFilter: Boolean = true,
     /** 出血格過濾（[Bleed] ＝ research/nightread_bleed.py）的參數組；同 [sep] 獨立成 data class。 */
     val bleed: BleedParams = BleedParams(),
+)
+
+/**
+ * 漏泡封縫（v3，2026-09-30，使用者採用；研究端 `research/nightread.py` 的 `BUBBLE_SEAL_*`）的參數，預設值＝研究端定案值。
+ *
+ * 病根：泡框上 1–2 px 的縫讓泡內的白與外面的大片白（格內背景、留白）連成同一個白元件 ⇒ 元件太大或被列為留白／格內白 ⇒
+ * 整顆泡被拒、內部留場景灰（c362_005:3 使用者回報）。修法：這種元件只把元件的白以 (2[r]+1) 橢圓侵蝕（[r]=1 是 3×3 十字）
+ * 得到「深白」，字碰到的每一塊深白依面積由大到小還原成一個單元（外擴 [r] 內的元件白、扣掉別塊深白也搆得到的封縫弧、填洞），
+ * 單元當成新元件走 HEAD 的泡路徑（整頁佔比、局部性、比值、核心填色、貼墨閘都照舊），另加：碰頁緣拒、單元外剩的深白
+ * ≥ [restMin]、縫 ≤ [maxGaps] 個、字框內筆畫 ≥ [textIn] 落在單元裡、每個縫到泡身的測地距離 ≤ [cutGeo]、小單元也過貼墨閘、
+ * 外圈有彩拒、人物遮罩（原始）佔比 ≤ [charMax]。收下的只進泡的重繪層（泡重繪、偽泡、亮島、人物還原的泡優先），不進格溝／
+ * 留白／出血過濾／線稿密度否決／貼紙／泡外圈這些結構層。47 頁 × 4 檔只改 c362_004／005／011 三頁、守護框不變。
+ * 值的由來見 docs/PARAMETERS_zh.md「漏泡封縫」（英文版 “Bubble-leak sealing”）與 docs/DECISIONS.md。
+ */
+data class BubbleSealParams(
+    /**
+     * 封縫半徑（侵蝕核 (2r+1)² 橢圓）；0＝關（與加入前逐像素相同）。侵蝕封得住「實際白寬 ≤ 2r」的縫，與框線粗細無關
+     * （閉運算在 2 px 細線上完全封不住）。1 ⇒ ≤ 2 px 的縫；2 會把雙線框 4 px 夾縫整條封掉。
+     */
+    val r: Int = 1,
+    /** 單元（實際要填的）∩ 原始人物遮罩的佔比上限（真泡 ≤ 0.06、人物白 ≥ 0.99）。 */
+    val charMax: Double = 0.25,
+    /** 字區筆畫（字框內 seg）落在單元（含洞）裡的比例下限：泡要「裝著」字；只封出字旁的小口袋不算。 */
+    val textIn: Double = 0.5,
+    /** 封完後元件在這個單元以外必須還剩這麼多 px 深白：真的切下了一塊，不是把大元件削掉一圈邊。 */
+    val restMin: Int = 50,
+    /**
+     * 封掉的縫（切口群）個數上限：「泡框上一兩個極窄縫」才封。真泡 c362_005:3／c362_011:5 在 1× 與擾動是 2–5 個、
+     * c362_004:5 是 6–12 個；demo02 說明框（框線粗糙、四角全是 1 px 漏點）13–23 個。
+     */
+    val maxGaps: Int = 8,
+    /**
+     * 每個縫到「泡身」（單元以 [NightReadParams.bubbleNeckR] 開運算後含字框的寬闊塊）的測地距離上限（px，在單元∪縫內
+     * 8 連通、每步 1 px）：縫要在泡自己的框上。真泡 2–16 px；雙線框夾縫的斜向窄點 36 px。
+     * null（預設）＝3 × [NightReadParams.bubbleNeckR]（預設 24），同研究端 `BUBBLE_SEAL_CUT_GEO = 3 * BUBBLE_NECK_R`：
+     * 調切頸半徑時上限跟著走；給值＝固定 px。
+     */
+    val cutGeo: Int? = null,
 )
 
 /**

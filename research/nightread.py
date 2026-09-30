@@ -50,6 +50,8 @@ detect-20241225.ckpt）torch 前向 ＋ m-i-t `SegDetectorRepresenter` 後處理
 格溝與出血格過濾各有開關（預設都開；兩個都關＝加入前 d3cfa92 的輸出，逐像素相同）：
     NIGHTREAD_SEP=0     不偵測任意角度格溝／頁邊（nightread_sep.py）
     NIGHTREAD_BLEED=0   不做出血格過濾（nightread_bleed.py）
+漏泡封縫（預設開；0＝加入前 f1c2edd 的輸出，逐像素相同）：
+    NIGHTREAD_BUBBLE_SEAL_R=0   不封泡框上的極窄縫（BUBBLE_SEAL_*；見 docs/DECISIONS.md「漏泡封縫」）
 輸出（皆帶頁名前綴）：_final.png ／ _regions.json ／ _seg.png ／ _bubble.png ／
 _gutter.png ／ _cmp.png（三聯：原圖｜成品｜遮罩視覺化）。批次見 nightread_batch.py。
 
@@ -140,6 +142,20 @@ BUBBLE_OUTLINE_DIST = 6     # 「貼墨」距離（px），絕對像素。4→6�
                             # 1× 的 fixture 11 頁輸出逐像素不變
 BUBBLE_OUTLINE_MIN_PX = 100 # 非字邊界像素少於此不判（樣本不足 ⇒ 維持原行為）
 BUBBLE_OUTLINE_PAD = 8      # 量測窗外擴（距離變換要看得到元件 bbox 外的墨）
+# 漏泡封縫（v3，2026-09-30）：字碰到的白元件因「太大」或「列為留白／格內白」被拒時，只封**極窄**的縫再看字所在的白
+# 會不會自成一塊；會的話，把那一塊當成新元件送進原本的泡路徑（所有閘照舊）。不長局部核心（v1／v2 被退回的做法）。
+BUBBLE_SEAL_R = int(os.environ.get("NIGHTREAD_BUBBLE_SEAL_R", "1"))   # 封縫半徑；0＝關＝HEAD 行為。
+                            # 封法＝元件的白以 (2R+1) 橢圓侵蝕（離墨 ≤R 的白拿掉）後重算連通；封得住「實際白寬 ≤ 2R」的縫，與框線粗細無關
+                            # （閉運算在 2 px 細線上完全封不住，見 research/out/bubble_leak/v3/data/seal_synth.json、docs/DECISIONS.md「漏泡封縫」）。R=1 ⇒ ≤2 px 的縫；
+                            # R=2 會把雙線框 4 px 夾縫整條封掉（驗證者的雙線框攻擊會變），所以取 1
+BUBBLE_SEAL_CHAR_MAX = 0.25 # 封出來的泡 ∩ 人物遮罩（char_raw）佔比上限（同 v2 的人物關；真泡 ≤ 0.06、人物白 ≥ 0.99）
+BUBBLE_SEAL_TEXT_IN = 0.5   # 字區筆畫（字框內 seg）落在封出來那塊（含洞）裡的比例下限：泡要「裝著」字；封出來的只是字旁的小口袋就不算
+BUBBLE_SEAL_REST_MIN = 50   # 封完後元件在這塊以外必須還剩 ≥ 此 px 的「深白」（侵蝕後仍在的白）：真的切下了一塊，而不是只削掉邊
+BUBBLE_SEAL_MAX_GAPS = 8    # 封掉的縫（切口群）個數上限：「泡框上一兩個極窄縫」才封。真泡 c362_005:3／c362_011:5 在 1× 與 20 個擾動
+                            # （JPEG q60–95、縮放 0.9／1.1）是 2–5 個；demo02 說明框 c2236 的框線粗糙、四角全是 1 px 漏點，13–23 個
+BUBBLE_SEAL_CUT_GEO = 3 * BUBBLE_NECK_R   # 每個縫到「泡身」（單元以 BUBBLE_NECK_R 開運算後含字框的寬闊塊）的測地距離上限（px，在單元∪縫內 8 連通走）：
+                            # 縫要在泡自己的框上。真泡縫在泡身外 2–3 px（c362_005:3）、14–16 px（c362_011:5 泡尾尖）；驗證者的雙線框
+                            # W_dbl_i12_o5b（內框缺 12 px、外框缺 5 px）在 R=1 會被兩框夾縫的斜向窄點（≤2 px）封住，那個縫在泡身外 36 px
 
 # 偽泡（開口泡／字壓畫面）
 PB_COV_MAX = 0.85       # 泡遮罩蓋率低於此的文字區才啟動偽泡
@@ -544,7 +560,77 @@ def _nontext_hole_ink_ratio(comp_u8, g, segd):
     return ink / max(int(comp_u8.sum()), 1)
 
 
-def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids, charmask=None, chroma=None):
+def _fill_holes(m):
+    """m 的洞（從窗外框 4 連通走不到的非 m 像素）一併填上。"""
+    ff = np.pad(m.astype(np.uint8), 1)
+    mm = np.zeros((ff.shape[0] + 2, ff.shape[1] + 2), np.uint8)
+    cv2.floodFill(ff, mm, (0, 0), 2)
+    return ff[1:-1, 1:-1] != 2
+
+
+def seal_prep(lab, stats, i, R):
+    """漏泡封縫（v3）第一步：元件 i 的白以 (2R+1) 橢圓侵蝕 → 「深白」D（離墨 ≤R 的白拿掉），標號。
+    窗＝元件 bbox 外擴 2R+2；頁緣不算墨（borderValue=1），窗的其他邊離元件 ≥ 2R+2，本來就由非元件像素決定。"""
+    H, W = lab.shape
+    bx, by, bw, bh = [int(v) for v in stats[i, :4]]
+    m = 2 * R + 2
+    x0, y0, x1, y1 = max(0, bx - m), max(0, by - m), min(W, bx + bw + m), min(H, by + bh + m)
+    comp = lab[y0:y1, x0:x1] == i
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * R + 1,) * 2)
+    D = cv2.erode(comp.astype(np.uint8), k, borderType=cv2.BORDER_CONSTANT, borderValue=1) > 0
+    nD, labD, stD, _ = cv2.connectedComponentsWithStats(D.astype(np.uint8), 8)
+    return {"i": i, "R": R, "win": (x0, y0, x1, y1), "comp": comp, "D": D, "labD": labD, "stD": stD,
+            "Dtot": int(D.sum()), "k": k, "units": {}}
+
+
+def seal_unit(prep, t):
+    """深白塊 t 還原成一個單元（快取在 prep["units"]）：
+      S ＝該塊 ∪（該塊外擴 R 內的元件白，但扣掉「其他深白塊外擴 R」也碰得到的像素＝縫裡兩邊都搆得到的地方，那就是封縫弧）
+      U ＝S（只留與該塊 8 連通的）填洞後 ∩ 元件（字筆畫、字間口袋）
+    外擴 R 只會落在「以深白像素為圓心、半徑 R 的無墨圓盤」內，不會跨過任何墨線；縫裡兩邊都搆得到的像素歸封縫弧、不給任何一邊。
+    單元一定在該塊 bbox 外擴 R 內 ⇒ 只在 bbox 外擴 R+2 的小窗裡算（與整窗算逐像素相同）。
+    回傳 {"win": 小窗的整頁座標, "U", "filled", "cut", "rest"（這塊以外的深白 px）, "S0", "cutPx", "cutN", "d"}；
+    cut＝元件內、單元（含洞）外、與單元 8 相鄰的白＝封縫弧所在的縫，群數＝縫的個數。"""
+    if t in prep["units"]:
+        return prep["units"][t]
+    R, k = prep["R"], prep["k"]
+    x0, y0, x1, y1 = prep["win"]
+    bx, by, bw, bh = [int(v) for v in prep["stD"][t, :4]]
+    m = R + 2
+    cx0, cy0 = max(0, bx - m), max(0, by - m)
+    cx1, cy1 = min(x1 - x0, bx + bw + m), min(y1 - y0, by + bh + m)
+    comp = prep["comp"][cy0:cy1, cx0:cx1]
+    lD = prep["labD"][cy0:cy1, cx0:cx1]
+    S0 = lD == t
+    oth = (lD > 0) & ~S0
+    rin = cv2.dilate(S0.astype(np.uint8), k) > 0
+    rout = cv2.dilate(oth.astype(np.uint8), k) > 0
+    S = (S0 | (rin & ~rout)) & comp
+    n2, l2 = cv2.connectedComponents(S.astype(np.uint8), 8)
+    keep = np.unique(l2[S0]); keep = keep[keep > 0]
+    S = np.isin(l2, keep)
+    filled = _fill_holes(S)
+    U = filled & comp
+    cut = comp & ~filled & (cv2.dilate(filled.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0)
+    ncut = cv2.connectedComponents(cut.astype(np.uint8), 8)[0] - 1
+    u = {"win": (x0 + cx0, y0 + cy0, x0 + cx1, y0 + cy1), "U": U, "filled": filled, "cut": cut, "d": int(t),
+         "rest": prep["Dtot"] - int((prep["D"][cy0:cy1, cx0:cx1] & filled).sum()), "S0": int(S0.sum()),
+         "cutPx": int(cut.sum()), "cutN": int(ncut)}
+    prep["units"][t] = u
+    return u
+
+
+def seal_labels(prep, touch_px):
+    """字（touch_px＝整頁布林：字的外擴筆畫）碰到的深白塊標號，依面積由大到小。"""
+    x0, y0, x1, y1 = prep["win"]
+    ids = np.unique(prep["labD"][touch_px[y0:y1, x0:x1] & prep["D"]])
+    ids = [int(t) for t in ids if t > 0]
+    ids.sort(key=lambda t: -int(prep["stD"][t, cv2.CC_STAT_AREA]))
+    return ids
+
+
+def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids, charmask=None, chroma=None, audit=None,
+                      local_out=None, char_raw=None):
     """氣泡內部遮罩（修法1）：每文字區 bbox+BUBBLE_PAD 窗內，找「貼著（外擴後）
     文字筆畫」的白色連通元件，通過守門則整顆併入（不裁窗 ⇒ 無截斷方塊，
     原型 regrow 補救移除）。守門（不併＝該區只保留筆畫，安全降級）：
@@ -558,6 +644,9 @@ def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids, charmask=None, 
     seg_dil = cv2.dilate(seg_u8, np.ones((9, 9), np.uint8))  # 筆畫外擴→碰得到氣泡白底
     segd_c = cv2.dilate(seg_u8, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))) > 0  # 乾淨判準用（同 compose）
     bubble = np.zeros((H, W), bool)
+    local_m = np.zeros((H, W), bool)       # 封縫救回的泡（另存：只進泡的重繪，不進格溝／留白等結構層）
+    seal_cache = {}                         # 元件 i → {"prep": 侵蝕＋深白標號（單元逐塊快取）, "accepted": [(窗, 含洞遮罩)]}
+    seal_done = {}                          # (i, 深白塊標號) → True 收／False 拒／None 在已收泡裡（黏著，同 HEAD 的 merged／rejected）
     merged, rejected, cored = set(), set(), set()
     # 先數「每個白元件被幾個文字區命中」：相連的雙泡是**同一個白元件**（ch34_015 左下格 4.78% 頁），
     # 用單一字框當分母會讓比值假性超標（2.32/3.96 > 2.0）⇒ 兩顆泡都被拒收、內部留場景灰、
@@ -584,10 +673,15 @@ def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids, charmask=None, 
         lab_c = lab[cy0:cy1, cx0:cx1]
         touch = np.unique(lab_c[(seg_dil[cy0:cy1, cx0:cx1] > 0) & (lab_c > 0)])
         for i in touch:
+            a = int(stats[i, cv2.CC_STAT_AREA])
+            big = a > BUBBLE_COMP_MAX_FRAC * g.size or a > BUBBLE_LOCAL_K * comp_win.get(int(i), win_area)
+            if BUBBLE_SEAL_R > 0 and (big or i in excluded_ids):
+                # 漏泡封縫（v3）：整顆不能當泡，但字所在的白可能只是經 ≤2R px 的縫漏出去 ⇒ 封縫後若自成一塊，走原本的泡路徑
+                _seal_region(g, regions, seg, seg_dil, segd_c, lab, stats, int(i), (x0, y0, x1, y1), chroma, char_raw,
+                             seal_cache, seal_done, local_m, audit, "size" if big else "excluded")
             if (i in merged or int(i) in rejected) and i not in excluded_ids:
                 continue
-            a = int(stats[i, cv2.CC_STAT_AREA])
-            if a > BUBBLE_COMP_MAX_FRAC * g.size or a > BUBBLE_LOCAL_K * comp_win.get(int(i), win_area):
+            if big:
                 rejected.add(int(i))
                 continue
             if i in excluded_ids:
@@ -662,7 +756,209 @@ def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids, charmask=None, 
                 bubble |= lab == i
             merged.add(int(i))
         bubble[y0:y1, x0:x1] |= seg[y0:y1, x0:x1]       # 區內筆畫本身一定算氣泡內容
-    return bubble, merged, rejected, cored
+    if local_out is not None:
+        local_out["mask"] = local_m & ~bubble   # 只有封縫救回才新增的部分
+    return bubble | local_m, merged, rejected, cored
+
+
+def _seal_region(g, regions, seg, seg_dil, segd_c, lab, stats, i, rbox, chroma, char_raw,
+                 seal_cache, seal_done, local_m, audit, cause):
+    """漏泡封縫（v3）的逐（字區, 元件）處理：元件 i 封縫後，字區 rbox 碰到的深白塊依面積由大到小各自還原成單元，
+    第一次遇到就把它當成新元件照 build_bubble_mask 的泡路徑判一次（黏著：之後別的字區碰到同一單元直接沿用結果）。
+    已收下的單元（含洞）裡的深白塊不再另判（泡裡的字間口袋）；被拒的單元不蓋住別人（大單元被拒，它洞裡被封起來的泡照判）。
+    收下的畫進 local_m。泡路徑的閘全部照舊（整頁佔比、局部性 K×窗、比值、大元件的核心填色＋核心比值、貼墨閘、REQUIRE_CLEAN），另加：
+      edge    ：單元碰頁緣＝照 classify_white_components 會被列為留白／格內白 ⇒ 不當泡（v1 的 EDGE 例外不採用）
+      split   ：單元以外還剩 ≥ BUBBLE_SEAL_REST_MIN px 深白＝真的切下了一塊（否則只是把整個大元件削一圈邊）
+      porous  ：封掉的縫 ≤ BUBBLE_SEAL_MAX_GAPS 個（框線四處漏的粗糙框不算「一個極窄的縫」）
+      cut-far ：每個縫到泡身（開運算 BUBBLE_NECK_R 後含字的寬闊塊）的測地距離 ≤ BUBBLE_SEAL_CUT_GEO（縫要在泡自己的框上，
+                不是在別處夾縫的窄點；雙線框：內框大缺口 + 兩框夾縫的斜向窄點）
+      textIn  ：字框內筆畫 ≥ BUBBLE_SEAL_TEXT_IN 落在單元（含洞）裡
+      outline ：小單元也要過貼墨閘；外圈有彩一律不收（HEAD 對有彩外圈是跳過不判，這裡從嚴）
+      char    ：單元（實際要填的）∩ char_raw ≤ BUBBLE_SEAL_CHAR_MAX；沒給 char_raw 就不收"""
+    H, W = g.shape
+    x0, y0, x1, y1 = rbox
+    if i not in seal_cache:
+        seal_cache[i] = {"prep": seal_prep(lab, stats, i, BUBBLE_SEAL_R), "accepted": []}
+    ent = seal_cache[i]
+    prep = ent["prep"]
+    c0, d0 = max(0, x0 - BUBBLE_PAD), max(0, y0 - BUBBLE_PAD)
+    c1, d1 = min(W, x1 + BUBBLE_PAD), min(H, y1 + BUBBLE_PAD)
+    tp = np.zeros((H, W), bool)
+    tp[d0:d1, c0:c1] = seg_dil[d0:d1, c0:c1] > 0
+    for t in seal_labels(prep, tp):
+        key = (i, t)
+        if key in seal_done:
+            continue
+        # 已收下單元（含洞）裡的深白塊＝泡裡的口袋，不另判
+        px0, py0 = prep["win"][0], prep["win"][1]
+        bx, by = int(prep["stD"][t, 0]) + px0, int(prep["stD"][t, 1]) + py0
+        inside = False
+        for (aw, af) in ent["accepted"]:
+            ax0, ay0, ax1, ay1 = aw
+            if ax0 <= bx < ax1 and ay0 <= by < ay1:
+                sub = prep["labD"][ay0 - py0:ay1 - py0, ax0 - px0:ax1 - px0] == t
+                if (sub & af).any():
+                    inside = True
+                    break
+        if inside:
+            seal_done[key] = None
+            continue
+        u = seal_unit(prep, t)
+        if "den" not in u:
+            # 單元的局部性／比值分母：碰到它的所有字區（同 HEAD 的 comp_win／comp_den）
+            wx0, wy0, wx1, wy1 = u["win"]
+            den, cw = 0, 0
+            for r in regions:
+                a0, b0, a1, b1 = r["bbox"]
+                e0, f0 = max(0, a0 - BUBBLE_PAD), max(0, b0 - BUBBLE_PAD)
+                e1, f1 = min(W, a1 + BUBBLE_PAD), min(H, b1 + BUBBLE_PAD)
+                ix0, iy0, ix1, iy1 = max(e0, wx0), max(f0, wy0), min(e1, wx1), min(f1, wy1)
+                if ix1 <= ix0 or iy1 <= iy0:
+                    continue
+                if (u["U"][iy0 - wy0:iy1 - wy0, ix0 - wx0:ix1 - wx0] & (seg_dil[iy0:iy1, ix0:ix1] > 0)).any():
+                    den += max(1, max(a1 - a0, b1 - b0) ** 2)
+                    cw = max(cw, (e1 - e0) * (f1 - f0))
+            u["den"], u["cw"] = den, cw
+        ok, paint, met = _seal_judge(g, seg, segd_c, stats, u, u["win"], (x0, y0, x1, y1), chroma, char_raw)
+        seal_done[key] = ok
+        if audit is not None:
+            met.update(comp=int(i), label=int(t), region=[int(x0), int(y0), int(x1), int(y1)], cause=cause,
+                       compArea=int(stats[i, cv2.CC_STAT_AREA]), R=BUBBLE_SEAL_R, win=[int(v) for v in u["win"]])
+            audit.append(met)
+        if ok:
+            wx0, wy0, wx1, wy1 = u["win"]
+            local_m[wy0:wy1, wx0:wx1] |= paint
+            ent["accepted"].append((u["win"], u["filled"]))
+
+
+def _seal_judge(g, seg, segd_c, stats, u, win, rbox, chroma, char_raw, full=False):
+    """一個封縫單元走 HEAD 的泡路徑＋v3 附加閘。回傳 (收否, 要畫的窗內遮罩, 量測)。[full]＝研究用，全部量完（判定不變）。"""
+    H, W = g.shape
+    wx0, wy0, wx1, wy1 = win
+    x0, y0, x1, y1 = rbox
+    U = u["U"]
+    aU = int(U.sum())
+    met = {"area": aU, "S0": u["S0"], "rest": u["rest"], "den": u["den"], "cw": u["cw"], "cutPx": u["cutPx"], "cutN": u["cutN"]}
+    why = []
+    def fail(w):
+        why.append(w)
+        return not full
+    def done(paint):
+        met["why"] = why[0] if why else "ok"
+        if full:
+            met["fails"] = list(why)
+        return (not why), paint, met
+    z = np.zeros_like(U)
+    if aU == 0:
+        why.append("empty")
+        return done(z)
+    ys, xs = np.nonzero(U)
+    ux0, uy0, ux1, uy1 = xs.min() + wx0, ys.min() + wy0, xs.max() + wx0 + 1, ys.max() + wy0 + 1
+    met["bbox"] = [int(ux0), int(uy0), int(ux1), int(uy1)]
+    # edge：碰頁緣（同 classify_white_components 的留白候選判準）
+    if (ux0 <= 2 or uy0 <= 2 or ux1 >= W - 2 or uy1 >= H - 2) and fail("edge"):
+        return done(z)
+    if u["rest"] < BUBBLE_SEAL_REST_MIN and fail("no-split"):
+        return done(z)
+    if u["cutN"] > BUBBLE_SEAL_MAX_GAPS and fail("porous"):
+        return done(z)
+    # textIn：字框內的筆畫落在單元（含洞）裡的比例
+    sx0, sy0, sx1, sy1 = max(x0, wx0), max(y0, wy0), min(x1, wx1), min(y1, wy1)
+    segb = seg[y0:y1, x0:x1]
+    ns = int(segb.sum())
+    inside = int((seg[sy0:sy1, sx0:sx1] & u["filled"][sy0 - wy0:sy1 - wy0, sx0 - wx0:sx1 - wx0]).sum()) if (sx1 > sx0 and sy1 > sy0) else 0
+    met["textIn"] = round(inside / ns, 4) if ns else 0.0
+    if met["textIn"] < BUBBLE_SEAL_TEXT_IN and fail("text-outside"):
+        return done(z)
+    # HEAD：整頁佔比、局部性
+    if aU > BUBBLE_COMP_MAX_FRAC * g.size and fail("size-frac"):
+        return done(z)
+    if aU > BUBBLE_LOCAL_K * max(u["cw"], 1) and fail("size-local"):
+        return done(z)
+    # cutGeo：每個縫到泡身的測地距離（泡身＝U 以 BUBBLE_NECK_R 開運算後、含字框像素的塊；同 broad_core_fill 的開運算）
+    ko = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * BUBBLE_NECK_R + 1,) * 2)
+    op = cv2.morphologyEx(U.astype(np.uint8), cv2.MORPH_OPEN, ko)
+    nop, lop = cv2.connectedComponents(op, 8)
+    sb = np.zeros_like(U)
+    sbx0, sby0 = max(0, x0 - wx0), max(0, y0 - wy0)
+    sbx1, sby1 = min(U.shape[1], x1 - wx0), min(U.shape[0], y1 - wy0)
+    if sbx1 > sbx0 and sby1 > sby0:
+        sb[sby0:sby1, sbx0:sbx1] = True
+    ids_ = np.unique(lop[sb & (op > 0)]); ids_ = ids_[ids_ > 0]
+    body = np.isin(lop, ids_)
+    lim = 60 if full else BUBBLE_SEAL_CUT_GEO
+    ncg, lcg = cv2.connectedComponents(u["cut"].astype(np.uint8), 8)
+    if not body.any():
+        met["cutGeo"] = None
+    elif ncg <= 1:
+        met["cutGeo"] = 0
+    else:
+        within = (U | u["cut"]).astype(np.uint8)
+        k3 = np.ones((3, 3), np.uint8)
+        cur = body.astype(np.uint8)
+        geo = np.full(U.shape, -1, np.int32); geo[body] = 0
+        for step in range(1, lim + 2):
+            nxt = cv2.dilate(cur, k3) & within
+            nw = (nxt > 0) & (geo < 0)
+            if not nw.any():
+                break
+            geo[nw] = step; cur = nxt
+        gd = []
+        for q in range(1, ncg):
+            v = geo[lcg == q]; v = v[v >= 0]
+            gd.append(int(v.min()) if v.size else lim + 1)
+        met["cutGeo"] = max(gd)
+    if (met["cutGeo"] is None or met["cutGeo"] > BUBBLE_SEAL_CUT_GEO) and fail("cut-far"):
+        return done(z)
+    den = SAFE_BUBBLE_RATIO * max(u["den"], 1)
+    paint = U
+    if aU < BUBBLE_CORE_MIN_FRAC * g.size:
+        met["ratio"] = round(aU / max(u["den"], 1), 3)
+        if SAFE_BUBBLE_RATIO > 0 and aU > den and fail("small-ratio"):
+            return done(z)
+    else:
+        seed = np.zeros_like(U)
+        sx0_, sy0_ = max(0, x0 - wx0), max(0, y0 - wy0)
+        sx1_, sy1_ = min(U.shape[1], x1 - wx0), min(U.shape[0], y1 - wy0)
+        if sx1_ > sx0_ and sy1_ > sy0_:
+            seed[sy0_:sy1_, sx0_:sx1_] = True
+        core = broad_core_fill(U, seed & U, neck_r=BUBBLE_NECK_R, recover_r=BUBBLE_NECK_R)
+        met["core"] = int(core.sum())
+        if not core.any():
+            why.append("core-empty")
+            return done(z)
+        met["ratio"] = round(int(core.sum()) / max(u["den"], 1), 3)
+        if SAFE_BUBBLE_RATIO > 0 and int(core.sum()) > den and fail("core-ratio"):
+            return done(z)
+        paint = core
+    # 貼墨閘（大小單元都判）；外圈有彩一律不收
+    pc = paint
+    px0, py0 = max(0, wx0 - BUBBLE_OUTLINE_PAD), max(0, wy0 - BUBBLE_OUTLINE_PAD)
+    px1, py1 = min(W, wx1 + BUBBLE_OUTLINE_PAD), min(H, wy1 + BUBBLE_OUTLINE_PAD)
+    core_w = np.zeros((py1 - py0, px1 - px0), bool)
+    core_w[wy0 - py0:wy1 - py0, wx0 - px0:wx1 - px0] = pc
+    sd_w = segd_c[py0:py1, px0:px1]
+    bnd = core_w & ~(cv2.erode(core_w.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0) & ~sd_w
+    met["bndPx"] = int(bnd.sum())
+    ring = (cv2.dilate(core_w.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))) > 0) & ~core_w & ~sd_w
+    met["ringChroma"] = None if (chroma is None or not ring.any()) else round(float(chroma[py0:py1, px0:px1][ring].mean()), 2)
+    if (met["ringChroma"] is None or met["ringChroma"] > STICKER_CHROMA_MAX) and fail("chromatic"):
+        return done(z)
+    if bnd.sum() >= BUBBLE_OUTLINE_MIN_PX:
+        dd = cv2.distanceTransform((g[py0:py1, px0:px1] >= INK_DARK_TH).astype(np.uint8), cv2.DIST_L2, 3)
+        met["outline"] = round(float((dd[bnd] <= BUBBLE_OUTLINE_DIST).mean()), 4)
+        if met["outline"] < BUBBLE_OUTLINE_MIN and fail("outline"):
+            return done(z)
+    else:
+        met["outline"] = None
+    # 人物遮罩佔比
+    met["charRaw"] = None if char_raw is None else round(float(char_raw[wy0:wy1, wx0:wx1][pc].mean()), 4)
+    if (met["charRaw"] is None or met["charRaw"] > BUBBLE_SEAL_CHAR_MAX) and fail("character"):
+        return done(z)
+    if BUBBLE_REQUIRE_CLEAN and _nontext_hole_ink_ratio(
+            pc.astype(np.uint8), g[wy0:wy1, wx0:wx1], segd_c[wy0:wy1, wx0:wx1]) >= BUBBLE_CLEAN_WINS:
+        fail("not-clean")
+    return done(paint)
 
 
 # ── 貼紙式背景：純白背景填黑＋前景白描邊 ────────────────────────────
@@ -1372,7 +1668,7 @@ def harmonize_enclosed_whites(out, g, lab, stats, skip_mask):
 
 def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
             core_ids=(), frame=None, regions=None, charmask=None, char_raw=None,
-            bubble_rest=None, lost_bubble=None, diag=None):
+            bubble_rest=None, lost_bubble=None, diag=None, bubble_local=None):
     """整頁合成：場景曲線 → 留白填深（出血格過濾）→ 格溝／頁邊 → 貼紙式背景 → 氣泡重繪 → 人物還原。
 
     [diag] 給 dict 就把格溝與出血過濾的中間遮罩、逐塊決策、耗時存進去（parity／除錯用，不影響輸出）。"""
@@ -1454,13 +1750,15 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
     if sticker:                                         # 貼紙式背景：純白背景填黑＋前景白描邊
         out = paint_sticker(out, g, lab, stats, sticker, bubble,
                             core_ids=core_ids, frame=frame, seg=seg, charmask=charmask)
-    out = paint_bubbles(out, g, bubble, seg)
+    # [bubble_local] 封縫救回的泡：只在這裡以後（泡重繪、偽泡、亮島、人物還原）當泡；上面的結構層只看 bubble
+    bub_all = bubble if bubble_local is None else (bubble | bubble_local)
+    out = paint_bubbles(out, g, bub_all, seg)
     # 偽泡：開口泡/字壓背景/字壓留白救回（三檔一律關：偽泡沿字往背景長，是撕裂黑塊來源之一，守護框 +2）
-    pb = build_pseudo_bubbles(g, regions, bubble, seg=seg) if PSEUDO_BUBBLES else np.zeros_like(bubble)
+    pb = build_pseudo_bubbles(g, regions, bub_all, seg=seg) if PSEUDO_BUBBLES else np.zeros_like(bubble)
     if pb.any():
         out = paint_bubbles(out, g, pb, seg)
     if HARMONIZE:   # 亮島填黑（三檔一律關：會把格內背景挖成黑塊；守護框對它零敏感）
-        out = harmonize_enclosed_whites(out, g, lab, stats, bubble | pb | gutter)
+        out = harmonize_enclosed_whites(out, g, lab, stats, bub_all | pb | gutter)
     if lost_bubble.any():
         txt = (cv2.dilate((seg & lost_bubble).astype(np.uint8),
                           np.ones((TEXT_TOP_PAD * 2 + 1,) * 2, np.uint8)) > 0) & lost_bubble
@@ -1484,7 +1782,7 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
     # ★ 真氣泡永遠贏過人物保護：氣泡是**畫在畫面之上**的圖層，它遮住後面的人物——該處根本看不到
     # 人物，把它還原成「人物的場景調」等於讓對話框變成淺色底（使用者 2026-09-15 回報）。
     # CHAR_OVER_BUBBLE 只該管**偽泡**（字直接寫在畫面上、人物在字周圍仍看得見）。
-    restore &= ~bubble
+    restore &= ~bub_all
     # ★ 格溝／頁邊也贏過人物（使用者 2026-09-27：「格溝畫在人物遮罩上面」）：溝是畫面的外面，人物遮罩經收邊＋平滑會越過
     # 格框線長進溝 7–15px ⇒ 溝邊灰帶、窄溝被吃過半整條不塗。框線被出血人物打斷的地方本來就不成溝（build_sep 不收）。
     if sepm is not None:
@@ -1582,9 +1880,14 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None, 
     lab, stats, gutter_ids, panel_ids = classify_white_components(g)
     char_raw = load_charmask(page_path, g.shape)      # 模型原輸出（未收邊、未平滑）
     charmask = smooth_charmask(snap_charmask(char_raw, g), g)
+    loc_out = {}
     bubble, merged, rejected, cored = build_bubble_mask(
         g, regions, seg, lab, stats, gutter_ids | panel_ids, charmask=charmask,
-        chroma=(img.max(axis=2).astype(np.int16) - img.min(axis=2).astype(np.int16)).astype(np.uint8))
+        chroma=(img.max(axis=2).astype(np.int16) - img.min(axis=2).astype(np.int16)).astype(np.uint8),
+        local_out=loc_out, char_raw=char_raw)
+    # 封縫救回的泡只進「泡的重繪」（填深、亮字、人物還原的泡優先），不進格溝／留白／出血／貼紙這些結構層
+    # （同 v2 的隔法：texture_veto2 在泡附近不否決、泡是 SEP 的隔板——新泡餵給它們會改到泡外）。
+    local_only = loc_out.get("mask", np.zeros((H, W), bool))
     sticker, audit, promoted = sticker_plan(g, img, lab, stats, gutter_ids, panel_ids,
                                             frameless, regions)
     lhm, lvm = frame_line_mask(g)
@@ -1607,12 +1910,13 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None, 
         # 有語意遮罩後扣掉 charmask 即可，剩餘一律填深。
         # 扣人物遮罩（背景填色一律讓開人物）。
         rest = np.isin(lab, sorted(rest_ids)) & ~bubble
-        if bubble.any():
+        bubble_s0 = bubble & ~local_only        # 「泡附近」只看原本的泡（封縫救回的泡不延伸泡外那一圈）
+        if bubble_s0.any():
             # ⚠️ 只填**泡框周圍**這一圈：貼紙的核心填色保護是為了留住「被吃的前景白」（白鬍老人的
             # 鬍子/髮絲），全部取消會把它們吃掉（實測違規 28→52）。使用者抱怨的是泡外那一圈，
             # 限制在泡附近即可兩全。
             kn = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (BUBBLE_REST_NEAR * 2 + 1,) * 2)
-            rest &= cv2.dilate(bubble.astype(np.uint8), kn) > 0
+            rest &= cv2.dilate(bubble_s0.astype(np.uint8), kn) > 0
         rest &= ~charmask           # 背景填色一律讓開人物
         bubble_rest = rest
     else:
@@ -1668,9 +1972,10 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None, 
         touch = touch[touch > 0]
         bubble = bubble & ~np.isin(lbrm, touch)
     lost = bubble_before_trim & ~bubble
-    final = compose(g, gutter, bubble, seg, frameless, lab, stats, sticker,
+    final = compose(g, gutter, bubble & ~local_only, seg, frameless, lab, stats, sticker,
                     core_ids=promoted, frame=(lhm | lvm), regions=regions, charmask=charmask,
-                    char_raw=char_raw, bubble_rest=bubble_rest, lost_bubble=lost, diag=diag)
+                    char_raw=char_raw, bubble_rest=bubble_rest, lost_bubble=lost, diag=diag,
+                    bubble_local=bubble & local_only)
 
     pref = os.path.join(outdir, name)
     with open(f"{pref}_regions.json", "w", encoding="utf-8") as f:
