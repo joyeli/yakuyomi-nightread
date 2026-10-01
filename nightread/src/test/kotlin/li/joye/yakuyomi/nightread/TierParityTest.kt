@@ -13,7 +13,8 @@ import kotlin.math.abs
  * `fixtures/baseline/tiers/<檔>/<頁>_final.png`（研究端 `nightread.py` 以對應環境變數跑出的成品，見
  * docs/DECISIONS.md「背景填黑三檔」）。容差與 [PageParityTest] 相同；泡／留白遮罩在三檔都不該動，逐像素比對
  * 測試資源裡的 `<頁>_bubble.png`／`<頁>_gutter.png`（研究端實測三檔的遮罩與預設逐像素相同）。任意角度格溝（SEP）不吃
- * 檔位參數，實際塗的那份同樣逐像素比 `<頁>_sep.png`，有框頁還要求非空（格溝壓過人物、出血格過濾也在三檔一律開）。
+ * 檔位參數，實際塗的那份同樣逐像素比 `<頁>_sep.png`，兩頁都要求非空（ch34_011 有溝有頁邊；demo05 無框、只有右頁緣一條頁邊）
+ * （格溝壓過人物、出血格過濾也在三檔一律開）。
  *
  * 貼紙的 keep 集合（三檔篩選的直接輸出）也比：期望值抄自研究端各檔位 `<頁>_regions.json` 的 sticker 審計
  * `keep` 欄（2026-09-27），以元件 bbox 表示（cv2 與 Kotlin 的元件標號在少數頁差 1，bbox 才穩）。ch34_011 只有
@@ -78,8 +79,9 @@ class TierParityTest {
     @Test
     fun framedPageMatchesTierBaselines() = checkPage("ch34_011", expectSep = true)
 
+    /** 無框頁的 SEP 只有右頁緣那條頁邊（PEAK_MAX 800 起；溝對全拒），三檔相同。 */
     @Test
-    fun framelessColourPageMatchesTierBaselines() = checkPage("demo05", expectSep = false)
+    fun framelessColourPageMatchesTierBaselines() = checkPage("demo05", expectSep = true)
 
     private fun checkPage(page: String, expectSep: Boolean) {
         val gray = readGray("${page}_gray.png")

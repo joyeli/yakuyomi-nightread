@@ -67,9 +67,12 @@ class PageParityTest {
     @Test
     fun framedPageMatchesPythonPipeline() = checkPage("ch34_011", expectSep = true)
 
-    /** 無框的水彩頁：走 frameless 分支，且紙白峰只有 223、彩度門必須擋住整片拉白。SEP 16 對全拒、一顆都不塗。 */
+    /**
+     * 無框的水彩頁：走 frameless 分支，且紙白峰只有 223、彩度門必須擋住整片拉白。SEP 溝對 27 對全拒；PEAK_MAX 400 → 800
+     * 之後右頁緣多一條頁邊（1,861 px，頁緣到一條近垂直長線之間的紙白；使用者看圖接受，見 docs/DECISIONS.md）。
+     */
     @Test
-    fun framelessColourPageMatchesPythonPipeline() = checkPage("demo05", expectSep = false)
+    fun framelessColourPageMatchesPythonPipeline() = checkPage("demo05", expectSep = true)
 
     private fun checkPage(page: String, expectSep: Boolean) {
         val gray = readGray("${page}_gray.png")

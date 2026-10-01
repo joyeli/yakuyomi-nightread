@@ -505,10 +505,14 @@ square (a frame line borders a white gutter or margin on at least one side; dark
 enter the Hough). The shortest frame line is 0.15 × the short side (at least 60 px): panel frames are ruled
 long lines, speed lines and linework are mostly shorter.
 
-### `TH_STEP` = 0.5 · `PEAK_NMS_T` = 3 · `PEAK_NMS_R` = 6 · `PEAK_MAX` = 400 · `PEAK_VOTE_FRAC` = 0.8
+### `TH_STEP` = 0.5 · `PEAK_NMS_T` = 3 · `PEAK_NMS_R` = 6 · `PEAK_MAX` = 800 · `PEAK_VOTE_FRAC` = 0.8
 Hough. 0.5° per angle bin, 1 px per ρ bin, summed over 3 ρ bins (a 3 px wide white-adjacent band); a peak is a
-local maximum over θ ±1.5° and ρ ±6 px with at least 0.8 × the minimum line length in votes; the 400 strongest
+local maximum over θ ±1.5° and ρ ±6 px with at least 0.8 × the minimum line length in votes; the 800 strongest
 are kept. θ wraps around (0° and 179.5° are neighbours).
+The cap is still binding: the 47-page set has 3,239–5,695 qualifying local maxima per page (median 4,447). At 400
+(until 2026-10-01) the frame lines of real gutters on c362_017, c371_006 and c371_013 ranked below the cut and those
+gutters stayed grey; 800 recovers them for about +28 ms per page on the desktop JVM (the walk over the extra peaks).
+Raising it changes which tied peaks survive the cut, so the Kotlin port has to keep numpy's unstable sort order.
 
 ### `WALK_WIN0` = 4 · `WALK_WIN` = 2 · `GAP` = 8 · `FILL_MIN` = 0.85
 Walking along the line. The first walk and the PCA refinement use a ±4 px normal window (absorbing the Hough

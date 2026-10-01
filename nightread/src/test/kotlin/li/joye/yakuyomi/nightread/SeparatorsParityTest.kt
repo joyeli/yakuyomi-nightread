@@ -32,24 +32,41 @@ class SeparatorsParityTest {
 
     /** 有框頁：10 對裡收 5 對（其餘沿線沒有重疊），溝帶與頁邊都有。 */
     @Test
-    fun framedPage() = check("ch34_011")
+    fun framedPage() {
+        check("ch34_011")
+    }
 
-    /** 48 條框線群組（泡框排除 14 條）、15 對只收 3 對：剖面白度不過 6、沒重疊 4、排線家族 1、兩側不碰框線 1。 */
+    /** 52 條框線群組（泡框排除 15 條）、15 對只收 3 對：剖面白度不過 6、沒重疊 4、排線家族 1、兩側不碰框線 1。 */
     @Test
-    fun manyRejectedPairs() = check("demo02")
+    fun manyRejectedPairs() {
+        check("demo02")
+    }
 
     /** 2 對都收、頁邊佔大片。 */
     @Test
-    fun wideMargins() = check("demo06")
-
-    /** 沒有任何格溝／頁邊的頁（demo04 一條框線都沒有；demo05 無框水彩頁 16 對全拒：剖面白度 11、沒重疊 5）：一顆都不塗。 */
-    @Test
-    fun pagesWithoutSeparators() {
-        check("demo04")
-        check("demo05")
+    fun wideMargins() {
+        check("demo06")
     }
 
-    private fun check(page: String) {
+    /** 沒有任何格溝／頁邊的頁（demo04 一條框線都沒有）：一顆都不塗。 */
+    @Test
+    fun pageWithoutSeparators() {
+        val lay = check("demo04")
+        assertTrue("demo04：不該有任何格溝／頁邊", !lay.sep.any())
+    }
+
+    /**
+     * 無框水彩頁：41 條框線群組、27 對全拒（剖面白度 16、沒重疊 11）⇒ 沒有溝帶；只有右頁緣一條頁邊（1,861 px，頁緣到一條近垂直
+     * 長線之間的紙白）。這條是 PEAK_MAX 400 → 800 後才有的（400 時那條線的峰排在前 400 之外），使用者看圖接受（docs/DECISIONS.md）。
+     */
+    @Test
+    fun framelessPageEdgeMarginOnly() {
+        val lay = check("demo05")
+        assertTrue("demo05：溝對全拒、不該有溝帶", !lay.strip.any())
+        assertTrue("demo05：右頁緣那條頁邊要在", lay.margin.any())
+    }
+
+    private fun check(page: String): Separators.Layer {
         val p = NightReadParams()
         val g = Regions.normalizePaper(readGray("${page}_gray.png"), readGray("${page}_chroma.png"), p)
         val (lh, lv) = Regions.frameLineMask(g, p)
@@ -71,5 +88,6 @@ class SeparatorsParityTest {
         }
         println(sb)
         assertTrue("$page：SEP 遮罩與 python 不同（$sb）", total == 0)
+        return lay
     }
 }

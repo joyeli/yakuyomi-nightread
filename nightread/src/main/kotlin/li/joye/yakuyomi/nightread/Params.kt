@@ -387,8 +387,8 @@ data class SeparatorParams(
     val peakNmsT: Int = 3,
     /** 取峰 NMS 半窗：ρ ±此 px。 */
     val peakNmsR: Int = 6,
-    /** 最多取這麼多個峰（票數由高到低，numpy 不穩定排序的同票順序）。 */
-    val peakMax: Int = 400,
+    /** 最多取這麼多個峰（票數由高到低，numpy 不穩定排序的同票順序）。400 時 47 頁全數截到上限、漏掉真溝（2026-10-01 改 800）。 */
+    val peakMax: Int = 800,
     /** 峰的票數下限＝此×最短框線長。 */
     val peakVoteFrac: Double = 0.8,
     /** 去重：夾角 ≤ 此（度）… */
