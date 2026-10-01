@@ -47,6 +47,8 @@ detect-20241225.ckpt）torch 前向 ＋ m-i-t `SegDetectorRepresenter` 後處理
     L1  NIGHTREAD_STICKER_MODE=plain  NIGHTREAD_PB=0 NIGHTREAD_HM=0
     L2  NIGHTREAD_STICKER_MODE=simple NIGHTREAD_STICKER_ROUGH=10 NIGHTREAD_STICKER_MINFRAC=0.005 NIGHTREAD_PB=0 NIGHTREAD_HM=0
     L3  NIGHTREAD_STICKER_MODE=simple NIGHTREAD_STICKER_ROUGH=20 NIGHTREAD_STICKER_MINFRAC=0     NIGHTREAD_PB=0 NIGHTREAD_HM=0
+    更多 L3 的環境變數 ＋ NIGHTREAD_MORE=1（產品「更多」＝L3＋新規則 A2，2026-10-02；不設＝舊 L3，研究對照用；門檻 NIGHTREAD_MORE_*）
+    產品兩檔＝「標準」L2、「更多」L3＋A2（Kotlin NightTier.L3 已含 A2）。
 格溝與出血格過濾各有開關（預設都開；兩個都關＝加入前 d3cfa92 的輸出，逐像素相同）：
     NIGHTREAD_SEP=0     不偵測任意角度格溝／頁邊（nightread_sep.py）
     NIGHTREAD_BLEED=0   不做出血格過濾（nightread_bleed.py）
@@ -238,6 +240,34 @@ STICKER_PLAIN_FAINT_MAX = 0.10  # plain：外圈上「淡線稿」（INK_DARK_TH
 STICKER_PLAIN_FAINT_HALO = 5   # 暗墨抗鋸齒暈：暗墨（g < INK_DARK_TH）方核外擴邊長（5×5），暈裡的淡像素屬於暗線、不算淡線稿
 PSEUDO_BUBBLES = os.environ.get("NIGHTREAD_PB", "1") == "1"   # 偽泡開關（三檔＝0；偽泡沿字往背景長，是撕裂黑塊來源之一）
 HARMONIZE = os.environ.get("NIGHTREAD_HM", "1") == "1"        # 亮島填黑開關（三檔＝0；會把格內背景挖成黑塊）
+
+# 「更多」新規則 A2（2026-10-02 使用者拍板；研究 research/out/more_and_strip/more/HARDEN.md，見 docs/DECISIONS.md）
+#   產品「更多」＝L3 ＋ 這組規則：在檔位 keep 上只加不減（更多 ⊇ L3 ⊇ 標準）。候選＝安全網收下但檔位沒收（C1）、安全網只卡
+#   在「前景太少／字壓太多／文字窗」三道軟門（C2）、有框頁門檻邊上的頁邊留白（C3，格內白判準全放寬 MORE_HYST）；只靠貼框才
+#   成為候選的要貼框 ≥ FRAME_HUG_MIN×(1+MORE_HYST)。每個候選要過：外輪廓自由邊界 ≤ MORE_T_OUT、內部記號 ≤ MORE_T_IN、外圈淡色
+#   ≤ MORE_FAINT_MAX、軟門元件 rough ≤ MORE_ROUGH_CAP、人物原輸出佔比 < MORE_CHAR_MAX。繪製另有兩項（只在開了的檔）：描亮邊不蓋
+#   已經黑的像素（MORE_KEEP_DARK）、頁緣只給沒有格框種子的核心塊當種子（MORE_EDGE_FB）；無框頁留白層仍用加規則前的 keep。
+#   研究用：NIGHTREAD_MORE=0（預設）＝舊 L3；產品「更多」＝L3 的環境變數 ＋ NIGHTREAD_MORE=1。門檻預設＝產品值。
+MORE_RULE = os.environ.get("NIGHTREAD_MORE", "0") == "1"
+MORE_T_OUT = float(os.environ.get("NIGHTREAD_MORE_TOUT", "5"))      # S1 外輪廓自由邊界 L²/(4π·面積) 上限
+MORE_T_IN = float(os.environ.get("NIGHTREAD_MORE_TIN", "2"))        # S2 內部記號（真的有畫東西的洞）自由邊界上限
+MORE_FAINT_MAX = float(os.environ.get("NIGHTREAD_MORE_FAINT", "0.3"))   # S3 外圈淡色佔比上限
+MORE_ROUGH_CAP = float(os.environ.get("NIGHTREAD_MORE_ROUGH", "40"))    # S4 軟門元件的 rough 上限
+MORE_CHAR_MAX = float(os.environ.get("NIGHTREAD_MORE_CHAR", "0.67"))    # S5 人物原輸出佔元件 ≥ 此＝人物身上／被人物包住的白
+MORE_HYST = float(os.environ.get("NIGHTREAD_MORE_HYST", "0.25"))        # 遲滯：門檻 ×(1±此)
+MORE_HOLE_MIN_AREA = 8      # S2：洞面積 ≥ 此 px 才算「有畫東西」…
+MORE_HOLE_DARK_MAX = 200    # …或洞裡最暗 < 此（壓縮雜點、淡色噪點兩者都不是）
+MORE_MEDIAN = 5             # S1：補洞後中值平滑的核（二值多數決；BORDER_REPLICATE）
+MORE_EXPLAIN_DIL = 7        # 交代過：字（seg）與格線的方核外擴邊長（7×7＝外擴 3）
+MORE_NEAR_DIL = 9           # 交代過的全部再方核外擴（9×9＝外擴 4），邊界落在裡面的不算自由邊界
+MORE_RING_R = 7             # S3 外圈＝dilate(橢圓 (2r+1)²) − 元件
+MORE_HALO = 5               # S3 暗墨（< INK_DARK_TH）抗鋸齒暈的方核邊長
+MORE_WIN_PAD = 16           # 逐元件量測窗＝bbox 外擴此（夾頁緣）
+MORE_EDGE_BAND = 3          # P2 頁緣種子帶寬（距頁緣 ≤ 此−1 px）
+MORE_EDGE_REACH = 4         # P2 種子帶只取「缺格框種子的核心塊」外擴 CORE_NECK_R＋此 內的頁緣
+MORE_KEEP_DARK = os.environ.get("NIGHTREAD_MORE_KEEPDARK", "1") == "1"   # P1（只在 MORE_RULE 時生效）
+MORE_EDGE_FB = os.environ.get("NIGHTREAD_MORE_EDGEFB", "1") == "1"       # P2（只在 MORE_RULE 時生效）
+MORE_SOFT_GATES = frozenset(("figlo", "textOnP", "textCov"))             # C2：只卡在這三道門的拒收元件才是候選
 
 # 任意角度格溝＋出血格過濾＋格溝壓過人物（2026-09-27；常數在 nightread_sep.py／nightread_bleed.py，見 docs/DECISIONS.md）
 #   SEP：frame_line_mask 只認水平／垂直，斜格溝、被打斷的溝、畫到頁緣的頁邊進不了留白路徑（三檔都灰）。改從像素找任意角度
@@ -1126,6 +1156,32 @@ def sticker_metrics(g, img_bgr, lab, stats, i, text_rects, text_rects_on):
             "rough": round(rough, 1)}
 
 
+def _fig_gates(met):
+    """安全網兩條路共用的硬門裡沒過的（前景太少 figlo／太多 fighi、細碎 thin、彩度 chroma、被吃前景白硬上限 eatenH）。"""
+    gates = []
+    if met["figFrac"] < STICKER_FIG_MIN:
+        gates.append("figlo")
+    if met["figFrac"] > STICKER_FIG_MAX:
+        gates.append("fighi")
+    if met["thinFrac"] > STICKER_THIN_MAX:
+        gates.append("thin")
+    if met["chroma"] > STICKER_CHROMA_MAX:
+        gates.append("chroma")
+    if met["eatenFrac"] > STICKER_EATEN_HARD:
+        gates.append("eatenH")
+    return gates
+
+
+def _weak_gates(met):
+    """弱貼框／不貼框那條路（含無框頁與「更多」C3 的留白候選）沒過的門：硬門 ＋ 文字窗 textCov ＋ 小元件無語意證據 small。"""
+    gates = _fig_gates(met)
+    if not (met["textCov"] <= STICKER_TEXT_MAX or met["areaFrac"] >= 0.02):
+        gates.append("textCov")
+    if not (met["areaFrac"] >= STICKER_SMALL_AREA or met["textOn"] >= STICKER_TEXT_BG_MIN):
+        gates.append("small")
+    return gates
+
+
 def sticker_plan(g, img_bgr, lab, stats, gutter_ids, panel_ids, frameless, regions):
     """挑修法4 目標元件並過安全網。回傳 (accept_ids, audit)。
 
@@ -1146,6 +1202,7 @@ def sticker_plan(g, img_bgr, lab, stats, gutter_ids, panel_ids, frameless, regio
               ch34_010 右下格披肩 0.0105/textOn 0.023 走這條退回）。
     語意證據一律用 textOn（tight bbox+TEXTON_PAD）：文字要「真的壓在這個白
     元件上」才算數；textCov 的 40px 窗會把鄰格文字掃進相鄰元件湊假證據。
+    審計每筆另記 path（strong／weak：走哪條路）與 gates（實際沒過的門，空＝收下；「更多」A2 的 C2 候選看這個）。
     eaten 沒爆但局部聚團（白鬍臉這型）＝ paint_sticker 的區域級保護處理
     （該團塊不填黑、留 D2），不整顆退回——見 _sticker_protect 常數註記。
     """
@@ -1227,6 +1284,14 @@ def sticker_plan(g, img_bgr, lab, stats, gutter_ids, panel_ids, frameless, regio
                            and met["areaFrac"] < STICKER_SMALL_AREA
                            and met["textOn"] < STICKER_TEXT_BG_MIN)
                   )
+            gates = _fig_gates(met)
+            if met["textOn"] > PROMOTED_TEXTON_MAX:
+                gates.append("textOnP")
+            if met["faintOfF"] > FAINT_OF_F_MAX:
+                gates.append("faintF")
+            if hug_cut.get(i, False) and met["areaFrac"] < STICKER_SMALL_AREA and met["textOn"] < STICKER_TEXT_BG_MIN:
+                gates.append("hugCut")
+            met["path"] = "strong"
             if ok:
                 promoted.add(i)
         else:
@@ -1242,6 +1307,8 @@ def sticker_plan(g, img_bgr, lab, stats, gutter_ids, panel_ids, frameless, regio
 
                   and (met["areaFrac"] >= STICKER_SMALL_AREA
                        or met["textOn"] >= STICKER_TEXT_BG_MIN))
+            gates = _weak_gates(met)
+            met["path"] = "weak"
             if ok and not eaten_mid_ok and not frameless and i in panel_ids:
                 # E1：中段 eaten 的 panel 白改走核心填色（格框種子、切窄頸）+ 區域級保護，不整顆拒
                 promoted.add(i)
@@ -1250,6 +1317,9 @@ def sticker_plan(g, img_bgr, lab, stats, gutter_ids, panel_ids, frameless, regio
                 # demo01 主角臉（hug 0.327、textOn 0.289 走 eaten 逃生門放行）就是這樣被塗黑的。
                 # 擢升元件一律核心填色：它們本來就是「不與留白連通、只靠貼框證據」的不確定背景。
                 promoted.add(i)
+        # 實際沒過的門（「更多」A2 的候選看這個；與 ok 同一份判定，斷言守著兩者不分家）
+        assert ok == (not gates), (i, ok, gates)
+        met["gates"] = sorted(gates)
         met["accept"] = bool(ok)
         audit.append(met)
         if ok:
@@ -1304,6 +1374,178 @@ def filter_sticker_plan(g, lab, stats, accept, audit, promoted, char_raw, frame)
     for a in audit:
         a["keep"] = int(a["comp"]) in keep
     return keep, set(promoted) & keep
+
+
+# ── 「更多」新規則 A2（MORE_RULE；在檔位 keep 上只加不減）────────────────────
+
+def more_explained(g, bubble, seg, frame):
+    """A2 的「交代過」遮罩（整頁、與檔位無關）。回傳 (fd, bs, bs0)：
+    fd ＝格線方核外擴 MORE_EXPLAIN_DIL；bs ＝泡 ∪ 泡框線（泡外 BUBBLE_OUTLINE_DIST 內的非白）∪ 字（seg 方核外擴）；
+    bs0 ＝同 bs 但不含泡框線（S3 外圈淡色用）。泡＝人物修剪前的泡（含封縫救回的）。"""
+    k = np.ones((MORE_EXPLAIN_DIL,) * 2, np.uint8)
+    fd = cv2.dilate(np.asarray(frame).astype(np.uint8), k) > 0
+    ko = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * BUBBLE_OUTLINE_DIST + 1,) * 2)
+    bub = bubble | ((cv2.dilate(bubble.astype(np.uint8), ko) > 0) & (g < WHITE_TH))
+    segd = cv2.dilate(seg.astype(np.uint8), k) > 0
+    return fd, bub | segd, bubble | segd
+
+
+def more_gutter_candidates(g, img_bgr, lab, stats, gutter_ids, skip, regions):
+    """C3：有框頁的頁邊留白元件，若把格內白的判準全部放寬 MORE_HYST（厚芯半徑 CORE_R×(1−H)、厚芯佔比、深入、
+    包墨深入與包墨比都 ×(1−H)）後算格內白，也當候選（包含式遲滯：厚芯半徑是絕對 px、深入的頁邊帶是相對值，縮放會翻）。
+    回傳 {元件: 安全網量測}（sticker_metrics ＋ gates／path／gut）；skip＝已在 keep 或已是候選的元件。"""
+    H, W = g.shape
+    min_area = GUTTER_MIN_AREA_FRAC * g.size
+    todo = [i for i in sorted(gutter_ids) if i not in skip and stats[i, cv2.CC_STAT_AREA] >= min_area]
+    if not todo:
+        return {}
+    def _rects(pad):
+        return [(max(0, r["bbox"][0] - pad), max(0, r["bbox"][1] - pad),
+                 min(W - 1, r["bbox"][2] + pad), min(H - 1, r["bbox"][3] + pad)) for r in regions]
+    tr, tro = _rects(BUBBLE_PAD), _rects(STICKER_TEXTON_PAD)
+    deep_px = max(64, int(round(DEEP_EDGE_FRAC * min(W, H))))
+    dist = cv2.distanceTransform((g >= WHITE_TH).astype(np.uint8), cv2.DIST_L2, 5)   # 同 classify_white_components
+    lo = 1 - MORE_HYST
+    out = {}
+    for i in todo:
+        x, y, w, h = [int(v) for v in stats[i, :4]]
+        comp = lab[y:y + h, x:x + w] == i
+        core = comp & (dist[y:y + h, x:x + w] > CORE_R * lo)
+        if not core.any():
+            continue
+        cf = core.sum() / max(1, comp.sum())
+        ys, xs = np.nonzero(core)
+        xs = xs + x
+        ys = ys + y
+        ed = np.minimum(np.minimum(xs, W - 1 - xs), np.minimum(ys, H - 1 - ys))
+        cdeep = float((ed > deep_px).mean())
+        inp = cf >= IN_PANEL_CORE_FRAC * lo and cdeep >= IN_PANEL_CORE_DEEP * lo
+        if not inp and cdeep >= DEEP_INK_DEEP * lo:
+            inp = _hole_ink_ratio((lab == i).astype(np.uint8), g) >= DEEP_INK_RATIO * lo
+        if not inp:
+            continue
+        m = sticker_metrics(g, img_bgr, lab, stats, i, tr, tro)
+        m.update(gates=sorted(_weak_gates(m)), path="weak", gut=True, accept=False, keep=False)
+        out[i] = m
+    return out
+
+
+def more_features(g, lab, stats, i, charmask, char_raw, bs, bs0, fd):
+    """單一候選元件的 A2 特徵（都在元件 bbox 外擴 MORE_WIN_PAD 的窗內量；窗外的像素碰不到量測）：
+      rfs  ＝外輪廓自由邊界：補洞、中值 MORE_MEDIAN 平滑後的 1 px 內邊界，扣掉交代過的（人物、泡＋泡框線、字、格線，
+             再方核外擴 MORE_NEAR_DIL）剩下的長度 L，L²/(4π·面積)（像素級鋸齒與 JPEG 雜點不算）
+      rfi  ＝內部記號：元件的洞（8 連通塊）裡「真的有畫東西」的（面積 ≥ MORE_HOLE_MIN_AREA 或最暗 < MORE_HOLE_DARK_MAX），
+             其 1 px 內邊界扣掉交代過的長度，同式
+      fnc  ＝外圈淡色：外圈（dilate 橢圓 (2·MORE_RING_R+1)² − 元件）扣人物（收邊後）之後，不在泡（不含框線）／字／格線、
+             不在暗墨暈裡、INK_DARK_TH ≤ g < WHITE_TH 的佔比
+      charf＝人物原輸出（char_raw）佔元件
+    rfs／rfi 四捨五入到 2 位、fnc 到 3 位（拿四捨五入後的值比門檻）。回傳 dict。"""
+    H, W = g.shape
+    x, y, w, h = [int(v) for v in stats[i, :4]]
+    pad = MORE_WIN_PAD
+    x0, y0, x1, y1 = max(0, x - pad), max(0, y - pad), min(W, x + w + pad), min(H, y + h + pad)
+    sl = (slice(y0, y1), slice(x0, x1))
+    unit = lab[sl] == i
+    gs = g[sl]
+    area = max(1, int(unit.sum()))
+    k3 = np.ones((3, 3), np.uint8)
+    near = cv2.dilate((charmask[sl] | bs[sl] | fd[sl]).astype(np.uint8), np.ones((MORE_NEAR_DIL,) * 2, np.uint8)) > 0
+    filled = _fill_holes(unit)
+    holes = filled & ~unit
+    sm = cv2.medianBlur(filled.astype(np.uint8) * 255, MORE_MEDIAN) > 127
+    ob = sm & ~(cv2.erode(sm.astype(np.uint8), k3) > 0)
+    l_out = int((ob & ~near).sum())
+    n, lb, st, _ = cv2.connectedComponentsWithStats(holes.astype(np.uint8), 8)
+    l_in = 0
+    if n > 1:
+        mn = np.full(n, 255, np.int32)
+        np.minimum.at(mn, lb.ravel(), gs.ravel().astype(np.int32))
+        real = np.zeros(n, bool)
+        real[1:] = (st[1:, cv2.CC_STAT_AREA] >= MORE_HOLE_MIN_AREA) | (mn[1:] < MORE_HOLE_DARK_MAX)
+        hm = real[lb]
+        hb = hm & ~(cv2.erode(hm.astype(np.uint8), k3) > 0)
+        l_in = int((hb & ~near).sum())
+    rfs = l_out ** 2 / (4 * np.pi * area)
+    rfi = l_in ** 2 / (4 * np.pi * area)
+    kr = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * MORE_RING_R + 1,) * 2)
+    ring = (cv2.dilate(unit.astype(np.uint8), kr) > 0) & ~unit
+    nc = ring & ~charmask[sl]
+    left = nc & ~bs0[sl] & ~fd[sl]
+    halo = cv2.dilate((gs < INK_DARK_TH).astype(np.uint8), np.ones((MORE_HALO,) * 2, np.uint8)) > 0
+    faint = left & ~halo & (gs >= INK_DARK_TH) & (gs < WHITE_TH)
+    fnc = float(faint.sum()) / max(1, int(nc.sum()))
+    charf = float(char_raw[sl][unit].mean())
+    return dict(rfs=round(rfs, 2), rfi=round(rfi, 2), fnc=round(fnc, 3), charf=charf,
+                lOut=l_out, lIn=l_in, area=area)
+
+
+def more_rule(g, img_bgr, lab, stats, accept0, promoted0, keep, audit, charmask, char_raw, bubble, seg, frame,
+              frameless, regions, gutter_ids, panel_ids):
+    """「更多」A2：在檔位 keep 上只加不減。回傳 (keep2, promoted2)；audit 每個候選加 more 欄（src／特徵／ok／why），
+    C3 的留白候選併進 audit（gut=True）。promoted2＝(安全網的擢升 ∪ 新加且走核心填色的) ∩ keep2：有框頁新加的一律
+    核心填色；無框頁只有 frameHug／留白候選會（實際上無框頁兩者都不會出現 ⇒ 整顆填）。"""
+    keep = set(keep)
+    met = {int(a["comp"]): a for a in audit}
+    cand = {}
+    for i in sorted(set(accept0) - keep):
+        cand[int(i)] = "acc"                       # C1：安全網收下、檔位沒收
+    for a in audit:
+        i = int(a["comp"])
+        if a["accept"] or i in keep or i in cand:
+            continue
+        cand[i] = "rej"                            # C2：安全網拒收（只卡在軟門的才繼續）
+    if not frameless:
+        for i, m in more_gutter_candidates(g, img_bgr, lab, stats, gutter_ids, keep | set(cand), regions).items():
+            audit.append(m)
+            met[i] = m
+            cand[i] = "gut"                        # C3：門檻邊上的頁邊留白
+    if not cand:
+        return keep, set(promoted0) & keep
+    fd, bs, bs0 = more_explained(g, bubble, seg, frame)
+    hug_lo = FRAME_HUG_MIN * (1 + MORE_HYST)
+    strong_lo, strong_hi = FRAME_HUG_STRONG * (1 - MORE_HYST), FRAME_HUG_STRONG * (1 + MORE_HYST)
+    add, prom = set(), set(promoted0)
+    for i, src in sorted(cand.items()):
+        a = met[i]
+        hug = a.get("frameHug")
+        listed = (i in panel_ids) or (i in gutter_ids) or frameless
+        if hug is not None and not listed and hug < hug_lo:
+            a["more"] = dict(src=src, skip="hug")  # 只靠貼框才成為候選的：貼框要穩穩過門檻（保守式遲滯）
+            continue
+        gs = set(a["gates"]) if src in ("rej", "gut") else set()
+        if src == "rej" and not gs:
+            continue
+        if gs and not gs <= MORE_SOFT_GATES:
+            a["more"] = dict(src=src, skip="gates")
+            continue
+        if gs:
+            soft = True
+        else:
+            # 強／弱貼框兩條路的軟門不同（強：字壓 > 0.3 拒；弱：文字窗 > 0.55 且小 拒），貼框在 0.4 上下會換路。
+            # 遲滯帶內兩條路的軟門都要看（保守式）：碰到任一道就當「軟門元件」，要過 rough 上限。
+            h_ = hug if hug is not None else 0.0
+            soft = ((h_ >= strong_lo and a["textOn"] > PROMOTED_TEXTON_MAX)
+                    or (h_ < strong_hi and a["textCov"] > STICKER_TEXT_MAX and a["areaFrac"] < 0.02))
+        f = more_features(g, lab, stats, i, charmask, char_raw, bs, bs0, fd)
+        why = []
+        if f["rfs"] > MORE_T_OUT:
+            why.append("out")
+        if f["rfi"] > MORE_T_IN:
+            why.append("in")
+        if f["fnc"] > MORE_FAINT_MAX:
+            why.append("faint")
+        if soft and a["rough"] > MORE_ROUGH_CAP:
+            why.append("rough")
+        if f["charf"] >= MORE_CHAR_MAX:
+            why.append("char")
+        ok = not why
+        a["more"] = dict(src=src, soft=bool(soft), ok=ok, why="+".join(why), **f)
+        if ok:
+            add.add(i)
+            if not frameless or "frameHug" in a or src == "gut":
+                prom.add(i)
+    keep2 = keep | add
+    return keep2, prom & keep2
 
 
 def thick_ink_aura(g, r=PB_AURA_R, thick=PB_AURA_THICK, min_area=PB_AURA_MIN_AREA, seg=None):
@@ -1361,10 +1603,35 @@ def broad_core_fill(comp, seeds, neck_r=CORE_NECK_R, recover_r=CORE_RECOVER_R):
     return geodesic_grow(filled, comp, recover_r, step=3)
 
 
+def _edge_seed_fallback(comp, fr, kd, x0, y0, H, W):
+    """P2：comp（窗內）以 CORE_NECK_R 開運算後的 8 連通核心塊裡，碰不到格框種子（fr 橢圓外擴 FRAME_HUG_DILATE ∩ comp）
+    的塊，其外擴 CORE_NECK_R+MORE_EDGE_REACH 內的頁緣帶（距頁緣 < MORE_EDGE_BAND）。回傳窗內遮罩（可能全空）。"""
+    ko = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * CORE_NECK_R + 1,) * 2)
+    core = cv2.morphologyEx(comp.astype(np.uint8), cv2.MORPH_OPEN, ko)
+    n, lb = cv2.connectedComponents(core, 8)
+    sf = (cv2.dilate(fr.astype(np.uint8), kd) > 0) & comp
+    has = np.zeros(n, bool)
+    has[np.unique(lb[sf & (core > 0)])] = True
+    lack = (lb > 0) & ~has[lb]
+    if not lack.any():
+        return np.zeros_like(comp)
+    yy, xx = np.mgrid[y0:y0 + comp.shape[0], x0:x0 + comp.shape[1]]
+    b = MORE_EDGE_BAND
+    edge = (yy < b) | (xx < b) | (yy >= H - b) | (xx >= W - b)
+    kn = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * (CORE_NECK_R + MORE_EDGE_REACH) + 1,) * 2)
+    return edge & (cv2.dilate(lack.astype(np.uint8), kn) > 0)
+
+
 def paint_sticker(out, g, lab, stats, accept, bubble, core_ids=(), frame=None, seg=None,
-                  charmask=None):
+                  charmask=None, keep_dark=False, edge_fb=False):
     """修法4 合成：W 填深、前景描白邊（dilate(F, r) ∩ W）、W 內孤立小噪點吞掉、
     eaten 聚團區域級保護（不填黑、原樣留 D2）。
+
+    「更多」A2 的兩項繪製（MORE_RULE 的檔才開）：
+      keep_dark：前景描亮邊不蓋掉此時已經 ≤ BG 的像素（留白／格溝／前一顆貼紙塗黑的）——P1；
+      edge_fb  ：核心填色裡沒有格框種子的核心塊（開運算 CORE_NECK_R 後的 8 連通塊），頁緣（距頁緣 < MORE_EDGE_BAND）
+                 落在該塊外擴 CORE_NECK_R+MORE_EDGE_REACH 內的部分也當種子（出血格沒有格框線可長）——P2；
+                 有格框種子的塊不加（加了測地比的直線切邊會往下移，c362_017 肩旁階梯小黑楔）。
 
     F＝bbox 內非白（< WHITE_TH）且非氣泡的內容（墨線/調子/SFX）；被墨線封閉
     的白（臉/衣服）不與 W 連通、照 D2 保留，其輪廓墨線屬 F ⇒ 描邊自然沿輪廓。
@@ -1384,6 +1651,8 @@ def paint_sticker(out, g, lab, stats, accept, bubble, core_ids=(), frame=None, s
             # 臉/白衣即使因線稿缺口與背景同元件，也在頸口被切斷 ⇒ 幾何保護、非門檻保護。
             fr = frame[y0:y1, x0:x1] > 0
             kd = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (FRAME_HUG_DILATE * 2 + 1,) * 2)
+            if edge_fb:
+                fr = fr | _edge_seed_fallback(comp, fr, kd, x0, y0, H, W_)
             seeds = (cv2.dilate(fr.astype(np.uint8), kd) > 0) & comp
             fill = broad_core_fill(comp, seeds)
             if fill.any():
@@ -1427,6 +1696,8 @@ def paint_sticker(out, g, lab, stats, accept, bubble, core_ids=(), frame=None, s
         protect = _sticker_protect(_sticker_eaten(sub, comp), comp)
         band = (cv2.dilate(f_main.astype(np.uint8), k) > 0) & fill & ~protect
         o = out[y0:y1, x0:x1]
+        if keep_dark:
+            band &= ~(o <= BG)                          # P1：描亮邊不蓋掉已經塗黑的（留白／格溝／前一顆貼紙）
         o[(fill | noise) & ~protect] = BG
         o[band] = STROKE_OBJ_V
     return out
@@ -1698,8 +1969,10 @@ def harmonize_enclosed_whites(out, g, lab, stats, skip_mask):
 
 def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
             core_ids=(), frame=None, regions=None, charmask=None, char_raw=None,
-            bubble_rest=None, lost_bubble=None, diag=None, bubble_local=None):
+            bubble_rest=None, lost_bubble=None, diag=None, bubble_local=None, more_paint=False):
     """整頁合成：場景曲線 → 留白填深（出血格過濾）→ 格溝／頁邊 → 貼紙式背景 → 氣泡重繪 → 人物還原。
+
+    [more_paint]＝「更多」A2 的檔：貼紙層開 keep_dark（MORE_KEEP_DARK）與 edge_fb（MORE_EDGE_FB）。
 
     [diag] 給 dict 就把格溝與出血過濾的中間遮罩、逐塊決策、耗時存進去（parity／除錯用，不影響輸出）。"""
     out = scene_final(g, seg).astype(np.float32)
@@ -1779,7 +2052,8 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
         out = paint_gutter(out, g, sepm, frame=frame, bubble=bubble)
     if sticker:                                         # 貼紙式背景：純白背景填黑＋前景白描邊
         out = paint_sticker(out, g, lab, stats, sticker, bubble,
-                            core_ids=core_ids, frame=frame, seg=seg, charmask=charmask)
+                            core_ids=core_ids, frame=frame, seg=seg, charmask=charmask,
+                            keep_dark=more_paint and MORE_KEEP_DARK, edge_fb=more_paint and MORE_EDGE_FB)
     # [bubble_local] 封縫救回的泡：只在這裡以後（泡重繪、偽泡、亮島、人物還原）當泡；上面的結構層只看 bubble
     bub_all = bubble if bubble_local is None else (bubble | bubble_local)
     out = paint_bubbles(out, g, bub_all, seg)
@@ -1921,9 +2195,18 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None, 
     sticker, audit, promoted = sticker_plan(g, img, lab, stats, gutter_ids, panel_ids,
                                             frameless, regions)
     lhm, lvm = frame_line_mask(g)
+    accept0, promoted0 = set(sticker), set(promoted)    # 安全網收下的全部（檔位篩選前；「更多」A2 的候選從這裡挑）
     sticker, promoted = filter_sticker_plan(g, lab, stats, sticker, audit, promoted,   # 三檔（STICKER_MODE）
                                             char_raw, (lhm | lvm) > 0)
-    gutter_show = gutter_ids - sticker if frameless else gutter_ids
+    base_keep = set(sticker)
+    if MORE_RULE:
+        # 「更多」A2：在檔位 keep 上只加不減。泡＝修剪前（含封縫救回的）；人物＝收邊後（交代過）與原輸出（佔比）
+        sticker, promoted = more_rule(g, img, lab, stats, accept0, promoted0, sticker, audit, charmask, char_raw,
+                                      bubble, seg, (lhm | lvm) > 0, frameless, regions, gutter_ids, panel_ids)
+        for a in audit:
+            a["keep"] = int(a["comp"]) in sticker
+    # 無框頁的留白層用加規則前的 keep（P3）：新收的元件整顆當貼紙塗，留白帶照舊
+    gutter_show = gutter_ids - base_keep if frameless else gutter_ids
     gutter = np.isin(lab, sorted(gutter_show)) if gutter_show else np.zeros((H, W), bool)
     panel_show = panel_ids - sticker
     panel_scene = np.isin(lab, sorted(panel_show)) if panel_show else np.zeros((H, W), bool)
@@ -2015,7 +2298,7 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None, 
     final = compose(g, gutter, bubble & ~local_only, seg, frameless, lab, stats, sticker,
                     core_ids=promoted, frame=(lhm | lvm), regions=regions, charmask=charmask,
                     char_raw=char_raw, bubble_rest=bubble_rest, lost_bubble=lost, diag=diag,
-                    bubble_local=bubble & local_only)
+                    bubble_local=bubble & local_only, more_paint=MORE_RULE)
 
     pref = os.path.join(outdir, name)
     with open(f"{pref}_regions.json", "w", encoding="utf-8") as f:

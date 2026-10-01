@@ -21,6 +21,12 @@ import kotlin.math.abs
  * bbox [431,131,548,168]（rough 2.3、佔比 0.001）過安全網：PLAIN 落選（外圈碰線稿）、SIMPLE 10／0.005 因面積落選、
  * SIMPLE 20／0 留下；demo05 沒有元件過安全網。
  *
+ * 「更多」（MORE＝[NightTier.L3]：L3 ＋ 新規則 A2，[MoreRuleParams]；2026-10-02 加）：基線 `fixtures/baseline/tiers/MORE/`＝研究端
+ * L3 的環境變數 ＋ `NIGHTREAD_MORE=1`。ch34_011 加了三顆元件（核心填色幾乎沒塗、成品只差 15 px，守 P1 描亮邊不蓋黑）、demo06 加兩顆
+ * （C1 長髮旁背景＋C2 只卡字壓的元件）、demo02 加三顆（C3 頁邊留白門檻邊上的旁白卡片兩張＋C1 一顆；demo02 只有 MORE 一檔的基線）、
+ * demo05 沒有元件過安全網（與 L3 同一份基線）。這裡的 "L3" 是舊 L3（[MoreRuleParams.enabled] 預設關），研究對照用。
+ * 逐元件（特徵、門、判定）的 parity 另見 [MoreRuleParityTest]。
+ *
  * demo06（2026-10-02 加）守泡內淺條修法 e（[NightReadParams.bubbleCleanInkHoles]＋[NightReadParams.bubbleGuardRaw]）：
  * ch34_011／demo05 在 e 下四檔 0 px 變化，整頁容差又寬（demo06 的淺條只佔頁面 0.1%），只有逐像素比的泡遮罩抓得到漏移植。
  * demo06 的泡遮罩 e 與舊行為差 3,634 px；只移植 d 時與 e 差 356 px、只移植 c 時差 126 px（研究端同輸入量；兩者與舊行為各差
@@ -65,24 +71,36 @@ class TierParityTest {
         return toGray(ImageIO.read(f))
     }
 
-    /** 產品三檔＝呼叫端整組設的參數（對應研究端 NIGHTREAD_STICKER_MODE／ROUGH／MINFRAC／PB／HM）。 */
+    /** 三檔＋更多＝呼叫端整組設的參數（對應研究端 NIGHTREAD_STICKER_MODE／ROUGH／MINFRAC／PB／HM／MORE）。 */
     private fun tierParams(tier: String): NightReadParams = when (tier) {
         "L1" -> NightReadParams(stickerMode = StickerMode.PLAIN, pseudoBubbles = false, harmonize = false)
         "L2" -> NightReadParams(stickerMode = StickerMode.SIMPLE, stickerRoughMax = 10.0, stickerSimpleMinFrac = 0.005,
             pseudoBubbles = false, harmonize = false)
         "L3" -> NightReadParams(stickerMode = StickerMode.SIMPLE, stickerRoughMax = 20.0, stickerSimpleMinFrac = 0.0,
             pseudoBubbles = false, harmonize = false)
+        "MORE" -> NightReadParams(stickerMode = StickerMode.SIMPLE, stickerRoughMax = 20.0, stickerSimpleMinFrac = 0.0,
+            more = MoreRuleParams(enabled = true), pseudoBubbles = false, harmonize = false)
         else -> error(tier)
     }
 
     /** 期望的 keep 集合，元件以 bbox（x0 y0 x1 y1）表示。 */
     private val expectedKeep: Map<String, Map<String, Set<List<Int>>>> = mapOf(
-        "ch34_011" to mapOf("L1" to emptySet(), "L2" to emptySet(), "L3" to setOf(listOf(431, 131, 548, 168))),
-        "demo05" to mapOf("L1" to emptySet(), "L2" to emptySet(), "L3" to emptySet()),
+        "ch34_011" to mapOf(
+            "L1" to emptySet(), "L2" to emptySet(), "L3" to setOf(listOf(431, 131, 548, 168)),
+            "MORE" to setOf(listOf(130, 131, 320, 475), listOf(431, 131, 548, 168), listOf(651, 131, 878, 433),
+                listOf(1101, 131, 1233, 388)),
+        ),
+        "demo05" to mapOf("L1" to emptySet(), "L2" to emptySet(), "L3" to emptySet(), "MORE" to emptySet()),
         "demo06" to mapOf(
             "L1" to emptySet(),
             "L2" to setOf(listOf(127, 141, 388, 478), listOf(1005, 921, 1233, 1169)),
             "L3" to setOf(listOf(1012, 69, 1233, 451), listOf(127, 141, 388, 478), listOf(1005, 921, 1233, 1169)),
+            "MORE" to setOf(listOf(0, 695, 713, 1169), listOf(127, 141, 388, 478), listOf(995, 695, 1233, 995),
+                listOf(1005, 921, 1233, 1169), listOf(1012, 69, 1233, 451)),
+        ),
+        "demo02" to mapOf(
+            "MORE" to setOf(listOf(137, 1876, 187, 1983), listOf(151, 2, 768, 431), listOf(783, 216, 1411, 515),
+                listOf(789, 431, 1411, 660), listOf(796, 575, 1411, 819)),
         ),
     )
 
@@ -97,7 +115,11 @@ class TierParityTest {
     @Test
     fun bubbleStripPageMatchesTierBaselines() = checkPage("demo06", expectSep = true)
 
-    private fun checkPage(page: String, expectSep: Boolean) {
+    /** 「更多」的 C3（頁邊留白、格內白判準放寬後才算格內白的旁白卡片）只有這頁走到；只有 MORE 一檔的基線。 */
+    @Test
+    fun moreGutterCandidatePageMatchesBaseline() = checkPage("demo02", expectSep = true, tiers = listOf("MORE"))
+
+    private fun checkPage(page: String, expectSep: Boolean, tiers: List<String> = listOf("L1", "L2", "L3", "MORE")) {
         val gray = readGray("${page}_gray.png")
         val input = NightReadInput(
             gray = gray,
@@ -113,7 +135,7 @@ class TierParityTest {
         val cc = Regions.classifyWhiteComponents(Regions.normalizePaper(gray, input.chroma, NightReadParams()), NightReadParams()).cc
         fun bbox(i: Int) = listOf(cc.left[i], cc.top[i], cc.left[i] + cc.width[i], cc.top[i] + cc.height[i])
 
-        for (tier in listOf("L1", "L2", "L3")) {
+        for (tier in tiers) {
             val expected = baseline(tier, page)
             val t0 = System.currentTimeMillis()
             val result = NightRead.render(input, tierParams(tier))

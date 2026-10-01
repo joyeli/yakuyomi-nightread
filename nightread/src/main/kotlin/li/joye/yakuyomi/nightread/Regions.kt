@@ -247,7 +247,7 @@ internal object Regions {
      * 元件包住的線稿量：「小洞內的墨」除以元件面積。只計小洞——大洞是被留白環住的整格，
      * 不是包線稿。
      */
-    private fun holeInkRatio(cc: CC, id: Int, g: Gray, p: NightReadParams): Double {
+    internal fun holeInkRatio(cc: CC, id: Int, g: Gray, p: NightReadParams): Double {
         val x = cc.left[id]
         val y = cc.top[id]
         val cw = cc.width[id]

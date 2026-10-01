@@ -210,6 +210,11 @@ data class NightReadParams(
     val stickerPlainFaintMax: Double = 0.10,
     /** PLAIN：暗墨（g < [inkDarkTh]）抗鋸齒暈的方核外擴邊長（5×5）；暈裡的淡像素屬於暗線、不算淡線稿。 */
     val stickerPlainFaintHalo: Int = 5,
+    /**
+     * 「更多」新規則 A2（2026-10-02 使用者拍板）的參數組；[MoreRuleParams.enabled] 預設關（＝加入前逐像素相同），產品「更多」
+     * ＝[NightTier.L3] 會打開。獨立成 data class（同 [sep]／[bleed]），不佔建構子的 JVM 參數槽。見 [MoreRuleParams]。
+     */
+    val more: MoreRuleParams = MoreRuleParams(),
     /** 偽泡開關（三檔＝false；偽泡沿字往背景長，是撕裂黑塊來源之一，守護框 +2）。 */
     val pseudoBubbles: Boolean = true,
     /** 亮島填黑（人頭一致化）開關（三檔＝false；會把格內背景挖成黑塊；守護框對它零敏感）。 */
@@ -261,6 +266,76 @@ data class NightReadParams(
     val bleedFilter: Boolean = true,
     /** 出血格過濾（[Bleed] ＝ research/nightread_bleed.py）的參數組；同 [sep] 獨立成 data class。 */
     val bleed: BleedParams = BleedParams(),
+)
+
+/**
+ * 「更多」新規則 A2（2026-10-02，使用者拍板；研究端 `research/nightread.py` 的 `MORE_*`、`more_rule`），預設值＝研究端定案值。
+ *
+ * 在檔位（貼紙篩選）的 keep 上**只加不減**（更多 ⊇ L3 ⊇ 標準）。候選有三種：
+ * - C1：安全網收下、檔位沒收的元件；
+ * - C2：安全網拒收、而且只卡在「前景太少 figlo／字壓太多 textOnP／文字窗 textCov」三道門的（看 [Sticker.Metrics.gates]，
+ *   安全網實際沒過的門）；
+ * - C3：有框頁的頁邊留白元件，若把格內白的判準全部放寬 [hyst]（厚芯半徑 [NightReadParams.coreR]×(1−[hyst])、厚芯佔比、深入、
+ *   包墨深入與包墨比都 ×(1−[hyst])）後算格內白（包含式遲滯：厚芯半徑是絕對 px、深入的頁邊帶是相對值，縮放會翻）。
+ *
+ * 只靠「貼框」才成為候選的（不是格內白、不是留白、不在無框頁）貼框分數要 ≥ [NightReadParams.frameHugMin]×(1+[hyst])。
+ * 每個候選要過：外輪廓自由邊界 ≤ [tOut]、內部記號 ≤ [tIn]、外圈淡色 ≤ [faintMax]、軟門元件 rough ≤ [roughCap]、人物原輸出佔比
+ * < [charMax]。軟門元件＝C2／C3 有沒過的門，或 C1 在貼框 [NightReadParams.frameHugStrong]×(1±[hyst]) 這一帶碰到強或弱貼框任一
+ * 條路的字量門（強：字壓 > [NightReadParams.promotedTextOnMax]；弱：文字窗 > [NightReadParams.stickerTextMax] 且整頁佔比 < 0.02）。
+ * 繪製（只在 [enabled] 的檔）：[keepDarkStroke]、[edgeSeedFallback]；無框頁的留白層仍用加規則前的 keep（[Sticker.Plan.baseAccept]）。
+ *
+ * 47 頁 × 7 種輸入（原尺寸、縮 0.9／0.95、放 1.05／1.1、JPEG q75／q85）：沒有 ≥ 2,000 px 的「規則自己翻面」、禁塗區（雲天空、
+ * 線稿背景、待判物件）0 px；守護框 L3 18 → 20（/664）。值的由來見 docs/PARAMETERS_zh.md「「更多」新規則 A2」與 docs/DECISIONS.md。
+ */
+data class MoreRuleParams(
+    /** 總開關；false＝與加入前逐像素相同（[NightTier.L3] 打開）。 */
+    val enabled: Boolean = false,
+    /**
+     * S1 外輪廓自由邊界上限：元件補洞、[median] 中值平滑後的 1 px 內邊界，扣掉「交代過」的（人物（收邊後）、泡＋泡框線、字、
+     * 格線，再方核外擴 [nearDil]）剩下的長度 L，L²/(4π·面積)（四捨五入到 2 位再比）。結果相同的區間 3.69–7.7。
+     */
+    val tOut: Double = 5.0,
+    /**
+     * S2 內部記號上限：元件的洞（8 連通塊）裡「真的有畫東西」的（面積 ≥ [holeMinArea] 或最暗 < [holeDarkMax]），其 1 px 內邊界
+     * 扣掉交代過的長度，同式。結果相同的區間 0.52–3.79。
+     */
+    val tIn: Double = 2.0,
+    /** S3 外圈淡色佔比上限（外圈扣人物後，非泡／字／格線、非暗墨暈、[NightReadParams.inkDarkTh] ≤ g < whiteTh）。區間 0.276–0.324。 */
+    val faintMax: Double = 0.3,
+    /** S4 軟門元件的 rough 上限（四捨五入到 1 位再比）。區間 34.9–40.4。 */
+    val roughCap: Double = 40.0,
+    /** S5 人物原輸出（[NightReadInput.charMask]）佔元件 ≥ 此＝人物身上／被人物包住的白，不收。區間 0.578–0.739。 */
+    val charMax: Double = 0.67,
+    /** 遲滯：C3 的格內白判準 ×(1−此)、只靠貼框的候選門檻 ×(1+此)、S4 的強弱貼框遲滯帶 ×(1±此)。 */
+    val hyst: Double = 0.25,
+    /** S2：洞面積 ≥ 此 px 才算「有畫東西」… */
+    val holeMinArea: Int = 8,
+    /** …或洞裡最暗 < 此（壓縮雜點、淡色噪點兩者都不是）。 */
+    val holeDarkMax: Int = 200,
+    /** S1：補洞後中值平滑的核邊長（二值多數決、BORDER_REPLICATE，同 cv2.medianBlur）。 */
+    val median: Int = 5,
+    /** 交代過：字（seg）與格線的方核外擴邊長（7＝外擴 3）。 */
+    val explainDil: Int = 7,
+    /** 交代過的全部再方核外擴的邊長（9＝外擴 4）。 */
+    val nearDil: Int = 9,
+    /** S3 外圈＝dilate(橢圓 (2r+1)²) − 元件。 */
+    val ringR: Int = 7,
+    /** S3 暗墨抗鋸齒暈的方核邊長。 */
+    val halo: Int = 5,
+    /** 逐元件量測窗＝bbox 外擴此 px（夾頁緣）。 */
+    val winPad: Int = 16,
+    /** P1：貼紙的前景描亮邊不蓋掉此時已經 ≤ bg 的像素（留白／格溝／前一顆貼紙塗黑的）。 */
+    val keepDarkStroke: Boolean = true,
+    /**
+     * P2：核心填色裡沒有格框種子的核心塊（[NightReadParams.coreNeckR] 開運算後的 8 連通塊），頁緣（距頁緣 < [edgeBand]）落在該塊
+     * 外擴 coreNeckR＋[edgeReach] 內的部分也當種子（出血格沒有格框線可長）。有格框種子的塊不加：加了測地比的直線切邊會往下移
+     * （c362_017 肩旁階梯小黑楔）。
+     */
+    val edgeSeedFallback: Boolean = true,
+    /** P2 頁緣種子帶寬（px）。 */
+    val edgeBand: Int = 3,
+    /** P2 種子帶只取缺種子核心塊外擴 coreNeckR＋此 內的頁緣。 */
+    val edgeReach: Int = 4,
 )
 
 /**
@@ -525,11 +600,13 @@ enum class StickerMode {
  * 產品的背景填黑三檔：**三檔參數的單一來源**（engine／fork 不再自己拼 stickerMode／門檻）。
  *
  * [apply] 只改貼紙篩選三欄（[NightReadParams.stickerMode]／[NightReadParams.stickerRoughMax]／
- * [NightReadParams.stickerSimpleMinFrac]），並一律關偽泡與亮島填黑；其餘（亮度等）照 base。這正是
- * [NightRead.renderTiers] 的前提——同一個 base 套出來的三檔可以共用一次分析。
+ * [NightReadParams.stickerSimpleMinFrac]）與「更多」新規則的開關（[MoreRuleParams.enabled]），並一律關偽泡與亮島填黑；
+ * 其餘（亮度等）照 base。這正是 [NightRead.renderTiers] 的前提——同一個 base 套出來的三檔可以共用一次分析。
  *
- *   L1＝PLAIN（留白＋封閉泡＋無畫面背景）；L2＝SIMPLE rough ≤ 10 且整頁佔比 ≥ 0.5%；L3＝SIMPLE rough ≤ 20、無面積下限。
- * keep 集合在結構上巢狀（L1 ⊆ L2 ⊆ L3，見 [Sticker.filterPlan]）；值的由來見 docs/DECISIONS.md「背景填黑三檔」。
+ *   L1＝PLAIN（留白＋封閉泡＋無畫面背景）；L2＝SIMPLE rough ≤ 10 且整頁佔比 ≥ 0.5%（產品「標準」）；
+ *   L3＝SIMPLE rough ≤ 20、無面積下限，再加「更多」新規則 A2（產品「更多」，2026-10-02 起）。
+ * keep 集合在結構上巢狀（L1 ⊆ L2 ⊆ L3：[Sticker.filterPlan]，A2 只加不減）；值的由來見 docs/DECISIONS.md「背景填黑三檔」
+ * 與「「更多」新規則 A2」。
  * [key] 是 fork 偏好 `nightread_fill_level` 與夜讀檔名（`.night.l1.webp`…）用的字串。
  */
 enum class NightTier(
@@ -537,17 +614,23 @@ enum class NightTier(
     private val mode: StickerMode,
     private val roughMax: Double,
     private val minFrac: Double,
+    private val moreRule: Boolean,
 ) {
-    L1("l1", StickerMode.PLAIN, 10.0, 0.005),
-    L2("l2", StickerMode.SIMPLE, 10.0, 0.005),
-    L3("l3", StickerMode.SIMPLE, 20.0, 0.0),
+    L1("l1", StickerMode.PLAIN, 10.0, 0.005, false),
+    L2("l2", StickerMode.SIMPLE, 10.0, 0.005, false),
+    /** 產品「更多」（2026-10-02 起）：SIMPLE rough ≤ 20、無面積下限，再加「更多」新規則 A2（[MoreRuleParams]）。 */
+    L3("l3", StickerMode.SIMPLE, 20.0, 0.0, true),
     ;
 
-    /** 這一檔的完整參數：[base] 只換貼紙篩選三欄、關偽泡與亮島填黑。 */
+    /**
+     * 這一檔的完整參數：[base] 只換貼紙篩選三欄與 [MoreRuleParams.enabled]（其餘「更多」參數照 base）、關偽泡與亮島填黑。
+     * 舊的 L3（沒有 A2，研究對照用）＝`L3.apply(base).copy(more = base.more.copy(enabled = false))`。
+     */
     fun apply(base: NightReadParams = NightReadParams()): NightReadParams = base.copy(
         stickerMode = mode,
         stickerRoughMax = roughMax,
         stickerSimpleMinFrac = minFrac,
+        more = base.more.copy(enabled = moreRule),
         pseudoBubbles = false,
         harmonize = false,
     )

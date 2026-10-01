@@ -158,7 +158,7 @@ val charMask = Mask(w, h, BooleanArray(w * h) { a[it] || b[it] })
 
 ## 參數
 
-`NightReadParams` 是一個 data class，裝著這個模組的 122 個參數，外加三組巢狀參數：任意角度格溝 `sep: SeparatorParams`（57 個）、出血格過濾 `bleed: BleedParams`（28 個）與漏泡封縫 `bubbleSeal: BubbleSealParams`（6 個），合計 213 個。預設值就是定案值。巢狀是不得已：平鋪進來建構子會超過 JVM 的 255 個參數槽（`Double` 佔兩槽），類別載入就 `ClassFormatError`。逐項說明見 [`docs/PARAMETERS_zh.md`](../docs/PARAMETERS_zh.md)，那份涵蓋整條管線；沒進 `NightReadParams` 的在模組外面——偵測遮罩的二值化門檻、只用於回報的白面積統計門檻、偽泡生長的參照邊（Kotlin 版固定取長邊），以及純研究開關 `BUBBLE_REQUIRE_CLEAN`。
+`NightReadParams` 是一個 data class，裝著這個模組的 125 個參數，外加四組巢狀參數：任意角度格溝 `sep: SeparatorParams`（57 個）、出血格過濾 `bleed: BleedParams`（28 個）、漏泡封縫 `bubbleSeal: BubbleSealParams`（6 個）與「更多」新規則 A2 `more: MoreRuleParams`（19 個），合計 235 個。預設值就是定案值。巢狀是不得已：平鋪進來建構子會超過 JVM 的 255 個參數槽（`Double` 佔兩槽），類別載入就 `ClassFormatError`。逐項說明見 [`docs/PARAMETERS_zh.md`](../docs/PARAMETERS_zh.md)，那份涵蓋整條管線；沒進 `NightReadParams` 的在模組外面——偵測遮罩的二值化門檻、只用於回報的白面積統計門檻、偽泡生長的參照邊（Kotlin 版固定取長邊），以及純研究開關 `BUBBLE_REQUIRE_CLEAN`。
 
 改它等於改演算法，不是調風格。門檻之間是連動的：分區方案建立在白元件的判斷上，動了前面一段的值，後面每一段都會跟著變。
 
@@ -168,9 +168,13 @@ val charMask = Mask(w, h, BooleanArray(w * h) { a[it] || b[it] })
 |---|---|
 | L1 | `stickerMode = StickerMode.PLAIN, pseudoBubbles = false, harmonize = false` |
 | L2 | `stickerMode = StickerMode.SIMPLE, stickerRoughMax = 10.0, stickerSimpleMinFrac = 0.005, pseudoBubbles = false, harmonize = false` |
-| L3 | `stickerMode = StickerMode.SIMPLE, stickerRoughMax = 20.0, stickerSimpleMinFrac = 0.0, pseudoBubbles = false, harmonize = false` |
+| L3 | `stickerMode = StickerMode.SIMPLE, stickerRoughMax = 20.0, stickerSimpleMinFrac = 0.0, more = MoreRuleParams(enabled = true), pseudoBubbles = false, harmonize = false` |
 
-`TierParityTest` 拿三張 fixture 頁跑三檔，對 `fixtures/baseline/tiers/` 比。
+`NightTier.L1/L2/L3.apply(base)` 產生的就是這三組。產品出兩檔：「標準」＝L2、「更多」＝L3。L3 含「更多」新規則 A2（`MoreRuleParams`；
+`docs/PARAMETERS_zh.md`「「更多」新規則 A2」），只在舊 L3 上加元件；舊 L3＝同一列但 `more` 留預設（關）。
+
+`TierParityTest` 拿三張 fixture 頁跑 L1、L2、舊 L3 與更多（demo02 只跑更多），對 `fixtures/baseline/tiers/` 比；`MoreRuleParityTest`
+逐元件比 A2 的特徵與判定。
 
 另有兩個開關，預設都開、三檔也一律開：`separators`（任意角度格溝／頁邊，`Separators.kt`；研究端 `NIGHTREAD_SEP`）與
 `bleedFilter`（出血格過濾，`Bleed.kt`；研究端 `NIGHTREAD_BLEED`）。格溝在貼紙層之前用留白待遇塗，而且壓過人物遮罩（圖層：
@@ -182,7 +186,7 @@ val charMask = Mask(w, h, BooleanArray(w * h) { a[it] || b[it] })
 
 ## 紅線
 
-**絕不塗到臉、手、白衣、白髮。** 唯一可接受的失敗是「不夠暗」。驗收靠 704 個人工標註的前景框，目前 18 框違規（664 框的 fixture 子集；ch34_006 有一框其實畫在斜格溝上，已修正標註，見 `docs/DECISIONS.md`）。
+**絕不塗到臉、手、白衣、白髮。** 唯一可接受的失敗是「不夠暗」。驗收靠 704 個人工標註的前景框；在 664 框的 fixture 子集上，目前完整管線 21 框違規、產品「標準」（L2）14 框、「更多」（L3＋新規則 A2）20 框（ch34_006 有一框其實畫在斜格溝上，已修正標註；框邊伸進泡裡的幾框修不修待決，見 `docs/DECISIONS.md`）。
 
 要達到這條線必須有人物語意遮罩：純幾何最好也只能到 37 框，而且要付 14 個百分點的亮區代價。
 

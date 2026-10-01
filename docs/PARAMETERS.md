@@ -14,7 +14,8 @@ product fill levels are also selected through the environment (`NIGHTREAD_STICKE
 any-angle separator and the bleed-panel filter each have a switch (`NIGHTREAD_SEP`, `NIGHTREAD_BLEED`, on by
 default), bubble-leak sealing has its radius there (`NIGHTREAD_BUBBLE_SEAL_R`, 1 by default, 0 = off), the two
 bubble-strip fixes each have a switch (`NIGHTREAD_CLEAN_INK_HOLES`, `NIGHTREAD_GUARD_RAW`, on by default, 0 = old
-behaviour), and a few research toggles read it too (`NIGHTREAD_EDGE_INK`, `NIGHTREAD_REQUIRE_CLEAN`,
+behaviour), so does the "More" rule A2 (`NIGHTREAD_MORE`, off by default = the old L3; thresholds `NIGHTREAD_MORE_*`, see
+*"More" rule A2*), and a few research toggles read it too (`NIGHTREAD_EDGE_INK`, `NIGHTREAD_REQUIRE_CLEAN`,
 `NIGHTREAD_TEXT_*`).
 Everything else is edited in the file, so a run reproduces.
 
@@ -498,11 +499,95 @@ the guard but digs black holes into panel backgrounds. The default keeps both on
 
 ### Kotlin: `NightTier` and `renderTiers`
 `NightTier.L1/L2/L3.apply(base)` is the single source of the three parameter sets: it sets `stickerMode`,
-`stickerRoughMax` and `stickerSimpleMinFrac` as above, turns `pseudoBubbles` and `harmonize` off, and keeps
-everything else (brightness and so on) from `base`. `NightRead.renderTiers` renders several levels from one
-analysis and requires exactly this shape: the levels may differ only in those three fields, and every level
-must have pseudo-bubbles and harmonization off, because both make the character-restore mask or the gutter
-depend on the level. `key` (`l1`/`l2`/`l3`) is the string the app stores in its preference and file names.
+`stickerRoughMax` and `stickerSimpleMinFrac` as above, turns the "More" rule on for L3 (`more.enabled = true`, the
+other `more` fields come from `base`; off for L1/L2), turns `pseudoBubbles` and `harmonize` off, and keeps
+everything else (brightness and so on) from `base`. The two product levels are "Standard" = L2 and "More" = L3; the
+old L3 without A2 is `L3.apply(base).copy(more = base.more.copy(enabled = false))`, kept for research comparisons.
+`NightRead.renderTiers` renders several levels from one analysis and requires exactly this shape: the levels may
+differ only in those three fields and `more`, and every level must have pseudo-bubbles and harmonization off,
+because both make the character-restore mask or the gutter depend on the level. A level is skipped (the sink gets
+null) only when its composition key matches the previous level's: keep, promoted components, the keep before A2,
+and A2's two drawing switches (counted only when there are stickers to paint). An A2 level whose keep equals the
+previous one but whose drawing switches differ is still composed; pixel-level dedup is left to the caller.
+`key` (`l1`/`l2`/`l3`) is the string the app stores in its preference and file names.
+
+## "More" rule A2
+
+The product "More" level is L3 plus this rule set (user decision, 2026-10-02; research in
+`research/out/more_and_strip/more/HARDEN.md`, gitignored). It only **adds** to L3's keep, never removes, so
+More ⊇ L3 ⊇ Standard holds for keep by construction. Research side `MORE_RULE` (`NIGHTREAD_MORE`, default 0 = the
+old L3); Kotlin `NightReadParams.more: MoreRuleParams` (`enabled` defaults to false, `NightTier.L3` turns it on).
+The thresholds default to the product values, and each has an environment variable on the research side.
+
+**Candidates**:
+- C1: components the safety net accepted but the level dropped.
+- C2: components the safety net rejected only at the "too little foreground `figlo` / too much text on it `textOnP` /
+  text window `textCov`" gates. This reads the gates the safety net **actually** failed (`gates` in the
+  `sticker_plan` audit; Kotlin `Sticker.Metrics.gates`), not gates reconstructed from the audit numbers.
+- C3: margin-white components on a framed page that count as in-panel white once every in-panel test is relaxed
+  by `MORE_HYST` (thick-core radius 26 → 19.5, core fraction 0.15 → 0.1125, depth 0.25 → 0.1875; or depth ≥ 0.375
+  and enclosed ink ≥ 0.015). The thick core uses the 5×5 chamfer (the same cv2 call as
+  `classify_white_components`). These components are measured with the safety net's metrics first (the gates of the
+  weak-hug path).
+- Excluded: a component that is a candidate only because it hugs a frame (not in-panel white, not margin white,
+  not on a frameless page) needs a hug score ≥ `FRAME_HUG_MIN` × (1 + `MORE_HYST`) = 0.3125.
+
+**Every candidate must pass** (S1–S5), measured in the component's bbox padded by `MORE_WIN_PAD`:
+
+### `MORE_T_OUT` = 5 (`NIGHTREAD_MORE_TOUT`; Kotlin `tOut`)
+S1, free outer boundary. Fill the component's holes, smooth it with a `MORE_MEDIAN` (5×5, binary majority,
+BORDER_REPLICATE) median, take the 1 px inner boundary, and drop what is "explained": the character (snapped), the
+bubbles (before trimming, sealed ones included), bubble outlines (non-white pixels within the
+`BUBBLE_OUTLINE_DIST` ellipse outside a bubble), text (seg, square-dilated by `MORE_EXPLAIN_DIL` = 7) and frame
+lines (same), all square-dilated again by `MORE_NEAR_DIL` (9). With L the remaining length, the score is
+L²/(4π·area), rounded to 2 decimals before the comparison. Across the 7 inputs the accepted set is the same for any
+threshold in 3.69–7.7.
+
+### `MORE_T_IN` = 2 (`NIGHTREAD_MORE_TIN`; Kotlin `tIn`) · `MORE_HOLE_MIN_AREA` = 8 · `MORE_HOLE_DARK_MAX` = 200
+S2, inner marks. Only the component's holes (8-connected) that really contain drawing count: area ≥ 8 px or darkest
+pixel < 200 (compression specks and faint noise do not). Their 1 px inner boundary minus the explained pixels, same
+formula. Stable range 0.52–3.79. Splitting S1 and S2 keeps JPEG jaggies along cloud edges and gradients from
+inflating the boundary (prototype A's single free boundary ranged 9.4–23.5 on the top panel of c362_009 across the 7
+inputs).
+
+### `MORE_FAINT_MAX` = 0.3 (`NIGHTREAD_MORE_FAINT`; Kotlin `faintMax`) · `MORE_RING_R` = 7 · `MORE_HALO` = 5
+S3, faint outer ring. The ring is the component dilated by a 15×15 ellipse minus the component, minus the
+character (snapped); faint pixels are those not in a bubble (outline excluded), text or frame line, not in the 5×5
+halo of dark ink, with `INK_DARK_TH` ≤ g < `WHITE_TH`; the fraction is rounded to 3 decimals. This is what mostly
+keeps cloudy skies grey. The stable range is only 0.276–0.324 (speed lines on c362_008 vs a cloudy sky on
+c362_012) and should be re-swept on new chapters.
+
+### `MORE_ROUGH_CAP` = 40 (`NIGHTREAD_MORE_ROUGH`; Kotlin `roughCap`)
+S4, soft-gate components need rough ≤ 40. A soft-gate component is a C2/C3 component that failed any gate, or a C1
+component in the 0.3–0.5 hug band (`FRAME_HUG_STRONG` × (1 ± `MORE_HYST`)) that trips the text gate of either the
+strong or the weak hug path (hug ≥ 0.3 and text-on > 0.3; or hug < 0.5 and text window > 0.55 and page fraction
+< 2%). Stable range 34.9–40.4.
+
+### `MORE_CHAR_MAX` = 0.67 (`NIGHTREAD_MORE_CHAR`; Kotlin `charMax`)
+S5, a component with this much or more of its area under the raw character mask is not taken: it is white on or
+enclosed by a character, not background behind one. Stable range 0.578–0.739 (the white-bearded old man's panel on
+ch34_006 vs white inside a tornado on c362_013); the phone's character mask is the NCNN build, so print it on a
+device.
+
+### `MORE_HYST` = 0.25 (`NIGHTREAD_MORE_HYST`; Kotlin `hyst`)
+Hysteresis: C3's in-panel tests × (1 − this), the hug-only candidate floor × (1 + this), and S4's strong/weak hug
+band × (1 ± this).
+
+### `MORE_KEEP_DARK` = 1 (`NIGHTREAD_MORE_KEEPDARK`; Kotlin `keepDarkStroke`)
+P1: the sticker's foreground highlight (220) does not overwrite pixels that are already ≤ `BG` at that point
+(gutters, separators, an earlier sticker). A2 levels only.
+
+### `MORE_EDGE_FB` = 1 (`NIGHTREAD_MORE_EDGEFB`; Kotlin `edgeSeedFallback`) · `MORE_EDGE_BAND` = 3 · `MORE_EDGE_REACH` = 4
+P2: for a core-fill block (8-connected after the `CORE_NECK_R` opening) that has no frame seed, the page edge
+(within 3 px) inside that block dilated by `CORE_NECK_R` + 4 also seeds it — bleed panels have no frame line to grow
+from (the speed-line background on c362_008). Blocks that do have a frame seed get nothing extra: adding it moves the
+geodesic-ratio cut and leaves a small black wedge (c362_017, beside a shoulder).
+
+**P3**: on a frameless page the gutter layer uses the keep from before A2 (Kotlin `Sticker.Plan.baseAccept`): newly
+taken components are painted whole as stickers and the margin band stays as it was.
+
+Numbers (47 pages × 7 inputs, guard boxes, nesting, cost) are in [DECISIONS.md](DECISIONS.md),
+"「更多」＝L3＋新規則 A2".
 
 ---
 

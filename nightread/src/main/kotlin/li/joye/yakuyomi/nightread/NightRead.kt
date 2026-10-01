@@ -53,12 +53,15 @@ object NightRead {
      * 只做貼紙篩選與合成。第 k 檔的輸出與 `render(input, tiers[k]).out` **逐位元相同**（SharedTierTest 守）。
      *
      * **串流**：每檔合成完就呼叫 [sink]（檔位索引, 成品），回傳後才算下一檔——呼叫端在 sink 裡編碼、放掉，同一時間只有
-     * 一檔的成品活著（記憶體峰值不高於單檔 [render]）。某檔的 keep 集合與**前一檔**相同時不合成、傳 null：輸出只由
-     * keep 決定（其餘檔位相依的量都由 keep 推出），所以那一檔的成品必定跟前一檔逐位元相同。第 0 檔不會是 null。
+     * 一檔的成品活著（記憶體峰值不高於單檔 [render]）。某檔的**合成鍵**與**前一檔**相同時不合成、傳 null：合成鍵＝keep、
+     * 擢升元件、加「更多」新規則前的 keep（無框頁留白層用）、「更多」的兩項繪製開關與參數（[drawKey]）——成品只由這些與共用
+     * 分析決定，所以那一檔的成品必定跟前一檔逐位元相同。「更多」的檔即使 keep 與前一檔相同，只要繪製開關不同（描亮邊不蓋
+     * 黑、頁緣種子）就照樣合成：成品可能不同。合成了不保證不同（keep 不同、成品逐像素相同的也有），逐像素去重交給呼叫端
+     * （engine 的 NightReadRenderer.streamTiers 對上一個交出的檔逐像素比）。第 0 檔不會是 null。
      *
-     * 前提（不符就 [IllegalArgumentException]）：各檔之間只差 stickerMode／stickerRoughMax／stickerSimpleMinFrac，
-     * 且每檔都關偽泡與亮島填黑——這兩項會讓人物還原遮罩、留白跟檔位有關，要開得先擴充 [composeTier]。
-     * [debug] 照單檔的回呼名；每檔合成前另送一次 `("tier", 檔位索引)`（被跳過的檔不送）。
+     * 前提（不符就 [IllegalArgumentException]）：各檔之間只差 stickerMode／stickerRoughMax／stickerSimpleMinFrac 與
+     * 「更多」新規則（[NightReadParams.more]），且每檔都關偽泡與亮島填黑——這兩項會讓人物還原遮罩、留白跟檔位有關，要開得
+     * 先擴充 [composeTier]。[debug] 照單檔的回呼名；每檔合成前另送一次 `("tier", 檔位索引)`（被跳過的檔不送）。
      */
     fun renderTiers(
         input: NightReadInput,
@@ -74,21 +77,32 @@ object NightRead {
             }
             require(
                 t.copy(stickerMode = p0.stickerMode, stickerRoughMax = p0.stickerRoughMax,
-                    stickerSimpleMinFrac = p0.stickerSimpleMinFrac) == p0,
-            ) { "renderTiers：第 $k 檔與第 0 檔除了貼紙篩選三欄之外還有別的參數不同" }
+                    stickerSimpleMinFrac = p0.stickerSimpleMinFrac, more = p0.more) == p0,
+            ) { "renderTiers：第 $k 檔與第 0 檔除了貼紙篩選三欄與「更多」新規則之外還有別的參數不同" }
         }
         val a = analyze(input, p0, debug, null, shared = tiers.size > 1)
-        var prev: Set<Int>? = null
+        var prev: List<Any?>? = null
         for ((k, t) in tiers.withIndex()) {
             val plan = keepFor(a, t)
-            if (prev != null && plan.accept == prev) {
+            val key = listOf(plan.accept, plan.promoted, plan.baseAccept, drawKey(t, plan))
+            if (prev != null && key == prev) {
                 sink(k, null)
                 continue
             }
-            prev = plan.accept
+            prev = key
             debug?.invoke("tier", k)
             emitTier(a, plan, t, debug, k, sink)
         }
+    }
+
+    /**
+     * 合成階段會讀、各檔可以不同的繪製參數（「更多」的 P1／P2，只在貼紙層用）；沒開或這一檔沒有要塗的貼紙＝null（貼紙層
+     * 根本不跑，兩項不影響成品）。[renderTiers] 的合成鍵用。
+     */
+    private fun drawKey(p: NightReadParams, plan: Sticker.Plan): Any? {
+        val m = p.more
+        if (!m.enabled || plan.accept.isEmpty()) return null
+        return listOf(m.keepDarkStroke, m.edgeSeedFallback, m.edgeBand, m.edgeReach)
     }
 
     /** 合成一檔交給 sink。獨立成函式：回傳後這一檔的成品與中間量就沒有任何參照（下一檔合成時不跟它疊高峰值）。 */
@@ -143,8 +157,13 @@ object NightRead {
         /** 分析用的參數（plain 判準要用；各檔的 plain 參數相同）。 */
         val p: NightReadParams,
         val shared: Boolean,
+        /** 每像素彩度（「更多」C3 的留白候選要量安全網的彩度門）。 */
+        val chroma: Gray?,
     ) {
         val sep: Mask? get() = layer?.sep
+
+        /** 「更多」新規則與檔位無關的部分（逐元件特徵、C3 留白候選）；只有開了 [MoreRuleParams.enabled] 的檔才填。 */
+        val moreCache = Sticker.MoreCache()
 
         /** 「泡附近」只看原本的泡：封縫救回的泡不延伸泡外那一圈（剩餘填色用）。 */
         val bubbleS0: Mask by lazy(LazyThreadSafetyMode.NONE) {
@@ -271,16 +290,23 @@ object NightRead {
             lh = lh, lv = lv, frame = frame, frameless = frameless, wc = wc,
             bubbleUntrim = bubbleRes.bubble, cored = bubbleRes.cored, sealed = sealedOnly, anySealed = anySealed,
             bubble = bubble, bubbleStruct = bubbleStruct, bubbleLocal = bubbleLocal, lost = lost,
-            plan = plan, scene = scene, layer = layer, p = p, shared = shared,
+            plan = plan, scene = scene, layer = layer, p = p, shared = shared, chroma = input.chroma,
         )
     }
 
     /**
      * 貼紙計畫過安全網後再過三檔篩選（[StickerMode]；ALL＝原樣）＝[Sticker.filterPlan] 拆成「plain 集合（與檔位無關、
-     * [Analysis.plain] 算一次）＋依檔位挑」。回傳的 accept＝keep。
+     * [Analysis.plain] 算一次）＋依檔位挑」；開了「更多」新規則（[MoreRuleParams.enabled]）的檔再接 [Sticker.moreSelect]
+     * （只加不減；與檔位無關的特徵存在 [Analysis.moreCache]）。回傳的 accept＝keep、baseAccept＝加新規則前的 keep。
      */
-    internal fun keepFor(a: Analysis, p: NightReadParams): Sticker.Plan =
-        if (p.stickerMode == StickerMode.ALL) a.plan else Sticker.selectKeep(a.plan, a.plain, p)
+    internal fun keepFor(a: Analysis, p: NightReadParams): Sticker.Plan {
+        val base = if (p.stickerMode == StickerMode.ALL) a.plan else Sticker.selectKeep(a.plan, a.plain, p)
+        if (!p.more.enabled) return base
+        return Sticker.moreSelect(
+            a.g, a.chroma, a.wc, a.frameless, a.regions, a.frame, a.charMask, a.charRaw, a.bubbleUntrim, a.seg,
+            a.plan, base, p, a.moreCache,
+        )
+    }
 
     /**
      * 合成一檔：只由 [plan]（keep 與其擢升元件）和 [a] 決定；[p] 只讀繪製參數（各檔相同）。
@@ -294,7 +320,8 @@ object NightRead {
     ): NightReadResult {
         val w = a.g.w
         val h = a.g.h
-        val gutterShow = if (a.frameless) a.wc.gutterIds - plan.accept else a.wc.gutterIds
+        // 無框頁的留白層用加「更多」新規則之前的 keep（新收的元件整顆當貼紙塗、留白帶照舊；研究端 P3）
+        val gutterShow = if (a.frameless) a.wc.gutterIds - plan.baseAccept else a.wc.gutterIds
         val gutter = maskOfIds(a.wc.cc, gutterShow, w, h)
         val bubbleRest = bubbleRest(a, plan, p, debug)
         val out = compose(a, gutter, gutterShow, plan, bubbleRest, p, debug, diag)
@@ -717,18 +744,23 @@ object NightRead {
         val r = (p.strokeObjFrac * min(g.h, g.w)).roundToInt().coerceIn(p.strokeObjMin, p.strokeObjMax)
         val k = Cv.ellipse(2 * r + 1)
         val kc = Cv.ellipse(p.figNoiseClose)
+        // 「更多」新規則的兩項繪製（只在開了的檔）：P1 描亮邊不蓋已經黑的像素、P2 缺格框種子的核心塊拿頁緣當種子
+        val keepDark = p.more.enabled && p.more.keepDarkStroke
+        val edgeFb = p.more.enabled && p.more.edgeSeedFallback
         for (i in accept.sorted()) {
             val win = Sticker.window(g, cc, i, r + 2)
             val sw = win.w
             val sh = win.h
             var fill: Mask
             if (i in coreIds) {
-                val fr = Mask(sw, sh)
+                var fr = Mask(sw, sh)
                 for (y in 0 until sh) {
                     val src = (win.y0 + y) * g.w + win.x0
                     for (x in 0 until sw) fr.data[y * sw + x] = frame.data[src + x]
                 }
-                val seeds = Cv.dilate(fr, Cv.ellipse(p.frameHugDilate * 2 + 1)) and win.comp
+                val kd = Cv.ellipse(p.frameHugDilate * 2 + 1)
+                if (edgeFb) fr = fr.orInPlace(edgeSeedFallback(win, fr, kd, g.w, g.h, p))
+                val seeds = Cv.dilate(fr, kd) and win.comp
                 fill = Regions.broadCoreFill(win.comp, seeds, p.coreNeckR, p.coreRecoverR)
                 if (fill.any()) {
                     // 測地比刪填：背景從格框直直就到（比值≈1），衣料與皮膚要繞過人物墨線（比值高）。
@@ -793,13 +825,51 @@ object NightRead {
                 val dst = (win.y0 + y) * g.w + win.x0
                 for (x in 0 until sw) {
                     val idx = y * sw + x
+                    // P1：此時已經 ≤ bg 的（留白／格溝／前一顆貼紙塗黑的）不描亮邊——要在本元件填色之前看
+                    val wasDark = keepDark && out.data[dst + x] <= p.bg
                     if ((fill.data[idx] || noise.data[idx]) && !protect.data[idx]) {
                         out.data[dst + x] = p.bg.toFloat()
                     }
-                    if (band.data[idx]) out.data[dst + x] = p.strokeObjV.toFloat()
+                    if (band.data[idx] && !wasDark) out.data[dst + x] = p.strokeObjV.toFloat()
                 }
             }
         }
+    }
+
+    /**
+     * 「更多」P2（研究端 `_edge_seed_fallback`）：窗內元件以 coreNeckR 開運算後的 8 連通核心塊裡，碰不到格框種子（[fr] 以 [kd]
+     * 外擴 ∩ 元件）的塊，其外擴 coreNeckR＋[MoreRuleParams.edgeReach] 內的頁緣帶（距頁緣 < [MoreRuleParams.edgeBand]）。
+     * 有格框種子的塊不加。回傳窗內遮罩（可能全空）。
+     */
+    private fun edgeSeedFallback(win: Sticker.Window, fr: Mask, kd: Kernel, pageW: Int, pageH: Int, p: NightReadParams): Mask {
+        val comp = win.comp
+        val sw = comp.w
+        val sh = comp.h
+        val out = Mask(sw, sh)
+        val core = Cv.open(comp, Cv.ellipse(2 * p.coreNeckR + 1))
+        if (!core.any()) return out
+        val cc = Cv.ccStats(core, 8)
+        val sf = Cv.dilate(fr, kd)
+        val has = BooleanArray(cc.n)
+        for (i in sf.data.indices) if (sf.data[i] && comp.data[i] && core.data[i]) has[cc.labels[i]] = true
+        val lack = Mask(sw, sh)
+        var any = false
+        for (i in lack.data.indices) {
+            val l = cc.labels[i]
+            if (l > 0 && !has[l]) { lack.data[i] = true; any = true }
+        }
+        if (!any) return out
+        val reach = Cv.dilate(lack, Cv.ellipse(2 * (p.coreNeckR + p.more.edgeReach) + 1))
+        val b = p.more.edgeBand
+        for (y in 0 until sh) {
+            val py = win.y0 + y
+            val rowEdge = py < b || py >= pageH - b
+            for (x in 0 until sw) {
+                val px = win.x0 + x
+                if ((rowEdge || px < b || px >= pageW - b) && reach.data[y * sw + x]) out.data[y * sw + x] = true
+            }
+        }
+        return out
     }
 
     // ── 合成 ─────────────────────────────────────────────────────────

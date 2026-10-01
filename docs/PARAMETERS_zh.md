@@ -11,6 +11,7 @@
 `NIGHTREAD_STICKER_MINFRAC`、`NIGHTREAD_PB`、`NIGHTREAD_HM`，見「背景填黑三檔」），任意角度格溝與出血格過濾各有
 開關（`NIGHTREAD_SEP`、`NIGHTREAD_BLEED`，預設開），漏泡封縫的半徑也在這裡（`NIGHTREAD_BUBBLE_SEAL_R`，預設 1、0＝關），
 泡內淺條的兩個修法也各有開關（`NIGHTREAD_CLEAN_INK_HOLES`、`NIGHTREAD_GUARD_RAW`，預設開、0＝舊行為），
+產品「更多」的新規則 A2 也是（`NIGHTREAD_MORE`，預設關＝舊 L3；門檻 `NIGHTREAD_MORE_*`，見「「更多」新規則 A2」），
 另有幾個研究開關也讀環境（`NIGHTREAD_EDGE_INK`、`NIGHTREAD_REQUIRE_CLEAN`、`NIGHTREAD_TEXT_*`）。其餘參數要試就直接改檔案，這樣每次跑都可重現。
 
 各值的實測由來、以及被否決的替代方案，見 [DECISIONS.md](DECISIONS.md)。
@@ -382,9 +383,66 @@ L1 目前＝留白＋泡、一顆貼紙都不填。門檻取 0～0.166 之間任
 
 ### Kotlin：`NightTier` 與 `renderTiers`
 `NightTier.L1/L2/L3.apply(base)` 是三檔參數的單一來源：照上面設 `stickerMode`、`stickerRoughMax`、`stickerSimpleMinFrac`，
-關掉 `pseudoBubbles` 與 `harmonize`，其餘（亮度等）照 `base`。`NightRead.renderTiers` 用一次分析出多檔，前提就是這個形狀：
-各檔只能差這三欄，而且每檔都要關偽泡與亮島填黑——這兩項會讓人物還原遮罩或留白跟檔位有關。`key`（`l1`／`l2`／`l3`）是
-app 存偏好與檔名用的字串。
+L3 另外打開「更多」新規則（`more.enabled = true`，其餘 `more` 參數照 `base`；L1／L2 關），關掉 `pseudoBubbles` 與 `harmonize`，
+其餘（亮度等）照 `base`。產品兩檔＝「標準」L2、「更多」L3；舊的 L3（沒有 A2）＝`L3.apply(base).copy(more = base.more.copy(enabled = false))`，
+研究對照用。`NightRead.renderTiers` 用一次分析出多檔，前提就是這個形狀：各檔只能差這三欄與 `more`，而且每檔都要關偽泡與
+亮島填黑——這兩項會讓人物還原遮罩或留白跟檔位有關。某檔的合成鍵（keep、擢升元件、加 A2 前的 keep、A2 的兩項繪製開關——只在
+有貼紙要塗時算）與前一檔相同才不合成、傳 null；A2 的檔 keep 與前一檔相同但繪製開關不同時照樣合成，逐像素去重交給呼叫端。
+`key`（`l1`／`l2`／`l3`）是 app 存偏好與檔名用的字串。
+
+## 「更多」新規則 A2
+
+產品「更多」＝L3 再加這組規則（2026-10-02 使用者拍板；研究 `research/out/more_and_strip/more/HARDEN.md`，gitignore）：在 L3 的
+keep 上**只加不減**，所以更多 ⊇ L3 ⊇ 標準（keep 結構上巢狀）。研究端 `MORE_RULE`（`NIGHTREAD_MORE`，預設 0＝舊 L3）；Kotlin
+`NightReadParams.more: MoreRuleParams`（`enabled` 預設 false，`NightTier.L3` 打開）。其餘門檻預設＝產品值、研究端各有環境變數。
+
+**候選**：
+- C1：安全網收下、檔位沒收的元件。
+- C2：安全網拒收、而且只卡在「前景太少 `figlo`／字壓太多 `textOnP`／文字窗 `textCov`」三道門的元件。看的是安全網**實際**沒過的門
+  （`sticker_plan` 的審計 `gates`；Kotlin `Sticker.Metrics.gates`），不是從審計數字反推。
+- C3：有框頁的頁邊留白元件，把格內白的判準全部放寬 `MORE_HYST` 後算格內白的（厚芯半徑 26 → 19.5、厚芯佔比 0.15 → 0.1125、
+  深入 0.25 → 0.1875；或深入 ≥ 0.375 且包墨 ≥ 0.015）。厚芯用 5×5 chamfer（同 `classify_white_components` 的 cv2 呼叫）。
+  這些元件先量安全網同一套數字（弱貼框那條路的門）。
+- 排除：只靠「貼框」才成為候選的元件（不是格內白、不是留白、不在無框頁），貼框分數要 ≥ `FRAME_HUG_MIN`×(1+`MORE_HYST`)＝0.3125。
+
+**每個候選都要過**（S1–S5），量測窗＝元件 bbox 外擴 `MORE_WIN_PAD`：
+
+### `MORE_T_OUT` = 5（`NIGHTREAD_MORE_TOUT`；Kotlin `tOut`）
+S1 外輪廓自由邊界。元件補洞、`MORE_MEDIAN`（5×5，二值多數決、BORDER_REPLICATE）中值平滑，取 1 px 內邊界，扣掉「交代過」的：
+人物（收邊後）、泡（修剪前、含封縫救回的）、泡框線（泡外 `BUBBLE_OUTLINE_DIST` 橢圓內的非白）、字（seg 方核外擴 `MORE_EXPLAIN_DIL`＝7）、
+格線（同），這些再方核外擴 `MORE_NEAR_DIL`（9）。剩下長度 L，L²/(4π·面積)（四捨五入到 2 位再比）。7 種輸入下結果相同的區間 3.69–7.7。
+
+### `MORE_T_IN` = 2（`NIGHTREAD_MORE_TIN`；Kotlin `tIn`）· `MORE_HOLE_MIN_AREA` = 8 · `MORE_HOLE_DARK_MAX` = 200
+S2 內部記號。元件的洞（8 連通塊）只算「真的有畫東西」的：面積 ≥ 8 px 或最暗 < 200（壓縮雜點、淡色噪點不算）；洞的 1 px 內邊界
+一樣扣交代過的，同式。區間 0.52–3.79。拆成 S1／S2 是為了不讓雲緣、漸層邊的 JPEG 鋸齒把邊界長度拉長（A 原型的單一自由邊界
+在 c362_009 上格 7 種輸入下 9.4–23.5）。
+
+### `MORE_FAINT_MAX` = 0.3（`NIGHTREAD_MORE_FAINT`；Kotlin `faintMax`）· `MORE_RING_R` = 7 · `MORE_HALO` = 5
+S3 外圈淡色。外圈＝元件以 15×15 橢圓膨脹減元件、扣人物（收邊後）；淡色＝不在泡（不含框線）／字／格線、不在暗墨 5×5 暈裡、
+`INK_DARK_TH` ≤ g < `WHITE_TH` 的像素，佔比四捨五入到 3 位。雲天空主要靠這道擋。區間只有 0.276–0.324（c362_008 集中線 vs c362_012 雲天空），
+換章節要再掃。
+
+### `MORE_ROUGH_CAP` = 40（`NIGHTREAD_MORE_ROUGH`；Kotlin `roughCap`）
+S4 軟門元件要 rough ≤ 40。軟門元件＝C2／C3 有沒過的門，或 C1 貼框在 0.3–0.5（`FRAME_HUG_STRONG`×(1±`MORE_HYST`)）這一帶時，強、弱貼框
+兩條路的字量門任一碰到（貼框 ≥ 0.3 且字壓 > 0.3；或貼框 < 0.5 且文字窗 > 0.55 且整頁佔比 < 2%）。區間 34.9–40.4。
+
+### `MORE_CHAR_MAX` = 0.67（`NIGHTREAD_MORE_CHAR`；Kotlin `charMax`）
+S5 人物原輸出佔元件 ≥ 此就不收：那是人物身上或被人物包住的白，不是人物背後的背景。區間 0.578–0.739（ch34_006 白鬍老人格 vs
+c362_013 龍捲風裡的白）；手機的人物遮罩是 NCNN 版，要真機印出來看。
+
+### `MORE_HYST` = 0.25（`NIGHTREAD_MORE_HYST`；Kotlin `hyst`）
+遲滯：C3 的格內白判準 ×(1−此)、只靠貼框的候選門檻 ×(1+此)、S4 的強弱貼框遲滯帶 ×(1±此)。
+
+### `MORE_KEEP_DARK` = 1（`NIGHTREAD_MORE_KEEPDARK`；Kotlin `keepDarkStroke`）
+P1：貼紙的前景描亮邊（220）不蓋掉此時已經 ≤ `BG` 的像素（留白、格溝、前一顆貼紙塗黑的）。只在 A2 的檔。
+
+### `MORE_EDGE_FB` = 1（`NIGHTREAD_MORE_EDGEFB`；Kotlin `edgeSeedFallback`）· `MORE_EDGE_BAND` = 3 · `MORE_EDGE_REACH` = 4
+P2：核心填色裡沒有格框種子的核心塊（`CORE_NECK_R` 開運算後的 8 連通塊），頁緣（距頁緣 < 3 px）落在該塊外擴 `CORE_NECK_R`＋4 內的部分
+也當種子——出血格沒有格框線可長（c362_008 集中線背景）。有格框種子的塊不加：加了測地比的直線切邊會往下移（c362_017 肩旁小黑楔）。
+
+**P3**：無框頁的留白層用加 A2 之前的 keep（Kotlin `Sticker.Plan.baseAccept`）：新收的元件整顆當貼紙塗，留白帶照舊。
+
+數字（47 頁 × 7 種輸入、守護框、巢狀、耗時）見 [DECISIONS.md](DECISIONS.md)「「更多」＝L3＋新規則 A2」。
 
 ---
 

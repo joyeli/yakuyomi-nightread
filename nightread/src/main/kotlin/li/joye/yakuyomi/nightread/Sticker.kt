@@ -130,7 +130,41 @@ internal object Sticker {
         val faintOfF: Double,
         /** 周長²/(4π·面積)（圓＝1；輪廓破碎度）。周長＝[Cv.totalContourLength]（cv2 所有輪廓的閉合折線長）。 */
         val rough: Double,
-    )
+    ) {
+        /** 貼框分數（研究端 audit 的 frameHug；只有有框頁、未列管、夠大的元件才有，未四捨五入）。[plan] 填。 */
+        var hug: Double? = null
+
+        /** 安全網實際沒過的門（空＝收下；研究端 audit 的 gates）。[plan]／[moreGutterCandidates] 填。 */
+        var gates: Set<Gate> = emptySet()
+    }
+
+    /**
+     * 安全網的門（[Metrics.gates]）；[key]＝研究端 audit `gates` 欄的名稱。強貼框那條路：硬門＋[TEXT_ON_P]＋[FAINT_F]＋[HUG_CUT]；
+     * 弱貼框／不貼框那條路：硬門＋[TEXT_COV]＋[SMALL]。硬門＝[FIG_LO]／[FIG_HI]／[THIN]／[CHROMA]／[EATEN_HARD]。
+     */
+    enum class Gate(val key: String) {
+        FIG_LO("figlo"), FIG_HI("fighi"), THIN("thin"), CHROMA("chroma"), EATEN_HARD("eatenH"),
+        TEXT_ON_P("textOnP"), FAINT_F("faintF"), HUG_CUT("hugCut"),
+        TEXT_COV("textCov"), SMALL("small"),
+    }
+
+    /** 兩條路共用的硬門裡沒過的。 */
+    private fun figGates(met: Metrics, p: NightReadParams, out: MutableSet<Gate>) {
+        if (met.figFrac < p.stickerFigMin) out.add(Gate.FIG_LO)
+        if (met.figFrac > p.stickerFigMax) out.add(Gate.FIG_HI)
+        if (met.thinFrac > p.stickerThinMax) out.add(Gate.THIN)
+        if (met.chroma > p.stickerChromaMax) out.add(Gate.CHROMA)
+        if (met.eatenFrac > p.stickerEatenHard) out.add(Gate.EATEN_HARD)
+    }
+
+    /** 弱貼框／不貼框那條路（含無框頁與「更多」C3 的留白候選）沒過的門。 */
+    private fun weakGates(met: Metrics, p: NightReadParams): Set<Gate> {
+        val gates = java.util.EnumSet.noneOf(Gate::class.java)
+        figGates(met, p, gates)
+        if (!(met.textCov <= p.stickerTextMax || met.areaFrac >= 0.02)) gates.add(Gate.TEXT_COV)
+        if (!(met.areaFrac >= p.stickerSmallArea || met.textOn >= p.stickerTextBgMin)) gates.add(Gate.SMALL)
+        return gates
+    }
 
     fun metrics(
         g: Gray,
@@ -208,7 +242,15 @@ internal object Sticker {
      * 貼紙計畫的結果：哪些元件要動（accept），其中哪些走核心填色（promoted），以及每個候選元件的診斷
      * （[metrics]，研究端的 audit；[filterPlan] 的 SIMPLE 檔要看 rough／areaFrac）。
      */
-    class Plan(val accept: Set<Int>, val promoted: Set<Int>, val metrics: Map<Int, Metrics> = emptyMap())
+    class Plan(
+        val accept: Set<Int>,
+        val promoted: Set<Int>,
+        val metrics: Map<Int, Metrics> = emptyMap(),
+        /** 加「更多」新規則（[moreSelect]）之前的 keep：無框頁的留白層用它（新收的元件整顆當貼紙塗、留白帶照舊）。沒開＝[accept]。 */
+        val baseAccept: Set<Int> = accept,
+        /** 「更多」新規則對每個候選的判定（除錯／parity 用；沒開＝空）。 */
+        val more: List<MoreDecision> = emptyList(),
+    )
 
     /**
      * 挑目標元件並過安全網。
@@ -291,29 +333,26 @@ internal object Sticker {
         for (i in cand.sorted()) {
             val met = metrics(g, chromaImg, cc, i, textRects, textRectsOn, p)
             mets[i] = met
+            met.hug = hug[i]
             val hugV = hug[i] ?: 0.0
+            // 安全網＝一組門，全過才收；實際沒過的門記在 met.gates（「更多」新規則的候選看它）
             val ok: Boolean
             if (hugV >= p.frameHugStrong) {
-                ok = met.figFrac in p.stickerFigMin..p.stickerFigMax &&
-                    met.thinFrac <= p.stickerThinMax &&
-                    met.chroma <= p.stickerChromaMax &&
-                    met.eatenFrac <= p.stickerEatenHard &&
-                    met.textOn <= p.promotedTextOnMax &&
-                    met.faintOfF <= p.faintOfFMax &&
-                    // 截斷型的小元件＝被格框切斷的前景物件，不是格背景
-                    !(hugCut[i] == true &&
-                        met.areaFrac < p.stickerSmallArea &&
-                        met.textOn < p.stickerTextBgMin)
+                // 強貼框：四道硬門＋字壓＋淡色門＋截斷型小元件（被格框切斷的前景物件，不是格背景）
+                val gates = java.util.EnumSet.noneOf(Gate::class.java)
+                figGates(met, p, gates)
+                if (met.textOn > p.promotedTextOnMax) gates.add(Gate.TEXT_ON_P)
+                if (met.faintOfF > p.faintOfFMax) gates.add(Gate.FAINT_F)
+                if (hugCut[i] == true && met.areaFrac < p.stickerSmallArea && met.textOn < p.stickerTextBgMin) {
+                    gates.add(Gate.HUG_CUT)
+                }
+                met.gates = gates
+                ok = gates.isEmpty()
                 if (ok) promoted.add(i)
             } else {
-                val textCovOk = met.textCov <= p.stickerTextMax || met.areaFrac >= 0.02
                 val eatenMidOk = met.eatenFrac <= p.stickerEatenMax || met.textOn >= p.stickerTextBgMin
-                ok = met.figFrac in p.stickerFigMin..p.stickerFigMax &&
-                    met.thinFrac <= p.stickerThinMax &&
-                    met.chroma <= p.stickerChromaMax &&
-                    textCovOk &&
-                    met.eatenFrac <= p.stickerEatenHard &&
-                    (met.areaFrac >= p.stickerSmallArea || met.textOn >= p.stickerTextBgMin)
+                met.gates = weakGates(met, p)
+                ok = met.gates.isEmpty()
                 // 中段 eaten 的格內白改走核心填色，不整顆拒；弱貼框擢升元件同理
                 if (ok && !eatenMidOk && !frameless && i in wc.panelIds) promoted.add(i)
                 if (ok && hug.containsKey(i)) promoted.add(i)
@@ -418,6 +457,278 @@ internal object Sticker {
             }
         }
         return Plan(keep, plan.promoted.filterTo(HashSet()) { it in keep }, plan.metrics)
+    }
+
+    // ── 「更多」新規則 A2（[MoreRuleParams]；研究端 more_rule／more_features／more_gutter_candidates）──────────────
+
+    /**
+     * 一個候選元件的 A2 特徵（[moreFeatures]）。[rfs]／[rfi] 已四捨五入到 2 位、[fnc] 到 3 位（研究端拿四捨五入後的值比門檻）；
+     * [lOut]／[lIn]＝外輪廓／內部記號的自由邊界長度（px），[area]＝元件面積，[charf]＝人物原輸出佔比（未四捨五入）。
+     */
+    class MoreFeatures(
+        val rfs: Double, val rfi: Double, val fnc: Double, val charf: Double,
+        val lOut: Int, val lIn: Int, val area: Int,
+    )
+
+    /**
+     * 「更多」新規則對一個候選的判定（除錯／parity；研究端 audit 的 `more` 欄）。[src]：C1＝`acc`、C2＝`rej`、C3＝`gut`。
+     * [skip]：`hug`（只靠貼框、貼框不夠）／`gates`（卡在軟門以外的門）／null（量了特徵）。[why]＝沒過的 S 門（out／in／faint／
+     * rough／char，`+` 串接）。
+     */
+    class MoreDecision(
+        val id: Int, val src: String, val skip: String?, val soft: Boolean,
+        val features: MoreFeatures?, val why: String, val ok: Boolean,
+    )
+
+    /** 「更多」新規則與檔位無關的快取（[NightRead] 的分析持有、各檔共用）。換了 [MoreRuleParams] 就整個重來。 */
+    internal class MoreCache {
+        var params: MoreRuleParams? = null
+        val features = HashMap<Int, MoreFeatures>()
+        var gutter: Map<Int, Metrics>? = null
+    }
+
+    private val MORE_SOFT_GATES = java.util.EnumSet.of(Gate.FIG_LO, Gate.TEXT_ON_P, Gate.TEXT_COV)
+
+    /**
+     * 「更多」新規則 A2：在 [base]（檔位篩選後的 keep）上只加不減。[plan]＝安全網的原始計畫（accept／promoted 未經檔位篩選、
+     * metrics 含每個安全網候選）。回傳的 accept＝keep2、promoted＝（安全網擢升 ∪ 新加且走核心填色的）∩ keep2、
+     * baseAccept＝[base] 的 keep。對應研究端 `more_rule`；判準見 [MoreRuleParams]。
+     *
+     * 與研究端逐位元對齊的細節：貼框、textOn、textCov、整頁佔比、rough 先照研究端審計表的精度四捨五入再比（同 [selectKeep]）；
+     * 特徵全是整數像素計數。[bubble]＝人物修剪前的泡（含封縫救回的）、[charMask]＝收邊＋平滑後、[charRaw]＝模型原輸出。
+     */
+    internal fun moreSelect(
+        g: Gray, chromaImg: Gray?, wc: Regions.WhiteComponents, frameless: Boolean, regions: List<TextRegion>,
+        frame: Mask, charMask: Mask, charRaw: Mask, bubble: Mask, seg: Mask,
+        plan: Plan, base: Plan, p: NightReadParams, cache: MoreCache,
+    ): Plan {
+        val m = p.more
+        if (cache.params != m) {
+            cache.params = m
+            cache.features.clear()
+            cache.gutter = null
+        }
+        val cc = wc.cc
+        val keep = base.accept
+        val cand = java.util.TreeMap<Int, String>()
+        for (i in plan.accept) if (i !in keep) cand[i] = "acc"                     // C1：安全網收下、檔位沒收
+        for (i in plan.metrics.keys) {
+            if (i in plan.accept || i in keep || i in cand) continue
+            cand[i] = "rej"                                                        // C2：安全網拒收（只卡在軟門的才繼續）
+        }
+        val gutMet = HashMap<Int, Metrics>()
+        if (!frameless) {
+            val gut = cache.gutter ?: moreGutterCandidates(g, chromaImg, wc, regions, p).also { cache.gutter = it }
+            for ((i, met) in gut) {
+                if (i in keep || i in cand) continue
+                cand[i] = "gut"                                                    // C3：門檻邊上的頁邊留白
+                gutMet[i] = met
+            }
+        }
+        if (cand.isEmpty()) return Plan(keep, plan.promoted.filterTo(HashSet()) { it in keep }, plan.metrics, keep)
+
+        var expl: Array<Mask>? = null      // fd／bs／bs0：只在有元件要量特徵時才算（整頁三張遮罩，量完就放掉）
+        val hugLo = p.frameHugMin * (1 + m.hyst)
+        val strongLo = p.frameHugStrong * (1 - m.hyst)
+        val strongHi = p.frameHugStrong * (1 + m.hyst)
+        val add = HashSet<Int>()
+        val prom = HashSet(plan.promoted)
+        val decisions = ArrayList<MoreDecision>()
+        for ((i, src) in cand) {
+            val met = gutMet[i] ?: plan.metrics.getValue(i)
+            val hug = met.hug?.let { pyRound(it, 3) }
+            val listed = i in wc.panelIds || i in wc.gutterIds || frameless
+            if (hug != null && !listed && hug < hugLo) {
+                // 只靠貼框才成為候選的：貼框要穩穩過門檻（保守式遲滯）
+                decisions.add(MoreDecision(i, src, "hug", false, null, "", false))
+                continue
+            }
+            val gs: Set<Gate> = if (src == "acc") emptySet() else met.gates
+            if (src == "rej" && gs.isEmpty()) continue
+            if (gs.isNotEmpty() && !MORE_SOFT_GATES.containsAll(gs)) {
+                decisions.add(MoreDecision(i, src, "gates", false, null, "", false))
+                continue
+            }
+            // 強／弱貼框兩條路的軟門不同（強：字壓 > 0.3 拒；弱：文字窗 > 0.55 且小 拒），貼框在 0.4 上下會換路。
+            // 遲滯帶內兩條路的軟門都要看（保守式）：碰到任一道就當「軟門元件」，要過 rough 上限。
+            val soft = gs.isNotEmpty() || run {
+                val h = hug ?: 0.0
+                (h >= strongLo && pyRound(met.textOn, 3) > p.promotedTextOnMax) ||
+                    (h < strongHi && pyRound(met.textCov, 3) > p.stickerTextMax && pyRound(met.areaFrac, 4) < 0.02)
+            }
+            val f = cache.features.getOrPut(i) {
+                val e = expl ?: moreExplained(g, bubble, seg, frame, p).also { expl = it }
+                moreFeatures(g, cc, i, charMask, charRaw, e[0], e[1], e[2], p)
+            }
+            val why = ArrayList<String>(5)
+            if (f.rfs > m.tOut) why.add("out")
+            if (f.rfi > m.tIn) why.add("in")
+            if (f.fnc > m.faintMax) why.add("faint")
+            if (soft && pyRound(met.rough, 1) > m.roughCap) why.add("rough")
+            if (f.charf >= m.charMax) why.add("char")
+            val ok = why.isEmpty()
+            decisions.add(MoreDecision(i, src, null, soft, f, why.joinToString("+"), ok))
+            if (ok) {
+                add.add(i)
+                if (!frameless || met.hug != null || src == "gut") prom.add(i)
+            }
+        }
+        val keep2 = HashSet(keep).apply { addAll(add) }
+        return Plan(keep2, prom.filterTo(HashSet()) { it in keep2 }, plan.metrics, keep, decisions)
+    }
+
+    /**
+     * A2 的「交代過」遮罩（整頁）：[0] fd＝格線方核外擴 explainDil；[1] bs＝泡 ∪ 泡框線（泡外 [NightReadParams.bubbleOutlineDist]
+     * 橢圓內的非白）∪ 字（seg 方核外擴 explainDil）；[2] bs0＝同 bs 但不含泡框線（外圈淡色用）。研究端 `more_explained`。
+     */
+    private fun moreExplained(g: Gray, bubble: Mask, seg: Mask, frame: Mask, p: NightReadParams): Array<Mask> {
+        val k = Cv.rect(p.more.explainDil, p.more.explainDil)
+        val fd = Cv.dilate(frame, k)
+        val segd = Cv.dilate(seg, k)
+        val bubD = Cv.dilate(bubble, Cv.ellipse(2 * p.bubbleOutlineDist + 1))
+        val n = g.data.size
+        val bs = Mask(g.w, g.h)
+        val bs0 = Mask(g.w, g.h)
+        for (i in 0 until n) {
+            val b0 = bubble.data[i] || segd.data[i]
+            bs0.data[i] = b0
+            bs.data[i] = b0 || (bubD.data[i] && g.data[i] < p.whiteTh)
+        }
+        return arrayOf(fd, bs, bs0)
+    }
+
+    /**
+     * 一個候選元件的 A2 特徵（研究端 `more_features`），全在元件 bbox 外擴 [MoreRuleParams.winPad] 的窗內量：
+     * 外輪廓自由邊界（補洞、中值平滑、1 px 內邊界扣交代過的）、內部記號（真的有畫東西的洞的 1 px 內邊界扣交代過的）、
+     * 外圈淡色、人物原輸出佔比。邊界與 cv2 一致：侵蝕視影像外為前景、膨脹不從影像外長、中值 BORDER_REPLICATE。
+     */
+    private fun moreFeatures(
+        g: Gray, cc: CC, id: Int, charMask: Mask, charRaw: Mask, fd: Mask, bs: Mask, bs0: Mask, p: NightReadParams,
+    ): MoreFeatures {
+        val m = p.more
+        val win = window(g, cc, id, m.winPad)
+        val w = win.w
+        val h = win.h
+        val n = w * h
+        val comp = win.comp
+        val sub = win.sub
+        // 交代過的（人物收邊後 ∪ 泡＋框線＋字 ∪ 格線）再方核外擴 nearDil
+        val nearSrc = Mask(w, h)
+        val chW = Mask(w, h)
+        val bs0W = Mask(w, h)
+        val fdW = Mask(w, h)
+        var charRawN = 0
+        for (y in 0 until h) {
+            val src = (win.y0 + y) * g.w + win.x0
+            for (x in 0 until w) {
+                val j = src + x
+                val k = y * w + x
+                chW.data[k] = charMask.data[j]
+                bs0W.data[k] = bs0.data[j]
+                fdW.data[k] = fd.data[j]
+                nearSrc.data[k] = charMask.data[j] || bs.data[j] || fd.data[j]
+                if (comp.data[k] && charRaw.data[j]) charRawN++
+            }
+        }
+        val near = Cv.dilate(nearSrc, Cv.rect(m.nearDil, m.nearDil))
+        val k3 = Cv.rect(3, 3)
+        val holes = Cv.holes(comp)
+        val filled = comp or holes
+        val sm = Cv.medianBlurMask(filled, m.median)
+        val smE = Cv.erode(sm, k3)
+        var lOut = 0
+        for (k in 0 until n) if (sm.data[k] && !smE.data[k] && !near.data[k]) lOut++
+        var lIn = 0
+        if (holes.any()) {
+            val hcc = Cv.ccStats(holes, 8)
+            if (hcc.n > 1) {
+                val mn = IntArray(hcc.n) { 255 }
+                for (k in 0 until n) {
+                    val l = hcc.labels[k]
+                    if (l > 0 && sub.data[k] < mn[l]) mn[l] = sub.data[k]
+                }
+                val real = BooleanArray(hcc.n)
+                for (l in 1 until hcc.n) real[l] = hcc.area[l] >= m.holeMinArea || mn[l] < m.holeDarkMax
+                val hm = Mask(w, h, BooleanArray(n) { real[hcc.labels[it]] })
+                val hmE = Cv.erode(hm, k3)
+                for (k in 0 until n) if (hm.data[k] && !hmE.data[k] && !near.data[k]) lIn++
+            }
+        }
+        val compN = comp.count()
+        val area = max(1, compN)
+        val rfs = pyRound((lOut.toLong() * lOut).toDouble() / (4.0 * PI * area), 2)
+        val rfi = pyRound((lIn.toLong() * lIn).toDouble() / (4.0 * PI * area), 2)
+        // 外圈淡色：外圈扣人物（收邊後）為分母；不在泡（不含框線）／字／格線、不在暗墨暈、淡（inkDarkTh ≤ g < whiteTh）為分子
+        val ring = Cv.dilate(comp, Cv.ellipse(2 * m.ringR + 1))
+        val halo = Cv.dilate(sub.lt(p.inkDarkTh), Cv.rect(m.halo, m.halo))
+        var nc = 0
+        var faint = 0
+        for (k in 0 until n) {
+            if (!ring.data[k] || comp.data[k] || chW.data[k]) continue
+            nc++
+            if (bs0W.data[k] || fdW.data[k] || halo.data[k]) continue
+            val v = sub.data[k]
+            if (v >= p.inkDarkTh && v < p.whiteTh) faint++
+        }
+        val fnc = pyRound(faint.toDouble() / max(1, nc), 3)
+        val charf = charRawN.toDouble() / compN
+        return MoreFeatures(rfs, rfi, fnc, charf, lOut, lIn, area)
+    }
+
+    /**
+     * C3（研究端 `more_gutter_candidates`）：有框頁的頁邊留白元件裡，格內白判準全部放寬 [MoreRuleParams.hyst] 後算格內白的，
+     * 回傳 {元件: 安全網量測（[metrics]＋弱貼框那條路的 [Metrics.gates]）}。與檔位無關（[MoreCache] 存一份）。
+     *
+     * 厚芯用 5×5 chamfer（[Cv.distanceChamfer]，同研究端 `cv2.distanceTransform(DIST_L2, 5)`）：門檻 coreR×(1−hyst)＝19.5，
+     * 附近最近的 chamfer 值差 ≥ 0.08，與研究端（pip 版 cv2 走 IPP）的門檻遮罩相同；[Regions.classifyWhiteComponents] 用的是
+     * 精確歐氏，這裡為了與研究端逐元件對齊不共用。深入帶寬照研究端 `int(round(…))`（四捨六入五成雙）。
+     */
+    internal fun moreGutterCandidates(
+        g: Gray, chromaImg: Gray?, wc: Regions.WhiteComponents, regions: List<TextRegion>, p: NightReadParams,
+    ): Map<Int, Metrics> {
+        val cc = wc.cc
+        val w = g.w
+        val h = g.h
+        val minArea = p.gutterMinAreaFrac * g.data.size
+        val todo = wc.gutterIds.filter { cc.area[it] >= minArea }.sorted()
+        if (todo.isEmpty()) return emptyMap()
+        val lo = 1.0 - p.more.hyst
+        val rCore = p.coreR * lo
+        val deepPx = max(64, Math.rint(p.deepEdgeFrac * min(w, h)).toInt())
+        val dist = Cv.distanceChamfer(g.ge(p.whiteTh), 5)
+        val wanted = BooleanArray(cc.n)
+        for (i in todo) wanted[i] = true
+        val coreCnt = IntArray(cc.n)
+        val deepCnt = IntArray(cc.n)
+        for (y in 0 until h) {
+            val base = y * w
+            val edY = min(y, h - 1 - y)
+            for (x in 0 until w) {
+                val idx = base + x
+                val l = cc.labels[idx]
+                if (l == 0 || !wanted[l]) continue
+                if (dist.data[idx].toDouble() <= rCore) continue
+                coreCnt[l]++
+                if (min(min(x, w - 1 - x), edY) > deepPx) deepCnt[l]++
+            }
+        }
+        val textRects = rectMask(w, h, regions, p.bubblePad)
+        val textRectsOn = rectMask(w, h, regions, p.stickerTextOnPad)
+        val out = LinkedHashMap<Int, Metrics>()
+        for (i in todo) {
+            if (coreCnt[i] == 0) continue
+            val cf = coreCnt[i].toDouble() / max(1, cc.area[i])
+            val cdeep = deepCnt[i].toDouble() / coreCnt[i]
+            var inPanel = cf >= p.inPanelCoreFrac * lo && cdeep >= p.inPanelCoreDeep * lo
+            if (!inPanel && cdeep >= p.deepInkDeep * lo) {
+                inPanel = Regions.holeInkRatio(cc, i, g, p) >= p.deepInkRatio * lo
+            }
+            if (!inPanel) continue
+            val met = metrics(g, chromaImg, cc, i, textRects, textRectsOn, p)
+            met.gates = weakGates(met, p)
+            out[i] = met
+        }
+        return out
     }
 
     /**

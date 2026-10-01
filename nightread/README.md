@@ -196,9 +196,9 @@ without re-deriving them:
 
 ## Parameters
 
-`NightReadParams` is a `data class` holding the module's 122 parameters plus three nested groups — the any-angle
+`NightReadParams` is a `data class` holding the module's 125 parameters plus four nested groups — the any-angle
 separators, `sep: SeparatorParams` (57), the bleed-panel filter, `bleed: BleedParams` (28), and bubble-leak
-sealing, `bubbleSeal: BubbleSealParams` (6) — 213 in all.
+sealing, `bubbleSeal: BubbleSealParams` (6) and the "More" rule A2, `more: MoreRuleParams` (19) — 235 in all.
 Its defaults are the settled values. The nesting is forced: flattened, the constructor would exceed the JVM's
 255 parameter slots (a `Double` takes two) and the class would fail to load with `ClassFormatError`. Per-item documentation is in [`docs/PARAMETERS.md`](../docs/PARAMETERS.md), which covers the whole
 pipeline; the knobs that are not in `NightReadParams` sit outside the module — the detector's binarisation
@@ -220,9 +220,15 @@ parameter sets the caller passes in:
 |---|---|
 | L1 | `stickerMode = StickerMode.PLAIN, pseudoBubbles = false, harmonize = false` |
 | L2 | `stickerMode = StickerMode.SIMPLE, stickerRoughMax = 10.0, stickerSimpleMinFrac = 0.005, pseudoBubbles = false, harmonize = false` |
-| L3 | `stickerMode = StickerMode.SIMPLE, stickerRoughMax = 20.0, stickerSimpleMinFrac = 0.0, pseudoBubbles = false, harmonize = false` |
+| L3 | `stickerMode = StickerMode.SIMPLE, stickerRoughMax = 20.0, stickerSimpleMinFrac = 0.0, more = MoreRuleParams(enabled = true), pseudoBubbles = false, harmonize = false` |
 
-`TierParityTest` runs three fixture pages through all three against `fixtures/baseline/tiers/`.
+`NightTier.L1/L2/L3.apply(base)` builds exactly these. The product ships two of them: "Standard" = L2 and "More" = L3.
+L3 includes the "More" rule A2 (`MoreRuleParams`; *"More" rule A2* in `docs/PARAMETERS.md`), which only adds
+components on top of the old L3; the old L3 is the same row with `more` left at its default (off).
+
+`TierParityTest` runs three fixture pages through L1, L2, the old L3 and More (plus demo02 for More only) against
+`fixtures/baseline/tiers/`; `MoreRuleParityTest` checks A2's per-component features and decisions against the
+research side.
 
 Two more switches default to on, and stay on in all three levels: `separators` (any-angle gutters and page
 margins, `Separators.kt`; `NIGHTREAD_SEP` on the research side) and `bleedFilter` (the bleed-panel filter,
@@ -241,9 +247,10 @@ sealed off and sent down the bubble path again, and what it recovers joins only 
 ## The red line
 
 **Never paint over a face, a hand, a white sleeve or white hair.** The only acceptable failure is "not dark
-enough". Acceptance is 704 hand-annotated foreground boxes; the pipeline currently sits at 18 violations on
-the 664-box fixture subset (one ch34_006 box turned out to be drawn over a slanted gutter and was re-annotated —
-see `docs/DECISIONS.md`).
+enough". Acceptance is 704 hand-annotated foreground boxes; on the 664-box fixture subset the full pipeline
+currently sits at 21 violations, the product "Standard" level (L2) at 14 and "More" (L3 with rule A2) at 20 (one
+ch34_006 box turned out to be drawn over a slanted gutter and was re-annotated; the boxes that reach into bubbles are
+awaiting a decision — see `docs/DECISIONS.md`).
 
 Meeting that line requires a semantic character mask. Pure geometry tops out at 37 violations, and pays 14
 percentage points of light area to get there.
