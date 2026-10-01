@@ -14,9 +14,13 @@ import javax.imageio.ImageIO
  * 三檔共用分析（[NightRead.renderTiers]）的回歸：一次分析、依序出 L1／L2／L3，必須與三次單檔 [NightRead.render]
  * **逐位元相同**；keep 與前一檔相同的那檔傳 null，而且那時單檔的成品也真的與前一檔逐位元相同（去重在建構上正確）。
  *
- * 五頁 fixture 涵蓋兩種留白路徑：ch34_011／demo02／demo06 有框；demo04、demo05 無框（留白跟 keep 有關，走依 gutterShow
- * 快取的那條）。ch34_011 是 L1＝L2≠L3、demo05 三檔 keep 全空（L2、L3 都傳 null）。47 頁（含真機頁）的同一套比對在研究端的
- * scratch harness 跑過，數字見 docs/DECISIONS.md「三檔一次產生」。
+ * 產品三檔跑五頁 fixture：ch34_011／demo02／demo06 有框；demo04、demo05 無框。ch34_011 是 L1＝L2≠L3；demo04、demo05
+ * 三檔 keep 全空（只合成 L1、L2／L3 都傳 null）——所以產品三檔在 fixture 上**走不到**兩條快取路徑，另外兩個 case 專門守：
+ * - [gutterCacheRekeys]：無框頁留白帶依 gutterShow 快取，keep 換了要重算並覆蓋快取、換回來再重算（demo04 跑
+ *   [L1, ALL, L1, L3]，只差 stickerMode）。
+ * - [nonEmptyPlainSet]：產品參數下 47 頁的 L1 keep 全空（plain 集合從沒非空過），放寬 plain 門檻讓 selectKeep 的 plain 分支
+ *   真的被走到（demo06）。
+ * 47 頁（含真機頁）的產品三檔比對在研究端的 scratch harness 跑過，數字見 docs/DECISIONS.md「三檔一次產生」。
  *
  * 暗像素巢狀（低檔 ≤ 40 的像素在高檔也 ≤ 40）**是實測性質、不是結構保證**：keep 巢狀（L1 ⊆ L2 ⊆ L3）由
  * [Sticker.filterPlan] 的寫法保證，但「多填一個元件不會讓別處變亮」要看繪製細節——高一檔新填的元件會畫 220 的前景白
@@ -90,6 +94,64 @@ class SharedTierTest {
     @Test
     fun sharedAnalysisEqualsSeparateRenders() {
         for (page in pages) checkPage(page)
+    }
+
+    /**
+     * 無框頁的留白帶快取換鍵：L1（keep 空）→ ALL（keep 非空、gutterShow 少了被接受的元件 ⇒ 換鍵重算）→ L1（換回、再重算）
+     * → L3。四檔只差貼紙篩選三欄，renderTiers 放行。
+     */
+    @Test
+    fun gutterCacheRekeys() {
+        val l1 = NightTier.L1.apply()
+        val tiers = listOf(l1, l1.copy(stickerMode = StickerMode.ALL), l1, NightTier.L3.apply())
+        val inp = input("demo04")
+        val separate = checkTiers("demo04", inp, tiers)
+        assertTrue("demo04 要是無框頁（留白帶依 keep 變）", separate[0].frameless)
+        assertTrue("demo04 ALL 的 keep 要非空（否則沒換鍵）", separate[1].keep.isNotEmpty())
+        assertTrue("demo04 L1 的 keep 要空", separate[0].keep.isEmpty())
+    }
+
+    /** plain 集合非空：放寬 plain 兩個門檻（> 1 ⇒ 外圈佔比永遠過），三檔都由這組 base 套出。 */
+    @Test
+    fun nonEmptyPlainSet() {
+        val base = NightReadParams(stickerPlainArtMax = 1.01, stickerPlainFaintMax = 1.01)
+        val tiers = NightTier.entries.map { it.apply(base) }
+        val separate = checkTiers("demo06", input("demo06"), tiers)
+        assertTrue("demo06 放寬門檻後 L1 keep 要非空（plain 分支有走到）", separate[0].keep.isNotEmpty())
+    }
+
+    /** 單檔 render 結果裡這裡要比的部分（成品壓成 1 B/px、不留遮罩：demo04 是 7.2 MPx，四檔整份結果會讓測試 JVM OOM）。 */
+    private class Slim(val out: ByteArray, val keep: Set<Int>, val frameless: Boolean)
+
+    private fun bytes(g: Gray) = ByteArray(g.data.size) { g.data[it].toByte() }
+
+    /**
+     * 任意檔位序列的共用＝分開：sink 依序各一次、第 0 檔非 null；非 null 的輸出與單檔 render 逐位元相同；null 只出現在
+     * keep 與前一檔相同時、而且那時單檔成品真的與前一檔逐位元相同。回傳各檔單檔結果給呼叫端加斷言。
+     */
+    private fun checkTiers(page: String, inp: NightReadInput, tiers: List<NightReadParams>): List<Slim> {
+        val separate = tiers.map { t -> NightRead.render(inp, t).let { Slim(bytes(it.out), it.stickerAccept, it.frameless) } }
+        val order = ArrayList<Int>()
+        val shared = arrayOfNulls<ByteArray>(tiers.size)
+        NightRead.renderTiers(inp, tiers) { k, g ->
+            order.add(k)
+            shared[k] = g?.let(::bytes)
+        }
+        assertEquals("$page sink 依檔位順序各呼叫一次", tiers.indices.toList(), order)
+        assertNotNull("$page 第 0 檔不會是 null", shared[0])
+        for (k in tiers.indices) {
+            val keepSameAsPrev = k > 0 && separate[k].keep == separate[k - 1].keep
+            val g = shared[k]
+            if (g == null) {
+                assertTrue("$page/#$k：傳 null 只能是 keep 與前一檔相同", keepSameAsPrev)
+                assertArrayEquals("$page/#$k：keep 相同 ⇒ 單檔成品與前一檔逐位元相同", separate[k - 1].out, separate[k].out)
+            } else {
+                assertTrue("$page/#$k：keep 與前一檔相同卻沒去重", !keepSameAsPrev)
+                assertArrayEquals("$page/#$k：共用分析與單檔 render 逐位元相同", separate[k].out, g)
+            }
+        }
+        println("  $page：檔=${shared.map { if (it == null) "-" else "●" }} keep=${separate.map { it.keep.size }}")
+        return separate
     }
 
     private fun checkPage(page: String) {

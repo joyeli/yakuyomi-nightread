@@ -50,6 +50,14 @@
 - repo：`SharedTierTest`（ch34_011、demo02、demo04、demo05、demo06：共用＝分開逐位元、null ⇔ keep 同前一檔、keep 巢狀、
   暗像素巢狀 0、NightTier 參數＝TierParityTest 那三組、前提不符就拒絕）；既有 Page／Tier／Separators／BubbleSeal parity 測試
   一字未改照過；`:nightread:clean :nightread:test` 40 項全過。
+- 審查補的兩條（同日）：產品三檔在 fixture 上**走不到**兩條快取路徑——demo04、demo05 三檔 keep 全空（只合成 L1），47 頁的 L1
+  keep 也全是 0（plain 集合從沒非空過）。另加兩個 case 專門守：`gutterCacheRekeys`（demo04 跑 [L1, ALL, L1, L3]，只差
+  stickerMode：無框頁留白帶快取換鍵重算、換回再重算）、`nonEmptyPlainSet`（放寬 plain 兩門檻到 1.01，demo06 L1 keep 非空、
+  selectKeep 的 plain 分支有走到）。單檔結果只留成品（1 B/px）與 keep：demo04 是 7.2 MPx，四檔整份結果留著會讓測試 JVM OOM。
+  42 項全過。
+- keep 去重有假陽性：keep 不同、成品卻逐位元相同，47 頁 2 檔（c362_008 的 L2＝L1、ch34_011 的 L3＝L2）。library 不管（keep
+  比對是快速路徑、語意清楚）；engine 的 `renderTiers` 在 sink 包裝裡再比一次像素（px 緩衝裡是上一個交出去那檔的 ARGB，零額外
+  記憶體），相同也交 null，省一次無損編碼與寫檔。寫出檔數 88 → 86／141。
 - 除錯回呼的順序有一處變了：`bubbleRest` 現在在 `separators` 之後（它跟檔位有關、搬進合成段）；`renderTiers` 每檔合成前多送
   `("tier", 檔位索引)`。輸出不受影響。
 
