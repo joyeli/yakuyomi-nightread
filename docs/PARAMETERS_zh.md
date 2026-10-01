@@ -10,8 +10,8 @@
 而不是默默降級。產品端的背景填黑三檔也走環境變數（`NIGHTREAD_STICKER_MODE`、`NIGHTREAD_STICKER_ROUGH`、
 `NIGHTREAD_STICKER_MINFRAC`、`NIGHTREAD_PB`、`NIGHTREAD_HM`，見「背景填黑三檔」），任意角度格溝與出血格過濾各有
 開關（`NIGHTREAD_SEP`、`NIGHTREAD_BLEED`，預設開），漏泡封縫的半徑也在這裡（`NIGHTREAD_BUBBLE_SEAL_R`，預設 1、0＝關），
-另有幾個研究開關也讀環境
-（`NIGHTREAD_EDGE_INK`、`NIGHTREAD_REQUIRE_CLEAN`、`NIGHTREAD_TEXT_*`）。其餘參數要試就直接改檔案，這樣每次跑都可重現。
+泡內淺條的兩個修法也各有開關（`NIGHTREAD_CLEAN_INK_HOLES`、`NIGHTREAD_GUARD_RAW`，預設開、0＝舊行為），
+另有幾個研究開關也讀環境（`NIGHTREAD_EDGE_INK`、`NIGHTREAD_REQUIRE_CLEAN`、`NIGHTREAD_TEXT_*`）。其餘參數要試就直接改檔案，這樣每次跑都可重現。
 
 各值的實測由來、以及被否決的替代方案，見 [DECISIONS.md](DECISIONS.md)。
 
@@ -153,6 +153,18 @@ DBNet 筆畫遮罩的二值化門檻，與引擎的 `segThreshold` 同值。
 臉則有五官和陰影，超過 1%。通過的整顆塗黑、不被人物遮罩扣。
 
 第二道是保險：文字佔比超過 80% 的不是泡。被誤判的白髮、白手區塊幾乎全是字筆畫本身。
+
+### `BUBBLE_CLEAN_INK_HOLES` = 開（`NIGHTREAD_CLEAN_INK_HOLES`；Kotlin `bubbleCleanInkHoles`）
+乾淨泡判準的「洞」只算非紙白（原圖 < `WHITE_TH`）。直排字欄之間沒被核心填色收進泡的紙白小縫不算「泡裡有別的東西」——47 頁判
+不乾淨的 39 顆真泡有 33 顆洞只有紙白，0.5% 門檻對它們像擲硬幣（縮放、JPEG、手機的 NCNN 輸入差一點就翻面），翻成不乾淨就留下
+泡內淺條（見下一條）。代價：沒框線的泡漏進白髮時，髮絲間的白縫也不再算洞（demo04，見 DECISIONS）。設 0 回到舊行為。
+
+### `BUBBLE_GUARD_RAW` = 開（`NIGHTREAD_GUARD_RAW`；Kotlin `bubbleGuardRaw`）· `BUBBLE_CONFIRM_TEXT_IN` = 0.5（Kotlin `bubbleConfirmTextIn`）
+仍判不乾淨的泡，碰到人物那側要讓給人物。舊做法扣的是收邊＋平滑後的人物遮罩，收邊沿泡內紙白長進去，留下一條 4–17 像素的淺條。
+這個開關讓「字確認」的泡只讓開人物模型**原輸出**，收邊長出來的那條被泡的黑蓋過。字確認＝泡（修剪前）的連通塊字佔比 ≤
+`BUBBLE_CLEAN_TEXT_MAX`，而且至少一個字框的完整 bbox 面積有 ≥ 0.5 落在填洞後的塊內。不是字確認的泡照舊。
+
+不做成「泡一律贏」：被誤當成泡的白襯衫（demo04）和手（demo05）會被塗黑。設 0 回到舊行為。
 
 ### `BUBBLE_REST_NEAR` = 20
 泡元件減掉核心的剩餘部分，只在泡外 20 像素內填深。全部取消會吃掉白鬍老人的鬍鬚。

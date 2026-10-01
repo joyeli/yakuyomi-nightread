@@ -222,7 +222,7 @@ parameter sets the caller passes in:
 | L2 | `stickerMode = StickerMode.SIMPLE, stickerRoughMax = 10.0, stickerSimpleMinFrac = 0.005, pseudoBubbles = false, harmonize = false` |
 | L3 | `stickerMode = StickerMode.SIMPLE, stickerRoughMax = 20.0, stickerSimpleMinFrac = 0.0, pseudoBubbles = false, harmonize = false` |
 
-`TierParityTest` runs the two fixture pages through all three against `fixtures/baseline/tiers/`.
+`TierParityTest` runs three fixture pages through all three against `fixtures/baseline/tiers/`.
 
 Two more switches default to on, and stay on in all three levels: `separators` (any-angle gutters and page
 margins, `Separators.kt`; `NIGHTREAD_SEP` on the research side) and `bleedFilter` (the bleed-panel filter,

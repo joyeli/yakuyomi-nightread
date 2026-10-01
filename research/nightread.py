@@ -129,6 +129,10 @@ SAFE_BUBBLE_RATIO = 6.0     # 泡核心面積 ≤ 此×字框長邊²（擋「�
 BUBBLE_CLEAN_WINS = 0.005   # 內部非字墨 < 此的泡＝乾淨容器 ⇒ 整顆塗黑、人物不扣
 BUBBLE_REQUIRE_CLEAN = os.environ.get("NIGHTREAD_REQUIRE_CLEAN", "0") == "1"   # 研究開關：收泡前就要求乾淨容器（非字墨 < BUBBLE_CLEAN_WINS）；預設關、三檔也不用（守護框零影響）
 BUBBLE_CLEAN_TEXT_MAX = 0.8 # 但文字佔比 > 此＝那不是泡（是被誤判的白髮／白手）
+# 泡內淺條（2026-10-02，使用者拍板 e）：泡靠人物那側多一條場景灰＝人物遮罩的收邊／平滑沿泡內紙白長進去、被修剪扣掉。
+BUBBLE_CLEAN_INK_HOLES = os.environ.get("NIGHTREAD_CLEAN_INK_HOLES", "1") == "1"   # d：乾淨泡判準的洞只算非紙白（< WHITE_TH）；字欄間沒收進泡的紙白小縫不再算「泡裡有別的東西」。0＝關＝舊行為
+BUBBLE_GUARD_RAW = os.environ.get("NIGHTREAD_GUARD_RAW", "1") == "1"   # c：仍判不乾淨、但「字確認」的泡，修剪只讓開人物模型原輸出（收邊／平滑長出來的安全邊被泡蓋過）。0＝關＝舊行為
+BUBBLE_CONFIRM_TEXT_IN = 0.5    # 字確認：至少一個字框（完整 bbox 面積）有 ≥ 此落在填洞後的泡內（另要字佔比 ≤ BUBBLE_CLEAN_TEXT_MAX）
 BUBBLE_REST_NEAR = 20       # 泡元件的剩餘部分只在泡外此距離內填深（三檔皆同）
 # 字壓背景閘（2026-09-27）：泡核心（cored 分支的 core）的「非字邊界」（core 的 1px 內邊界、扣掉外擴筆畫 segd_c）要貼著墨線——
 # 真泡由自己的框線圍住 ⇒ 邊界幾乎全落在墨線 ≤ BUBBLE_OUTLINE_DIST px 內（19 頁 105 顆真泡：d=6 實測 ≥ 0.977，d=4 時 ≥ 0.959）；
@@ -566,6 +570,32 @@ def _fill_holes(m):
     mm = np.zeros((ff.shape[0] + 2, ff.shape[1] + 2), np.uint8)
     cv2.floodFill(ff, mm, (0, 0), 2)
     return ff[1:-1, 1:-1] != 2
+
+
+def confirmed_bubbles(bubble, seg, regions):
+    """「字確認的泡」（BUBBLE_GUARD_RAW 用）：泡（人物修剪前）的 8 連通塊裡，字佔比 ≤ BUBBLE_CLEAN_TEXT_MAX（是容器、
+    不是只有字筆畫），而且至少一個字框的完整 bbox 面積有 ≥ BUBBLE_CONFIRM_TEXT_IN 落在填洞後的塊內。不限面積。
+    窗＝塊 bbox 外擴 2（夾頁緣）；字框與窗的交集外的部分不算在裡面。"""
+    confirmed = np.zeros_like(bubble)
+    nb, lb, st, _ = cv2.connectedComponentsWithStats(bubble.astype(np.uint8), 8)
+    for i in range(1, nb):
+        bx_, by_, bw_, bh_ = (int(st[i, 0]), int(st[i, 1]), int(st[i, 2]), int(st[i, 3]))
+        sy = slice(max(0, by_ - 2), by_ + bh_ + 2)
+        sx = slice(max(0, bx_ - 2), bx_ + bw_ + 2)
+        blob = lb[sy, sx] == i
+        if float(seg[sy, sx][blob].mean()) > BUBBLE_CLEAN_TEXT_MAX:
+            continue
+        filled = _fill_holes(blob)
+        for r in regions:
+            x0, y0, x1, y1 = r["bbox"]
+            full = max(0, x1 - x0) * max(0, y1 - y0)
+            cx0, cy0, cx1, cy1 = max(x0, sx.start), max(y0, sy.start), min(x1, sx.stop), min(y1, sy.stop)
+            if full <= 0 or cx1 <= cx0 or cy1 <= cy0:
+                continue
+            if int(filled[cy0 - sy.start:cy1 - sy.start, cx0 - sx.start:cx1 - sx.start].sum()) >= BUBBLE_CONFIRM_TEXT_IN * full:
+                confirmed[sy, sx] |= blob
+                break
+    return confirmed
 
 
 def seal_prep(lab, stats, i, R):
@@ -1945,6 +1975,10 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None, 
         tmp = blob.astype(np.uint8).copy()
         cv2.floodFill(tmp, ffm, (0, 0), 2)
         holes = (tmp != 2) & ~blob & ~segd_c[sy, sx]
+        if BUBBLE_CLEAN_INK_HOLES:
+            # d：洞只算非紙白。字欄之間沒被核心填色收進泡的紙白小縫（47 頁判不乾淨的 39 顆真泡有 33 顆洞只有紙白）
+            # 不再讓泡被判不乾淨；0.5% 門檻對這種泡像擲硬幣（縮放／JPEG 就翻面），手機 NCNN 輸入差一點就翻。
+            holes &= g[sy, sx] < WHITE_TH
         if float(holes.sum()) / a_b >= BUBBLE_CLEAN_WINS:
             continue
         # 保險②：**文字佔比**。真泡是容器，字只佔一部分（實測 8.7–50.7%）；
@@ -1953,6 +1987,12 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None, 
         if float(seg[sy, sx][blob].mean()) > BUBBLE_CLEAN_TEXT_MAX:
             continue
         clean[sy, sx] |= blob
+    if BUBBLE_GUARD_RAW:
+        # c：仍判不乾淨的泡，只要是「字確認」的（是容器、且有字框落在裡面），修剪只讓開人物模型原輸出——
+        # 收邊（snap）／平滑沿泡內紙白長進去的那條安全邊（淺條的 67–100%）一律被泡的黑蓋過；原輸出直接畫到的照舊保護。
+        # 不照字面「泡一律贏」：那會塗到被誤當成泡的白襯衫（demo04 44.5%）、摸頭的手（demo05 88.4%）。
+        confirmed = confirmed_bubbles(bubble, seg, regions)
+        bubble_guard = (char_raw & confirmed) | (charmask & ~confirmed)
     bubble_guard = bubble_guard & ~clean
     # 泡遮罩不得跨進人物：氣泡是**畫在人物之上**的圖層 ⇒ 泡內部不可能是人物；反過來，泡的白
     # 元件常與人物白（髮/衣）連通（泡框有缺口、髮壓在泡邊），整顆填就把髮吃掉

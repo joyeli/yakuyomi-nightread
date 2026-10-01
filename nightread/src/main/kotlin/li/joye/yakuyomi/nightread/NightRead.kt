@@ -201,7 +201,16 @@ object NightRead {
         // ── 圖層優先權：乾淨泡整顆塗黑、泡遮罩不跨進人物 ─────────────────
         var bubble = bubbleRes.bubble
         var bubbleGuard = charMask
-        bubbleGuard = bubbleGuard.andNot(cleanBubbles(g, bubble, seg, p))
+        if (bubble.any()) {
+            val bcc = Cv.ccStats(bubble, 8)
+            val clean = cleanBubbles(g, bcc, seg, p)
+            if (p.bubbleGuardRaw) {
+                // 泡內淺條修法 c：字確認的泡只讓開人物原輸出（收邊／平滑長出來的安全邊被泡蓋過），其餘照舊讓開收邊後的遮罩
+                val confirmed = confirmedBubbles(bcc, g.w, g.h, seg, input.regions, p)
+                if (confirmed.any()) bubbleGuard = (charRaw and confirmed) or charMask.andNot(confirmed)
+            }
+            bubbleGuard = bubbleGuard.andNot(clean)
+        }
         debug?.invoke("cleanBubbles", 0)
         val bubbleBeforeTrim = bubble.copy()
         val removed = bubble and bubbleGuard
@@ -357,12 +366,13 @@ object NightRead {
      * 和陰影、超過 1%。判定為真泡的整顆塗黑、不被人物遮罩扣。
      *
      * 第二道保險是文字佔比：被誤判的白髮、白手區塊幾乎全是字筆畫本身。
+     *
+     * [NightReadParams.bubbleCleanInkHoles]（預設開）時洞只算非紙白：字欄之間沒收進泡的紙白小縫不算「泡裡有別的東西」。
+     * [cc]＝泡遮罩的 8 連通標號（與 [confirmedBubbles] 共用）。
      */
-    private fun cleanBubbles(g: Gray, bubble: Mask, seg: Mask, p: NightReadParams): Mask {
+    private fun cleanBubbles(g: Gray, cc: CC, seg: Mask, p: NightReadParams): Mask {
         val clean = Mask(g.w, g.h)
-        if (!bubble.any()) return clean
         val segD = Cv.dilate(seg, Cv.ellipse(7))
-        val cc = Cv.ccStats(bubble, 8)
         for (i in 1 until cc.n) {
             val a = cc.area[i]
             if (a < 4000) continue
@@ -385,7 +395,9 @@ object NightRead {
                 val src = (by + y) * g.w + bx
                 for (x in 0 until sw) {
                     val idx = y * sw + x
-                    if (holes.data[idx] && !segD.data[src + x]) holeInk++
+                    if (holes.data[idx] && !segD.data[src + x] &&
+                        (!p.bubbleCleanInkHoles || g.data[src + x] < p.whiteTh)
+                    ) holeInk++
                     if (blob.data[idx]) { blobN++; if (seg.data[src + x]) textN++ }
                 }
             }
@@ -397,6 +409,71 @@ object NightRead {
             }
         }
         return clean
+    }
+
+    /**
+     * 「字確認的泡」（[NightReadParams.bubbleGuardRaw] 用；研究端 `confirmed_bubbles`）：泡（人物修剪前）的 8 連通塊裡，
+     * 字佔比 ≤ [NightReadParams.bubbleCleanTextMax]（是容器、不是只有字筆畫），而且至少一個字框的**完整** bbox 面積有
+     * ≥ [NightReadParams.bubbleConfirmTextIn] 落在填洞後的塊內。不限面積。窗＝塊 bbox 外擴 2（夾頁緣），字框只數與窗的交集。
+     *
+     * 先用 bbox 粗篩（交集面積本身就不到門檻的字框不可能過），沒有候選字框的塊不配置窗遮罩、不填洞——小碎塊很多。
+     */
+    private fun confirmedBubbles(cc: CC, w: Int, h: Int, seg: Mask, regions: List<TextRegion>, p: NightReadParams): Mask {
+        val confirmed = Mask(w, h)
+        if (regions.isEmpty()) return confirmed
+        val cand = ArrayList<TextRegion>()
+        for (i in 1 until cc.n) {
+            val bx = max(0, cc.left[i] - 2)
+            val by = max(0, cc.top[i] - 2)
+            val bx1 = min(w, cc.left[i] + cc.width[i] + 2)
+            val by1 = min(h, cc.top[i] + cc.height[i] + 2)
+            cand.clear()
+            for (r in regions) {
+                val full = max(0, r.x1 - r.x0).toLong() * max(0, r.y1 - r.y0)
+                if (full <= 0) continue
+                val ix = min(r.x1, bx1) - max(r.x0, bx)
+                val iy = min(r.y1, by1) - max(r.y0, by)
+                if (ix <= 0 || iy <= 0) continue
+                if (ix.toDouble() * iy < p.bubbleConfirmTextIn * full) continue
+                cand.add(r)
+            }
+            if (cand.isEmpty()) continue
+            val sw = bx1 - bx
+            val sh = by1 - by
+            val blob = Mask(sw, sh)
+            var textN = 0
+            for (y in 0 until sh) {
+                val src = (by + y) * w + bx
+                for (x in 0 until sw) {
+                    if (cc.labels[src + x] == i) {
+                        blob.data[y * sw + x] = true
+                        if (seg.data[src + x]) textN++
+                    }
+                }
+            }
+            if (textN.toDouble() / cc.area[i] > p.bubbleCleanTextMax) continue
+            val holes = Cv.holes(blob)
+            var ok = false
+            for (r in cand) {
+                val full = (r.x1 - r.x0).toLong() * (r.y1 - r.y0)
+                val cx0 = max(r.x0, bx) - bx
+                val cy0 = max(r.y0, by) - by
+                val cx1 = min(r.x1, bx1) - bx
+                val cy1 = min(r.y1, by1) - by
+                var n = 0L
+                for (y in cy0 until cy1) {
+                    val row = y * sw
+                    for (x in cx0 until cx1) if (blob.data[row + x] || holes.data[row + x]) n++
+                }
+                if (n.toDouble() >= p.bubbleConfirmTextIn * full) { ok = true; break }
+            }
+            if (!ok) continue
+            for (y in 0 until sh) {
+                val dst = (by + y) * w + bx
+                for (x in 0 until sw) if (blob.data[y * sw + x]) confirmed.data[dst + x] = true
+            }
+        }
+        return confirmed
     }
 
     // ── 場景曲線 ─────────────────────────────────────────────────────

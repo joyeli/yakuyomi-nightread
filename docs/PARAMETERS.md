@@ -12,8 +12,10 @@ produced by `charmask.py`. If it is missing the run fails outright rather than s
 product fill levels are also selected through the environment (`NIGHTREAD_STICKER_MODE`,
 `NIGHTREAD_STICKER_ROUGH`, `NIGHTREAD_STICKER_MINFRAC`, `NIGHTREAD_PB`, `NIGHTREAD_HM` — see *Fill tiers*), the
 any-angle separator and the bleed-panel filter each have a switch (`NIGHTREAD_SEP`, `NIGHTREAD_BLEED`, on by
-default), bubble-leak sealing has its radius there (`NIGHTREAD_BUBBLE_SEAL_R`, 1 by default, 0 = off), and a few
-research toggles read it too (`NIGHTREAD_EDGE_INK`, `NIGHTREAD_REQUIRE_CLEAN`, `NIGHTREAD_TEXT_*`).
+default), bubble-leak sealing has its radius there (`NIGHTREAD_BUBBLE_SEAL_R`, 1 by default, 0 = off), the two
+bubble-strip fixes each have a switch (`NIGHTREAD_CLEAN_INK_HOLES`, `NIGHTREAD_GUARD_RAW`, on by default, 0 = old
+behaviour), and a few research toggles read it too (`NIGHTREAD_EDGE_INK`, `NIGHTREAD_REQUIRE_CLEAN`,
+`NIGHTREAD_TEXT_*`).
 Everything else is edited in the file, so a run reproduces.
 
 Where each value came from, and which alternatives were measured and rejected, is in
@@ -183,6 +185,26 @@ Anything that passes is filled whole, with nothing subtracted for the character 
 
 The second test is insurance: anything more than 80% text is not a bubble. The white hair and white hands
 that get misclassified are almost entirely made of the text strokes themselves.
+
+### `BUBBLE_CLEAN_INK_HOLES` = on (`NIGHTREAD_CLEAN_INK_HOLES`; Kotlin `bubbleCleanInkHoles`)
+The clean-bubble test counts only non-paper-white pixels (original < `WHITE_TH`) as holes. The small paper-white
+gaps between vertical text columns that the core fill does not take into the bubble no longer count as
+"something else inside the bubble". Across the 47 pages, 33 of the 39 real bubbles judged not clean had
+nothing but paper white in their holes, and the 0.5% threshold was a coin toss for them (scaling, JPEG, or the
+phone's NCNN inputs flip them); a flipped bubble leaves the light strip described next. Cost: when a frameless
+bubble leaks into white hair, the white gaps between the strands no longer count as holes either (demo04, see
+DECISIONS). 0 restores the old behaviour.
+
+### `BUBBLE_GUARD_RAW` = on (`NIGHTREAD_GUARD_RAW`; Kotlin `bubbleGuardRaw`) · `BUBBLE_CONFIRM_TEXT_IN` = 0.5 (Kotlin `bubbleConfirmTextIn`)
+A bubble still judged not clean gives way to the character where the two touch. The old code subtracted the
+character mask after snapping and smoothing; the snap grows along the paper white inside the bubble and leaves
+a light strip 4–17 px wide. With this switch, a text-confirmed bubble gives way only to the character model's
+**raw** output, and the strip grown by the snap is painted with the bubble's black. Text-confirmed means the
+bubble component (before trimming) is at most `BUBBLE_CLEAN_TEXT_MAX` text, and at least one text box has
+≥ 0.5 of its full bbox area inside the hole-filled component. Other bubbles are unchanged.
+
+It is not "the bubble always wins": that paints a white shirt (demo04) and a hand (demo05) that were mistaken
+for bubbles. 0 restores the old behaviour.
 
 ### `BUBBLE_REST_NEAR` = 20
 Whatever is left of the bubble component once the core is removed is filled only within 20 px of the bubble.

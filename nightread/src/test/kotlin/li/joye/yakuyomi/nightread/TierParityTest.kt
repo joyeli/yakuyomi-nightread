@@ -13,13 +13,17 @@ import kotlin.math.abs
  * `fixtures/baseline/tiers/<檔>/<頁>_final.png`（研究端 `nightread.py` 以對應環境變數跑出的成品，見
  * docs/DECISIONS.md「背景填黑三檔」）。容差與 [PageParityTest] 相同；泡／留白遮罩在三檔都不該動，逐像素比對
  * 測試資源裡的 `<頁>_bubble.png`／`<頁>_gutter.png`（研究端實測三檔的遮罩與預設逐像素相同）。任意角度格溝（SEP）不吃
- * 檔位參數，實際塗的那份同樣逐像素比 `<頁>_sep.png`，兩頁都要求非空（ch34_011 有溝有頁邊；demo05 無框、只有右頁緣一條頁邊）
+ * 檔位參數，實際塗的那份同樣逐像素比 `<頁>_sep.png`，三頁都要求非空（ch34_011、demo06 有溝有頁邊；demo05 無框、只有右頁緣一條頁邊）
  * （格溝壓過人物、出血格過濾也在三檔一律開）。
  *
  * 貼紙的 keep 集合（三檔篩選的直接輸出）也比：期望值抄自研究端各檔位 `<頁>_regions.json` 的 sticker 審計
- * `keep` 欄（2026-09-27），以元件 bbox 表示（cv2 與 Kotlin 的元件標號在少數頁差 1，bbox 才穩）。ch34_011 只有
+ * `keep` 欄（2026-09-27；demo06 2026-10-02），以元件 bbox 表示（cv2 與 Kotlin 的元件標號在少數頁差 1，bbox 才穩）。ch34_011 只有
  * bbox [431,131,548,168]（rough 2.3、佔比 0.001）過安全網：PLAIN 落選（外圈碰線稿）、SIMPLE 10／0.005 因面積落選、
  * SIMPLE 20／0 留下；demo05 沒有元件過安全網。
+ *
+ * demo06（2026-10-02 加）守泡內淺條修法 e（[NightReadParams.bubbleCleanInkHoles]＋[NightReadParams.bubbleGuardRaw]）：
+ * ch34_011／demo05 在 e 下四檔 0 px 變化，整頁容差又寬（demo06 的淺條只佔頁面 0.1%），只有逐像素比的泡遮罩抓得到漏移植。
+ * demo06 的泡遮罩 e 與舊行為差 3,634 px；只移植 d 差 3,278、只移植 c 差 3,508（研究端同輸入量），兩半漏哪一半都會不符。
  */
 class TierParityTest {
 
@@ -74,6 +78,11 @@ class TierParityTest {
     private val expectedKeep: Map<String, Map<String, Set<List<Int>>>> = mapOf(
         "ch34_011" to mapOf("L1" to emptySet(), "L2" to emptySet(), "L3" to setOf(listOf(431, 131, 548, 168))),
         "demo05" to mapOf("L1" to emptySet(), "L2" to emptySet(), "L3" to emptySet()),
+        "demo06" to mapOf(
+            "L1" to emptySet(),
+            "L2" to setOf(listOf(127, 141, 388, 478), listOf(1005, 921, 1233, 1169)),
+            "L3" to setOf(listOf(1012, 69, 1233, 451), listOf(127, 141, 388, 478), listOf(1005, 921, 1233, 1169)),
+        ),
     )
 
     @Test
@@ -82,6 +91,10 @@ class TierParityTest {
     /** 無框頁的 SEP 只有右頁緣那條頁邊（PEAK_MAX 800 起；溝對全拒），三檔相同。 */
     @Test
     fun framelessColourPageMatchesTierBaselines() = checkPage("demo05", expectSep = true)
+
+    /** 有框頁、泡內淺條修法 e 有動到的頁（乾淨泡判準 d 與字確認泡 c 都走到）；L1 keep 空、L2⊂L3。 */
+    @Test
+    fun bubbleStripPageMatchesTierBaselines() = checkPage("demo06", expectSep = true)
 
     private fun checkPage(page: String, expectSep: Boolean) {
         val gray = readGray("${page}_gray.png")

@@ -170,7 +170,7 @@ val charMask = Mask(w, h, BooleanArray(w * h) { a[it] || b[it] })
 | L2 | `stickerMode = StickerMode.SIMPLE, stickerRoughMax = 10.0, stickerSimpleMinFrac = 0.005, pseudoBubbles = false, harmonize = false` |
 | L3 | `stickerMode = StickerMode.SIMPLE, stickerRoughMax = 20.0, stickerSimpleMinFrac = 0.0, pseudoBubbles = false, harmonize = false` |
 
-`TierParityTest` 拿兩張 fixture 頁跑三檔，對 `fixtures/baseline/tiers/` 比。
+`TierParityTest` 拿三張 fixture 頁跑三檔，對 `fixtures/baseline/tiers/` 比。
 
 另有兩個開關，預設都開、三檔也一律開：`separators`（任意角度格溝／頁邊，`Separators.kt`；研究端 `NIGHTREAD_SEP`）與
 `bleedFilter`（出血格過濾，`Bleed.kt`；研究端 `NIGHTREAD_BLEED`）。格溝在貼紙層之前用留白待遇塗，而且壓過人物遮罩（圖層：

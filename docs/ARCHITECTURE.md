@@ -278,7 +278,10 @@ Two implementations do work:
 
 - **Fill a clean bubble whole.** A real bubble is an empty container: after hole filling, the non-text ink
   inside it is 0 to 0.3%, while a face mistaken for a bubble has features and shadows and comes in above 1%. A
-  component judged a real bubble is filled black whole and is not subtracted by the character mask.
+  component judged a real bubble is filled black whole and is not subtracted by the character mask. Only
+  non-paper-white pixels count as holes, so the paper-white gaps between text columns do not. A bubble still
+  judged not clean, but with a text box inside it, gives way only to the character model's raw output; the
+  strip that the character mask's snap grows into the bubble is painted black anyway (2026-10-02).
 - **Let only the text itself win.** Once the bubble mask has been subtracted by the character mask, the text
   in that area loses its bright-text-in-a-bubble treatment; the measured contrast is −6, meaning the text is
   darker than its own backing and completely unreadable. The fix is not to let the whole bubble win, but to
@@ -289,7 +292,7 @@ Two implementations do work:
 
 | Metric | Value |
 |---|---|
-| Guard-box violations | 18 / 664 |
+| Guard-box violations | 21 / 664 (standard level; L1–L3 14 / 14 / 18, 2026-10-02) |
 | Light area (share of the output at ≥110) | 38.6% |
 | Pipeline | 1351 lines of Python |
 

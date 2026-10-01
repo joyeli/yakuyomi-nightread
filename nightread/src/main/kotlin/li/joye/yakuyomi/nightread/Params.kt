@@ -80,6 +80,20 @@ data class NightReadParams(
     val safeBubbleRatio: Double = 6.0,
     val bubbleCleanWins: Double = 0.005,
     val bubbleCleanTextMax: Double = 0.8,
+    /**
+     * 泡內淺條修法 d（2026-10-02）：乾淨泡判準 [bubbleCleanWins] 的「洞」只算非紙白（原圖 < [whiteTh]）。字欄之間沒被核心
+     * 填色收進泡的紙白小縫不再算「泡裡有別的東西」——47 頁判不乾淨的 39 顆真泡有 33 顆洞只有紙白，0.5% 門檻對它們像擲硬幣
+     * （縮放／JPEG／手機 NCNN 輸入差一點就翻面）。研究端 `NIGHTREAD_CLEAN_INK_HOLES`；false＝舊行為。見 docs/DECISIONS.md。
+     */
+    val bubbleCleanInkHoles: Boolean = true,
+    /**
+     * 泡內淺條修法 c（2026-10-02）：仍判不乾淨、但「字確認」的泡（字佔比 ≤ [bubbleCleanTextMax]，且至少一個字框的完整
+     * bbox 面積有 ≥ [bubbleConfirmTextIn] 落在填洞後的泡內），人物修剪只讓開人物模型**原輸出**——收邊／平滑沿泡內紙白
+     * 長進去的那條安全邊被泡的黑蓋過。研究端 `NIGHTREAD_GUARD_RAW`；false＝舊行為（修剪看收邊＋平滑後的遮罩）。
+     */
+    val bubbleGuardRaw: Boolean = true,
+    /** 字確認：字框完整 bbox 面積落在填洞後泡內的比例下限（見 [bubbleGuardRaw]）。 */
+    val bubbleConfirmTextIn: Double = 0.5,
     /** 泡元件的剩餘部分只在泡外此距離內填深（三檔皆同）。 */
     val bubbleRestNear: Int = 20,
     /**
@@ -105,7 +119,7 @@ data class NightReadParams(
     /**
      * 漏泡封縫（v3，2026-09-30；研究端 `NIGHTREAD_BUBBLE_SEAL_R` 等）的參數組：字碰到的白元件因「太大」或「列為留白／格內白」
      * 被拒時，只封 ≤ 2R px 的極窄縫，看字所在的白會不會自成一塊；會的話那一塊當成新元件走原本的泡路徑（另加幾道閘）。
-     * 獨立成 data class，與 [sep]／[bleed] 一致、給建構子留餘裕（現在最大的建構子 189／255 槽，平鋪這 6 個也放得下）。
+     * 獨立成 data class，與 [sep]／[bleed] 一致、給建構子留餘裕（2026-09-30 寫這段時最大的建構子 189／255 槽，平鋪這 6 個也放得下；之後又加了泡內淺條的 4 槽）。
      * 見 [BubbleSealParams] 與 docs/DECISIONS.md。
      */
     val bubbleSeal: BubbleSealParams = BubbleSealParams(),
