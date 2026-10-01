@@ -8,6 +8,24 @@
 數學結論（實驗確立、別再挑戰）：漫畫的紙白參與構圖（臉的亮部、留白都用紙白畫）⇒「白→暗」的全域函式無解；
 只有**分區重繪**（氣泡深底亮字、背景填黑、前景白描邊）拿得到夜讀效果——這是 Yakuyomi 的護城河，濾鏡永遠做不到。
 
+## ★★ 產品檔位改兩檔：標準＝L2、更多＝L3，L1 只留給研究（2026-10-01，使用者拍板）
+
+**決定**：fork 產品從三檔改成兩檔——「標準」＝L2（預設）、「更多」＝L3；**L1 從產品拿掉**（懸浮鈕、閱讀設定 chips、設定 › 夜讀
+都只剩兩檔）。函式庫**不改**：`NightTier` 照舊 L1／L2／L3（研究、parity、守護框都還用三檔），`NightRead.renderTiers(input,
+tiers: List<NightReadParams>, …)` 照舊收任意檔位序列。
+
+**為什麼**（47 頁，`research/out/l2_aggressive/REPORT.md`，gitignore）：L1 與 L2 只有 **14 頁**不同，守護框違規相同（**12／664**），
+使用者切 L1↔L2 多數頁看不到差別；L2 與 L3 有 **25 頁**不同，真正有取捨（守護框 12 → 16）的是 L3。三顆鈕裡一顆幾乎是空鈕。
+
+**落地**（下游，函式庫 API 不變）：
+- engine `NightReadRenderer.renderTiers(…, tiers: List<NightTier> = NightTier.entries)`：產品傳 `[L2, L3]`，依給定順序產生；去重語意
+  不變（第一檔一定交圖；之後 keep 相同或逐像素等於上一個交出的檔就交 null）。engine `NightReadTiersTest` 守 `[L2, L3]` 與三檔版的
+  L2／L3 逐像素相同、L3 交 null ⇔ 等於 L2。
+- fork 存法：`<頁>.night.std.webp`（標準，一定寫＝完成標記＋新鮮度）＋`<頁>.night.more.webp`（只在與標準不同時才寫）。已產生的
+  三檔 `.night.l1/l2/l3.webp` 與更早的單檔 `.night.webp` **照讀、不必重產**（標準讀 l2…l1、更多讀 l3…l1，與三檔時代同義；有 std
+  的頁只看兩檔格式）。偏好 `nightread_fill_level` key 與預設不變，只寫 `l2`／`l3`；舊值 `l1`／`protect`→標準、`aggressive`→更多。
+- 下面「三檔一次產生」一節的 app 端存法（l1／l2／l3）是當天的版本，已由這節取代；共用分析＋串流＋keep 去重的函式庫部分照舊有效。
+
 ## ★★ Hough 取峰上限 PEAK_MAX 400 → 800：被截掉的真溝框線救回來（2026-10-01，使用者看圖後同意，含 demo05 右頁緣黑條）
 
 **問題**：任意角度格溝（`nightread_sep.peaks`／Kotlin `Separators.peaks`）每頁只取票數最高的 400 個峰，但 47 頁每頁過門檻的局部
