@@ -21,8 +21,9 @@ object NightRead {
     /**
      * 重繪一頁。
      *
-     * 前半是分析（頁型、白元件、氣泡、貼紙計畫），後半是合成（場景曲線 → 留白（出血格過濾）→ 格溝／頁邊 → 貼紙 →
-     * 氣泡 → 偽泡 → 人頭一致化 → 剩餘填色 → 人物還原（跳過泡與格溝））。
+     * 前半是分析（頁型、白元件、氣泡、貼紙計畫、場景曲線、格溝／頁邊），後半是合成（貼紙三檔篩選 → 留白（出血格過濾）→
+     * 格溝／頁邊 → 貼紙 → 氣泡 → 偽泡 → 人頭一致化 → 剩餘填色 → 人物還原（跳過泡與格溝））。
+     * 內部就是 [analyze] → [keepFor] → [composeTier]，與 [renderTiers] 同一條程式路徑。
      */
     fun render(
         input: NightReadInput,
@@ -41,12 +42,142 @@ object NightRead {
         debug: NightReadDebug?,
         diag: MutableMap<String, Any>?,
     ): NightReadResult {
+        val a = analyze(input, p, debug, diag, shared = false)
+        return composeTier(a, keepFor(a, p), p, debug, diag)
+    }
+
+    /**
+     * 一次分析、依序產出多檔（產品三檔＝`NightTier.entries.map { it.apply(base) }`）。
+     *
+     * 與檔位無關的全部（頁型、白元件、泡與封縫、貼紙計畫、場景曲線、格溝／頁邊、留白帶、人物還原遮罩…）只算一次，每檔
+     * 只做貼紙篩選與合成。第 k 檔的輸出與 `render(input, tiers[k]).out` **逐位元相同**（SharedTierTest 守）。
+     *
+     * **串流**：每檔合成完就呼叫 [sink]（檔位索引, 成品），回傳後才算下一檔——呼叫端在 sink 裡編碼、放掉，同一時間只有
+     * 一檔的成品活著（記憶體峰值不高於單檔 [render]）。某檔的 keep 集合與**前一檔**相同時不合成、傳 null：輸出只由
+     * keep 決定（其餘檔位相依的量都由 keep 推出），所以那一檔的成品必定跟前一檔逐位元相同。第 0 檔不會是 null。
+     *
+     * 前提（不符就 [IllegalArgumentException]）：各檔之間只差 stickerMode／stickerRoughMax／stickerSimpleMinFrac，
+     * 且每檔都關偽泡與亮島填黑——這兩項會讓人物還原遮罩、留白跟檔位有關，要開得先擴充 [composeTier]。
+     * [debug] 照單檔的回呼名；每檔合成前另送一次 `("tier", 檔位索引)`（被跳過的檔不送）。
+     */
+    fun renderTiers(
+        input: NightReadInput,
+        tiers: List<NightReadParams>,
+        debug: NightReadDebug? = null,
+        sink: (Int, Gray?) -> Unit,
+    ) {
+        require(tiers.isNotEmpty()) { "renderTiers：至少要一檔" }
+        val p0 = tiers[0]
+        for ((k, t) in tiers.withIndex()) {
+            require(!t.pseudoBubbles && !t.harmonize) {
+                "renderTiers：第 $k 檔開了偽泡或亮島填黑——這兩項讓人物還原／留白跟檔位有關，不能共用分析"
+            }
+            require(
+                t.copy(stickerMode = p0.stickerMode, stickerRoughMax = p0.stickerRoughMax,
+                    stickerSimpleMinFrac = p0.stickerSimpleMinFrac) == p0,
+            ) { "renderTiers：第 $k 檔與第 0 檔除了貼紙篩選三欄之外還有別的參數不同" }
+        }
+        val a = analyze(input, p0, debug, null, shared = tiers.size > 1)
+        var prev: Set<Int>? = null
+        for ((k, t) in tiers.withIndex()) {
+            val plan = keepFor(a, t)
+            if (prev != null && plan.accept == prev) {
+                sink(k, null)
+                continue
+            }
+            prev = plan.accept
+            debug?.invoke("tier", k)
+            emitTier(a, plan, t, debug, k, sink)
+        }
+    }
+
+    /** 合成一檔交給 sink。獨立成函式：回傳後這一檔的成品與中間量就沒有任何參照（下一檔合成時不跟它疊高峰值）。 */
+    private fun emitTier(
+        a: Analysis, plan: Sticker.Plan, p: NightReadParams, debug: NightReadDebug?, k: Int, sink: (Int, Gray?) -> Unit,
+    ) {
+        sink(k, composeTier(a, plan, p, debug, null).out)
+    }
+
+    /**
+     * 與檔位無關的分析結果（[analyze] 產出、[composeTier] 消費）。各欄**不得被合成階段改寫**——三檔共用同一份。
+     *
+     * [shared]＝要合成不只一檔：這時才快取幾個每檔都要、但單檔用一次就丟的遮罩（泡外 41px 圈、留白帶、人物還原遮罩），
+     * 而且一律存成 1 bit/px（[packBits]），用的時候才展開——共用分析多佔的 heap 只有約 0.4 B/px。人物還原的
+     * alpha（4 B/px 浮點）刻意不留：每檔由快取的遮罩重做高斯（幾十 ms），否則它會疊在後面幾檔的合成峰值上（桌面量最低
+     * heap：留 alpha 比單檔高 2 MB，這樣做持平）。單檔 [render] 不快取。
+     */
+    internal class Analysis(
+        val g: Gray,
+        val seg: Mask,
+        val regions: List<TextRegion>,
+        /** 人物遮罩：模型原輸出（未收邊未平滑）。 */
+        val charRaw: Mask,
+        /** 人物遮罩：收邊＋平滑後。 */
+        val charMask: Mask,
+        val lh: Mask,
+        val lv: Mask,
+        val frame: Mask,
+        val frameless: Boolean,
+        val wc: Regions.WhiteComponents,
+        /** [Regions.buildBubbleMask] 原樣的泡（未經人物修剪、含封縫救回的泡）：剩餘填色扣它。 */
+        val bubbleUntrim: Mask,
+        /** 大泡走核心填色的元件 id（剩餘填色的來源之一）。 */
+        val cored: Set<Int>,
+        /** 漏泡封縫救回的泡（[Regions.BubbleResult.sealed]，未經人物修剪）。 */
+        val sealed: Mask,
+        val anySealed: Boolean,
+        /** 經人物修剪後的泡（含封縫救回的）＝結果的 bubble。 */
+        val bubble: Mask,
+        /** 結構層（格溝、線稿密度否決、出血過濾、貼紙）看的泡＝[bubble] − [sealed]。 */
+        val bubbleStruct: Mask,
+        /** 封縫救回的泡（修剪後）：從泡重繪起才當泡；沒有＝null。 */
+        val bubbleLocal: Mask?,
+        /** 被人物修剪掉的泡區（字頂層用）。 */
+        val lost: Mask,
+        /** 貼紙計畫（安全網之後、三檔篩選之前）。 */
+        val plan: Sticker.Plan,
+        /** 場景曲線＋墨線增亮（sceneFinal）：每檔合成的底，也是人物區最終還原的場景調。 */
+        val scene: FImg,
+        /** 任意角度格溝／頁邊圖層；[NightReadParams.separators] 關＝null。 */
+        val layer: Separators.Layer?,
+        /** 分析用的參數（plain 判準要用；各檔的 plain 參數相同）。 */
+        val p: NightReadParams,
+        val shared: Boolean,
+    ) {
+        val sep: Mask? get() = layer?.sep
+
+        /** 「泡附近」只看原本的泡：封縫救回的泡不延伸泡外那一圈（剩餘填色用）。 */
+        val bubbleS0: Mask by lazy(LazyThreadSafetyMode.NONE) {
+            if (anySealed) bubbleUntrim.andNot(sealed) else bubbleUntrim
+        }
+
+        /** plain 元件集合（與檔位無關；PLAIN／SIMPLE 檔才需要，ALL 不算）。 */
+        val plain: Set<Int> by lazy(LazyThreadSafetyMode.NONE) {
+            Sticker.plainSet(g, wc.cc, plan, charRaw, frame, p)
+        }
+
+        // ── 只在 shared 時用的快取（1 bit/px）──
+        var restNearBits: LongArray? = null
+        /** 留白帶快取的鍵（gutterShow）；帶本身 null＝這組留白元件是空的、不塗。 */
+        var gutterKey: Set<Int>? = null
+        var gutterBandBits: LongArray? = null
+        /** 人物還原遮罩（沒有偽泡時與檔位無關；lazy：第一檔合成到這一步才算）。 */
+        var restoreBits: LongArray? = null
+    }
+
+    /**
+     * 分析：與檔位無關的全部。順序與拆分前的 render 相同（輸出逐位元不變）；[diag] 的 `t_sep`／`sep` 在這裡填。
+     */
+    internal fun analyze(
+        input: NightReadInput,
+        p: NightReadParams,
+        debug: NightReadDebug?,
+        diag: MutableMap<String, Any>?,
+        shared: Boolean,
+    ): Analysis {
         val g = Regions.normalizePaper(input.gray, input.chroma, p)
         val seg = input.seg
-        val w = g.w
-        val h = g.h
 
-        // ── 分析 ──────────────────────────────────────────────────────
         val charRaw = input.charMask
         val charMask = Regions.smoothCharMask(Regions.snapCharMask(charRaw, g, p), g, p)
         debug?.invoke("charRaw", charRaw.count())
@@ -58,37 +189,17 @@ object NightRead {
         debug?.invoke("classifyWhite", 0)
         val excluded = wc.gutterIds + wc.panelIds
         val bubbleRes = Regions.buildBubbleMask(g, input.regions, seg, wc.cc, excluded, p, input.chroma, debug, charRaw)
-        var bubble = bubbleRes.bubble
         // 漏泡封縫救回的泡：只進泡的重繪層（泡重繪、偽泡、亮島、人物還原的泡優先），不進格溝／留白／出血過濾／線稿密度否決／
         // 貼紙／泡外圈這些結構層——泡是它們的隔板或證據，新泡餵進去會改到泡外。
         val sealedOnly = bubbleRes.sealed
         val anySealed = sealedOnly.any()
         debug?.invoke("buildBubble", 0)
-        // 貼紙計畫過安全網後再過三檔篩選（StickerMode；ALL＝原樣）。人物用**原始**遮罩（未收邊）、格線用 lh|lv
-        val plan = Sticker.filterPlan(
-            g, wc.cc, Sticker.plan(g, input.chroma, wc, frameless, input.regions, frame, p), charRaw, frame, p)
-
+        // 貼紙計畫（安全網）；三檔篩選在 keepFor。人物用**原始**遮罩（未收邊）、格線用 lh|lv
+        val plan = Sticker.plan(g, input.chroma, wc, frameless, input.regions, frame, p)
         debug?.invoke("stickerPlan", 0)
-        val gutterShow = if (frameless) wc.gutterIds - plan.accept else wc.gutterIds
-        val gutter = maskOfIds(wc.cc, gutterShow, w, h)
-
-        // ── 剩餘填色：泡元件減掉核心＝泡框外的背景白，沒有別的機制會接手 ──────
-        val restIds = bubbleRes.cored + plan.promoted
-        var bubbleRest: Mask? = null
-        if (restIds.isNotEmpty()) {
-            var rest = maskOfIds(wc.cc, restIds, w, h).andNot(bubble)
-            // 「泡附近」只看原本的泡（封縫救回的泡不延伸泡外那一圈）
-            val bubbleS0 = if (anySealed) bubble.andNot(sealedOnly) else bubble
-            if (bubbleS0.any()) {
-                // 只填泡框周圍這一圈：全部取消會吃掉白鬍老人的鬍鬚
-                rest = rest and Cv.dilate(bubbleS0, Cv.ellipse(p.bubbleRestNear * 2 + 1))
-            }
-            rest = rest.andNot(charMask)          // 背景填色一律讓開人物
-            bubbleRest = rest
-            debug?.invoke("bubbleRest", rest.count())
-        }
 
         // ── 圖層優先權：乾淨泡整顆塗黑、泡遮罩不跨進人物 ─────────────────
+        var bubble = bubbleRes.bubble
         var bubbleGuard = charMask
         bubbleGuard = bubbleGuard.andNot(cleanBubbles(g, bubble, seg, p))
         debug?.invoke("cleanBubbles", 0)
@@ -127,12 +238,100 @@ object NightRead {
             }
         }
         val lost = bubbleBeforeTrim.andNot(bubble)
+        // 封縫救回的泡從泡重繪起才當泡；上面的結構層只看 bubbleStruct
+        val bubbleStruct = if (anySealed) bubble.andNot(sealedOnly) else bubble
+        val bubbleLocal = if (anySealed) bubble and sealedOnly else null
 
-        // ── 合成 ──────────────────────────────────────────────────────
-        val (out, sep) = compose(g, seg, gutter, if (anySealed) bubble.andNot(sealedOnly) else bubble, frameless, wc, plan,
-            frame, lh, lv, input.regions, charMask, charRaw, bubbleRest, lost, p, debug, diag,
-            bubbleLocal = if (anySealed) bubble and sealedOnly else null)
-        return NightReadResult(out, gutter, bubble, charMask, frameless, plan.accept, plan.promoted, sep)
+        // ── 場景曲線（各檔合成的底；人物區最終一律還原成它）──────────────────
+        val scene = sceneFinal(g, seg, p)
+        debug?.invoke("sceneFinal", 0)
+
+        // 任意角度格溝／頁邊（SEP）：先算好——出血過濾要拿它當結構證據，貼紙層之前塗、人物還原跳過它。
+        // 圖層規則在 Separators.build 裡：只扣泡 ⊕7（不扣人物）、單條溝被泡吃過半整條丟、碎塊丟。
+        val tSep = System.nanoTime()
+        val layer = if (p.separators) Separators.build(g, seg, bubbleStruct, frame, p) else null
+        if (diag != null) {
+            diag["t_sep"] = (System.nanoTime() - tSep) / 1e6
+            diag["t_bleed"] = 0.0
+            if (layer != null) diag["sep"] = layer
+        }
+        debug?.invoke("separators", layer?.sep?.count() ?: 0)
+
+        return Analysis(
+            g = g, seg = seg, regions = input.regions, charRaw = charRaw, charMask = charMask,
+            lh = lh, lv = lv, frame = frame, frameless = frameless, wc = wc,
+            bubbleUntrim = bubbleRes.bubble, cored = bubbleRes.cored, sealed = sealedOnly, anySealed = anySealed,
+            bubble = bubble, bubbleStruct = bubbleStruct, bubbleLocal = bubbleLocal, lost = lost,
+            plan = plan, scene = scene, layer = layer, p = p, shared = shared,
+        )
+    }
+
+    /**
+     * 貼紙計畫過安全網後再過三檔篩選（[StickerMode]；ALL＝原樣）＝[Sticker.filterPlan] 拆成「plain 集合（與檔位無關、
+     * [Analysis.plain] 算一次）＋依檔位挑」。回傳的 accept＝keep。
+     */
+    internal fun keepFor(a: Analysis, p: NightReadParams): Sticker.Plan =
+        if (p.stickerMode == StickerMode.ALL) a.plan else Sticker.selectKeep(a.plan, a.plain, p)
+
+    /**
+     * 合成一檔：只由 [plan]（keep 與其擢升元件）和 [a] 決定；[p] 只讀繪製參數（各檔相同）。
+     */
+    internal fun composeTier(
+        a: Analysis,
+        plan: Sticker.Plan,
+        p: NightReadParams,
+        debug: NightReadDebug?,
+        diag: MutableMap<String, Any>?,
+    ): NightReadResult {
+        val w = a.g.w
+        val h = a.g.h
+        val gutterShow = if (a.frameless) a.wc.gutterIds - plan.accept else a.wc.gutterIds
+        val gutter = maskOfIds(a.wc.cc, gutterShow, w, h)
+        val bubbleRest = bubbleRest(a, plan, p, debug)
+        val out = compose(a, gutter, gutterShow, plan, bubbleRest, p, debug, diag)
+        return NightReadResult(out, gutter, a.bubble, a.charMask, a.frameless, plan.accept, plan.promoted, a.sep)
+    }
+
+    /**
+     * 剩餘填色：泡元件減掉核心＝泡框外的背景白，沒有別的機制會接手（null＝沒有來源元件）。
+     * 獨立成函式：中間的 41px 圈遮罩只活在這裡，不陪著整個合成。
+     */
+    private fun bubbleRest(a: Analysis, plan: Sticker.Plan, p: NightReadParams, debug: NightReadDebug?): Mask? {
+        val restIds = a.cored + plan.promoted
+        if (restIds.isEmpty()) return null
+        var rest = maskOfIds(a.wc.cc, restIds, a.g.w, a.g.h).andNot(a.bubbleUntrim)
+        // 只填泡框周圍這一圈：全部取消會吃掉白鬍老人的鬍鬚（「泡附近」只看原本的泡，見 Analysis.bubbleS0）
+        val near = restNear(a, p)
+        if (near != null) rest = rest and near
+        rest = rest.andNot(a.charMask)          // 背景填色一律讓開人物
+        debug?.invoke("bubbleRest", rest.count())
+        return rest
+    }
+
+    /** 泡外 [NightReadParams.bubbleRestNear] 那一圈（泡是空的＝null＝不限）；shared 時快取。 */
+    private fun restNear(a: Analysis, p: NightReadParams): Mask? {
+        a.restNearBits?.let { return unpackBits(it, a.g.w, a.g.h) }
+        val s0 = a.bubbleS0
+        if (!s0.any()) return null
+        val near = Cv.dilate(s0, Cv.ellipse(p.bubbleRestNear * 2 + 1))
+        if (a.shared) a.restNearBits = packBits(near)
+        return near
+    }
+
+    /** 遮罩 → 1 bit/px（共用分析的快取用；逐位元可逆）。 */
+    private fun packBits(m: Mask): LongArray {
+        val d = m.data
+        val bits = LongArray((d.size + 63) ushr 6)
+        for (i in d.indices) if (d[i]) bits[i ushr 6] = bits[i ushr 6] or (1L shl (i and 63))
+        return bits
+    }
+
+    /** [packBits] 的反向：每次都展開成新的 [Mask]（呼叫端可以隨意改它，不會動到快取）。 */
+    private fun unpackBits(bits: LongArray, w: Int, h: Int): Mask {
+        val m = Mask(w, h)
+        val d = m.data
+        for (i in d.indices) d[i] = (bits[i ushr 6] ushr (i and 63)) and 1L != 0L
+        return m
     }
 
     /**
@@ -529,43 +728,173 @@ object NightRead {
     // ── 合成 ─────────────────────────────────────────────────────────
 
     /**
-     * 整頁合成：場景曲線 → 留白填深（出血格過濾）→ 格溝／頁邊 → 貼紙式背景 → 氣泡重繪 → 人物還原。
-     * 回傳（成品頁, 實際塗的格溝／頁邊；SEP 關為 null）。
+     * 整頁合成（一檔）：[Analysis.scene] 的複本 → 留白填深（出血格過濾）→ 格溝／頁邊 → 貼紙式背景 → 氣泡重繪 → 人物還原。
+     * 檔位相依的只有 [gutterIn]（無框頁＝留白元件扣掉 keep）、[plan]、[bubbleRest]；其餘全讀 [a]、不改寫它。
      *
-     * [bubbleLocal]＝漏泡封縫救回的泡（已扣人物修剪）：從泡重繪起（泡重繪、偽泡、亮島、人物還原）才當泡，
-     * 上面的結構層（格溝、線稿密度否決、出血過濾、貼紙）只看 [bubble]。null＝沒有。
+     * 封縫救回的泡（[Analysis.bubbleLocal]）從泡重繪起（泡重繪、偽泡、亮島、人物還原）才當泡，
+     * 上面的結構層（格溝、線稿密度否決、出血過濾、貼紙）只看 [Analysis.bubbleStruct]。
      */
     private fun compose(
-        g: Gray, seg: Mask, gutterIn: Mask, bubble: Mask, frameless: Boolean,
-        wc: Regions.WhiteComponents, plan: Sticker.Plan, frame: Mask, lh: Mask, lv: Mask,
-        regions: List<TextRegion>, charMask: Mask, charRaw: Mask,
-        bubbleRest: Mask?, lost: Mask, p: NightReadParams, debug: NightReadDebug?,
-        diag: MutableMap<String, Any>?,
-        bubbleLocal: Mask? = null,
-    ): Pair<Gray, Mask?> {
+        a: Analysis, gutterIn: Mask, gutterShow: Set<Int>, plan: Sticker.Plan, bubbleRest: Mask?,
+        p: NightReadParams, debug: NightReadDebug?, diag: MutableMap<String, Any>?,
+    ): Gray {
+        val g = a.g
+        val seg = a.seg
         val w = g.w
         val h = g.h
-        val out = sceneFinal(g, seg, p)
-        debug?.invoke("sceneFinal", 0)
-        val sceneKeep = out.copy()              // 人物區最終一律還原成場景調
+        val out = a.scene.copy()
+        val sceneKeep = a.scene                 // 人物區最終一律還原成場景調（各檔共用，不改寫）
+        val sep = a.sep
 
-        // 任意角度格溝／頁邊（SEP）：先算好——出血過濾要拿它當結構證據，貼紙層之前塗、人物還原跳過它。
-        // 圖層規則在 Separators.build 裡：只扣泡 ⊕7（不扣人物）、單條溝被泡吃過半整條丟、碎塊丟。
-        val tSep = System.nanoTime()
-        val layer = if (p.separators) Separators.build(g, seg, bubble, frame, p) else null
-        val sep = layer?.sep
-        if (diag != null) {
-            diag["t_sep"] = (System.nanoTime() - tSep) / 1e6
-            diag["t_bleed"] = 0.0
-            if (layer != null) diag["sep"] = layer
+        // 留白：有框頁只填「深入不超過短邊 12%」的部分；無框頁只填真頁邊帶
+        paintGutterBand(out, a, gutterIn, gutterShow, p, debug, diag)
+
+        // 任意角度格溝／頁邊：同留白待遇（填 BG、邊界描亮），在貼紙層之前
+        if (sep != null && sep.any()) paintGutter(out, g, sep, p)
+
+        if (plan.accept.isNotEmpty()) {
+            paintSticker(out, g, a.wc.cc, plan.accept, a.bubbleStruct, plan.promoted, a.frame, seg, a.charMask, p)
         }
-        debug?.invoke("separators", sep?.count() ?: 0)
+        debug?.invoke("paintSticker", 0)
+        // 封縫救回的泡從這裡以後（泡重繪、偽泡、亮島、人物還原）才當泡；上面的結構層只看 bubbleStruct
+        val bubAll = if (a.bubbleLocal == null) a.bubbleStruct else a.bubbleStruct or a.bubbleLocal
+        paintBubbles(out, g, bubAll, seg, p)
+        debug?.invoke("paintBubbles", 0)
+        // 偽泡：開口泡／字壓背景／字壓留白救回（三檔一律關：偽泡沿字往背景長，是撕裂黑塊來源之一，守護框 +2）
+        val pb = if (p.pseudoBubbles) buildPseudoBubbles(g, a.regions, bubAll, seg, p) else null
+        debug?.invoke("pseudoBubble", pb?.count() ?: 0)
+        if (pb != null && pb.any()) paintBubbles(out, g, pb, seg, p)
+        // 亮島填黑（三檔一律關：會把格內背景挖成黑塊；守護框對它零敏感）
+        if (p.harmonize) harmonize(out, g, if (pb != null) bubAll or pb or gutterIn else bubAll or gutterIn, p)
+        debug?.invoke("harmonize", 0)
+
+        // 字永遠在最上層：被人物扣掉的泡區裡，字筆畫及其貼身帶維持深底亮字
+        val lost = a.lost
+        if (lost.any()) {
+            val txt = Cv.dilate(seg and lost, Cv.rect(p.textTopPad * 2 + 1, p.textTopPad * 2 + 1)) and lost
+            if (txt.any()) {
+                val al = inkAlpha(g, p.textGamma)
+                for (i in al.indices) al[i] = (((al[i] - p.textKnee) / (1.0 - p.textKnee)).coerceIn(0.0, 1.0)).toFloat()
+                for (i in txt.data.indices) {
+                    if (!txt.data[i]) continue
+                    out.data[i] = p.bg.toFloat()
+                    out.data[i] = max(out.data[i], p.bg + al[i] * (p.ink - p.bg))
+                }
+            }
+        }
+
+        if (bubbleRest != null && bubbleRest.any()) {
+            for (i in bubbleRest.data.indices) if (bubbleRest.data[i]) out.data[i] = p.bg.toFloat()
+            val rb = Cv.dilate(bubbleRest, Cv.rect(p.stroke * 2 + 1, p.stroke * 2 + 1)).andNot(bubbleRest)
+            val a2 = inkAlpha(g, 1.6)
+            for (i in rb.data.indices) {
+                if (rb.data[i]) out.data[i] = max(out.data[i], p.bg + a2[i] * (p.edgeInk - p.bg))
+            }
+        }
+
+        // ── 人物還原（放最後 ⇒ 任何新填色機制自動受保護）──────────────────
+        val alpha = if (pb != null && pb.any()) {
+            var restore = restoreBase(a, bubAll, p)
+            // 收邊生長出來的邊緣不得壓過偽泡：那些像素是加工長出來的，屬於畫面不屬於人物
+            restore = restore.andNot(pb.andNot(a.charRaw))
+            val textOnChar = pb and a.charMask and seg
+            if (textOnChar.any()) {
+                val kb = Cv.ellipse(p.textBackingR * 2 + 1)
+                restore = restore.andNot(Cv.dilate(textOnChar, kb))
+            }
+            debug?.invoke("restore", restore.count())
+            restoreBlur(restore, p)
+        } else {
+            restoreAlphaNoPseudo(a, bubAll, p, debug)
+        }
+        for (i in out.data.indices) {
+            val al = alpha.data[i]
+            out.data[i] = out.data[i] * (1f - al) + sceneKeep.data[i] * al
+        }
+        return Gray(w, h, IntArray(w * h) { out.data[it].roundToInt().coerceIn(0, 255) })
+    }
+
+    /**
+     * 人物還原遮罩裡與檔位無關的部分：人物（收邊後）扣掉泡（真泡畫在人物之上）、格溝／頁邊（溝也贏過人物：溝是畫面的
+     * 外面，人物遮罩經收邊＋平滑會越過格框線長進溝 7–15px ⇒ 溝邊灰帶、窄溝被吃過半整條不塗；框線被出血人物打斷的地方
+     * 本來就不成溝，Separators 不收）、字頂層。偽泡那兩項由 [compose] 另扣（集合差，順序不影響結果）。
+     */
+    private fun restoreBase(a: Analysis, bubAll: Mask, p: NightReadParams): Mask {
+        var restore = a.charMask.copy()
+        restore = restore.andNot(bubAll)
+        val sep = a.sep
+        if (sep != null) restore = restore.andNot(sep)
+        if (a.lost.any()) {
+            val kt = Cv.ellipse(p.textTopPad * 2 + 1)
+            restore = restore.andNot(Cv.dilate(a.seg and a.lost, kt) and a.lost)
+        }
+        return restore
+    }
+
+    /** 邊界抗鋸齒：遮罩是二值又是放大來的，用小半徑高斯軟化成 alpha 混合。 */
+    private fun restoreBlur(restore: Mask, p: NightReadParams): FImg =
+        Cv.gaussianBlur(FImg(restore.w, restore.h, FloatArray(restore.data.size) { if (restore.data[it]) 1f else 0f }),
+            p.edgeFeather)
+
+    /**
+     * 沒有偽泡時的人物還原 alpha：遮罩與檔位無關，shared 時第一檔算完就以 1 bit/px 留給後面的檔（lazy）；
+     * 高斯每檔重做（見 [Analysis]：留浮點 alpha 會墊高後面幾檔的峰值）。
+     */
+    private fun restoreAlphaNoPseudo(a: Analysis, bubAll: Mask, p: NightReadParams, debug: NightReadDebug?): FImg {
+        val cached = a.restoreBits
+        val restore = if (cached != null) {
+            unpackBits(cached, a.g.w, a.g.h)
+        } else {
+            restoreBase(a, bubAll, p).also { if (a.shared) a.restoreBits = packBits(it) }
+        }
+        debug?.invoke("restore", restore.count())
+        return restoreBlur(restore, p)
+    }
+
+    /** 塗留白帶（獨立成函式：帶遮罩只活在這裡，不陪著後面的貼紙／泡／人物還原）。 */
+    private fun paintGutterBand(
+        out: FImg, a: Analysis, gutterIn: Mask, gutterShow: Set<Int>, p: NightReadParams,
+        debug: NightReadDebug?, diag: MutableMap<String, Any>?,
+    ) {
+        val band = gutterBand(a, gutterIn, gutterShow, p, debug, diag)
+        if (band != null && band.any()) paintGutter(out, a.g, band, p)
+    }
+
+    /**
+     * 要塗的留白帶（[gutterIn] 空＝null）：有框頁沿格框線切開、深度 ≤ 短邊 12%；無框頁只留真頁邊帶；兩條都過線稿密度否決
+     * 與出血格過濾。只由 [gutterShow] 決定（其餘全是分析結果），shared 時依它快取一份（有框頁三檔同一份）。
+     */
+    private fun gutterBand(
+        a: Analysis, gutterIn: Mask, gutterShow: Set<Int>, p: NightReadParams,
+        debug: NightReadDebug?, diag: MutableMap<String, Any>?,
+    ): Mask? {
+        if (a.shared && a.gutterKey == gutterShow) {
+            val bits = a.gutterBandBits ?: return null
+            val cached = unpackBits(bits, a.g.w, a.g.h)
+            if (!a.frameless) debug?.invoke("gutterBand", cached.count())
+            return cached
+        }
+        val band = computeGutterBand(a, gutterIn, p, debug, diag)
+        if (a.shared) {
+            a.gutterKey = gutterShow
+            a.gutterBandBits = band?.let { packBits(it) }
+        }
+        return band
+    }
+
+    private fun computeGutterBand(
+        a: Analysis, gutterIn: Mask, p: NightReadParams, debug: NightReadDebug?, diag: MutableMap<String, Any>?,
+    ): Mask? {
+        if (!gutterIn.any()) return null
+        val g = a.g
+        val w = g.w
+        val h = g.h
 
         // 出血格過濾：只拿掉留白帶裡的畫面塊、不新增（SEP 之後照塗，拿不掉溝與頁邊）
         fun bleed(band: Mask, band0: Mask): Mask {
             if (!p.bleedFilter) return band
             val t0 = System.nanoTime()
-            val res = Bleed.filter(band, band0, g, frame, seg, bubble, charMask, regions, gutterIn, layer, p)
+            val res = Bleed.filter(band, band0, g, a.frame, a.seg, a.bubbleStruct, a.charMask, a.regions, gutterIn, a.layer, p)
             if (diag != null) {
                 diag["t_bleed"] = (diag["t_bleed"] as Double) + (System.nanoTime() - t0) / 1e6
                 diag["band0"] = band0
@@ -576,108 +905,32 @@ object NightRead {
             return res.band
         }
 
-        // 留白：有框頁只填「深入不超過短邊 12%」的部分；無框頁只填真頁邊帶
-        if (gutterIn.any()) {
-            val bd = borderDistance(g, frame, includeFrame = !frameless)
-            if (frameless) {
-                val cc = Cv.ccStats(gutterIn, 8)
-                val lim = p.framelessMarginDepth * min(h, w)
-                val maxDepth = FloatArray(cc.n)
-                for (i in gutterIn.data.indices) {
-                    val l = cc.labels[i]
-                    if (l > 0 && bd[i] > maxDepth[l]) maxDepth[l] = bd[i]
-                }
-                val keep = Mask(w, h)
-                for (i in keep.data.indices) {
-                    val l = cc.labels[i]
-                    if (l > 0 && maxDepth[l] <= lim) keep.data[i] = true
-                }
-                // 有線稿的白不是留白；出血格畫面拿掉
-                val keep2 = bleed(Texture.veto(keep, g, frame, seg, bubble, p), keep)
-                if (keep2.any()) paintGutter(out, g, keep2, p)
-            } else {
-                val lim = p.safeGutterDepth * min(h, w)
-                // 格內背景與頁邊留白在像素層連通 ⇒ 先沿格框線切開，只留真的留白
-                val cut = Regions.gutterFrameCut(gutterIn, lh, lv, p)
-                val band = Mask(w, h)
-                for (i in band.data.indices) band.data[i] = cut.data[i] && bd[i] <= lim
-                // 有線稿的白不是留白；出血格畫面拿掉
-                val band2 = bleed(Texture.veto(band, g, frame, seg, bubble, p), band)
-                debug?.invoke("gutterBand", band2.count())
-                if (band2.any()) paintGutter(out, g, band2, p)
+        val bd = borderDistance(g, a.frame, includeFrame = !a.frameless)
+        if (a.frameless) {
+            val cc = Cv.ccStats(gutterIn, 8)
+            val lim = p.framelessMarginDepth * min(h, w)
+            val maxDepth = FloatArray(cc.n)
+            for (i in gutterIn.data.indices) {
+                val l = cc.labels[i]
+                if (l > 0 && bd[i] > maxDepth[l]) maxDepth[l] = bd[i]
             }
-        }
-
-        // 任意角度格溝／頁邊：同留白待遇（填 BG、邊界描亮），在貼紙層之前
-        if (sep != null && sep.any()) paintGutter(out, g, sep, p)
-
-        if (plan.accept.isNotEmpty()) {
-            paintSticker(out, g, wc.cc, plan.accept, bubble, plan.promoted, frame, seg, charMask, p)
-        }
-        debug?.invoke("paintSticker", 0)
-        // 封縫救回的泡從這裡以後（泡重繪、偽泡、亮島、人物還原）才當泡；上面的結構層只看 bubble
-        val bubAll = if (bubbleLocal == null) bubble else bubble or bubbleLocal
-        paintBubbles(out, g, bubAll, seg, p)
-        debug?.invoke("paintBubbles", 0)
-        // 偽泡：開口泡／字壓背景／字壓留白救回（三檔一律關：偽泡沿字往背景長，是撕裂黑塊來源之一，守護框 +2）
-        val pb = if (p.pseudoBubbles) buildPseudoBubbles(g, regions, bubAll, seg, p) else Mask(w, h)
-        debug?.invoke("pseudoBubble", pb.count())
-        if (pb.any()) paintBubbles(out, g, pb, seg, p)
-        // 亮島填黑（三檔一律關：會把格內背景挖成黑塊；守護框對它零敏感）
-        if (p.harmonize) harmonize(out, g, bubAll or pb or gutterIn, p)
-        debug?.invoke("harmonize", 0)
-
-        // 字永遠在最上層：被人物扣掉的泡區裡，字筆畫及其貼身帶維持深底亮字
-        if (lost.any()) {
-            val txt = Cv.dilate(seg and lost, Cv.rect(p.textTopPad * 2 + 1, p.textTopPad * 2 + 1)) and lost
-            if (txt.any()) {
-                val a = inkAlpha(g, p.textGamma)
-                for (i in a.indices) a[i] = (((a[i] - p.textKnee) / (1.0 - p.textKnee)).coerceIn(0.0, 1.0)).toFloat()
-                for (i in txt.data.indices) {
-                    if (!txt.data[i]) continue
-                    out.data[i] = p.bg.toFloat()
-                    out.data[i] = max(out.data[i], p.bg + a[i] * (p.ink - p.bg))
-                }
+            val keep = Mask(w, h)
+            for (i in keep.data.indices) {
+                val l = cc.labels[i]
+                if (l > 0 && maxDepth[l] <= lim) keep.data[i] = true
             }
+            // 有線稿的白不是留白；出血格畫面拿掉
+            return bleed(Texture.veto(keep, g, a.frame, a.seg, a.bubbleStruct, p), keep)
         }
-
-        if (bubbleRest != null && bubbleRest.any()) {
-            for (i in bubbleRest.data.indices) if (bubbleRest.data[i]) out.data[i] = p.bg.toFloat()
-            val band = Cv.dilate(bubbleRest, Cv.rect(p.stroke * 2 + 1, p.stroke * 2 + 1)).andNot(bubbleRest)
-            val a2 = inkAlpha(g, 1.6)
-            for (i in band.data.indices) {
-                if (band.data[i]) out.data[i] = max(out.data[i], p.bg + a2[i] * (p.edgeInk - p.bg))
-            }
-        }
-
-        // ── 人物還原（放最後 ⇒ 任何新填色機制自動受保護）──────────────────
-        var restore = charMask.copy()
-        restore = restore.andNot(bubAll)        // 真泡畫在人物之上，該處看不到人物
-        // 格溝／頁邊也贏過人物：溝是畫面的外面，人物遮罩經收邊＋平滑會越過格框線長進溝 7–15px ⇒ 溝邊灰帶、
-        // 窄溝被吃過半整條不塗。框線被出血人物打斷的地方本來就不成溝（Separators 不收）。
-        if (sep != null) restore = restore.andNot(sep)
-        if (pb.any()) {
-            // 收邊生長出來的邊緣不得壓過偽泡：那些像素是加工長出來的，屬於畫面不屬於人物
-            restore = restore.andNot(pb.andNot(charRaw))
-        }
-        val textOnChar = pb and charMask and seg
-        if (textOnChar.any()) {
-            val kb = Cv.ellipse(p.textBackingR * 2 + 1)
-            restore = restore.andNot(Cv.dilate(textOnChar, kb))
-        }
-        if (lost.any()) {
-            val kt = Cv.ellipse(p.textTopPad * 2 + 1)
-            restore = restore.andNot(Cv.dilate(seg and lost, kt) and lost)
-        }
-        debug?.invoke("restore", restore.count())
-        // 邊界抗鋸齒：遮罩是二值又是放大來的，用小半徑高斯軟化成 alpha 混合
-        val alpha = Cv.gaussianBlur(
-            FImg(w, h, FloatArray(w * h) { if (restore.data[it]) 1f else 0f }), p.edgeFeather)
-        for (i in out.data.indices) {
-            val a = alpha.data[i]
-            out.data[i] = out.data[i] * (1f - a) + sceneKeep.data[i] * a
-        }
-        return Gray(w, h, IntArray(w * h) { out.data[it].roundToInt().coerceIn(0, 255) }) to sep
+        val lim = p.safeGutterDepth * min(h, w)
+        // 格內背景與頁邊留白在像素層連通 ⇒ 先沿格框線切開，只留真的留白
+        val cut = Regions.gutterFrameCut(gutterIn, a.lh, a.lv, p)
+        val band = Mask(w, h)
+        for (i in band.data.indices) band.data[i] = cut.data[i] && bd[i] <= lim
+        // 有線稿的白不是留白；出血格畫面拿掉
+        val band2 = bleed(Texture.veto(band, g, a.frame, a.seg, a.bubbleStruct, p), band)
+        debug?.invoke("gutterBand", band2.count())
+        return band2
     }
 
     /** 每像素到頁邊（有框頁再併入格線）的距離，決定留白填到多深。 */

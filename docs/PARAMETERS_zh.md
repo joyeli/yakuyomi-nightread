@@ -368,6 +368,12 @@ L1 目前＝留白＋泡、一顆貼紙都不填。門檻取 0～0.166 之間任
 偽泡層與人頭一致化層的開關。三個產品檔位都關：偽泡從字往背景長、要付 2 個守護框；人頭一致化對守護框沒影響，但會把格內
 背景挖成黑洞。預設兩者都開。
 
+### Kotlin：`NightTier` 與 `renderTiers`
+`NightTier.L1/L2/L3.apply(base)` 是三檔參數的單一來源：照上面設 `stickerMode`、`stickerRoughMax`、`stickerSimpleMinFrac`，
+關掉 `pseudoBubbles` 與 `harmonize`，其餘（亮度等）照 `base`。`NightRead.renderTiers` 用一次分析出多檔，前提就是這個形狀：
+各檔只能差這三欄，而且每檔都要關偽泡與亮島填黑——這兩項會讓人物還原遮罩或留白跟檔位有關。`key`（`l1`／`l2`／`l3`）是
+app 存偏好與檔名用的字串。
+
 ---
 
 ## 任意角度格溝（`nightread_sep.py`）

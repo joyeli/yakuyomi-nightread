@@ -166,7 +166,7 @@ data class NightReadParams(
      * - [StickerMode.SIMPLE]：PLAIN 的那些 ∪ {rough ≤ [stickerRoughMax] 且整頁佔比 ≥ [stickerSimpleMinFrac]}（L2／L3）
      *
      * 落選的擢升元件連核心填色也不做；落選元件回到沒有貼紙層時的待遇（有框頁場景調壓暗、無框頁背景保留），
-     * 絕不會比原圖糟。產品三檔由呼叫端整組設：L1＝PLAIN＋[pseudoBubbles]=false＋[harmonize]=false；
+     * 絕不會比原圖糟。產品三檔一律由 [NightTier.apply] 產生（單一來源）：L1＝PLAIN＋[pseudoBubbles]=false＋[harmonize]=false；
      * L2＝SIMPLE、10／0.005、兩者關；L3＝SIMPLE、20／0.0、兩者關。三檔一律：泡外圈、留白深度、閘門都用標準值。
      *
      * 消融結論：撕裂真凶＝碰到人物、內有線稿的大白元件——它過了貼紙安全網、核心填色卻停在人物邊界 ⇒ 沿人物一圈黑。
@@ -505,6 +505,43 @@ enum class StickerMode {
     SIMPLE,
     /** 只留「無畫面背景」：不碰人物、外圈只碰格線／頁邊（L1）。 */
     PLAIN,
+}
+
+/**
+ * 產品的背景填黑三檔：**三檔參數的單一來源**（engine／fork 不再自己拼 stickerMode／門檻）。
+ *
+ * [apply] 只改貼紙篩選三欄（[NightReadParams.stickerMode]／[NightReadParams.stickerRoughMax]／
+ * [NightReadParams.stickerSimpleMinFrac]），並一律關偽泡與亮島填黑；其餘（亮度等）照 base。這正是
+ * [NightRead.renderTiers] 的前提——同一個 base 套出來的三檔可以共用一次分析。
+ *
+ *   L1＝PLAIN（留白＋封閉泡＋無畫面背景）；L2＝SIMPLE rough ≤ 10 且整頁佔比 ≥ 0.5%；L3＝SIMPLE rough ≤ 20、無面積下限。
+ * keep 集合在結構上巢狀（L1 ⊆ L2 ⊆ L3，見 [Sticker.filterPlan]）；值的由來見 docs/DECISIONS.md「背景填黑三檔」。
+ * [key] 是 fork 偏好 `nightread_fill_level` 與夜讀檔名（`.night.l1.webp`…）用的字串。
+ */
+enum class NightTier(
+    val key: String,
+    private val mode: StickerMode,
+    private val roughMax: Double,
+    private val minFrac: Double,
+) {
+    L1("l1", StickerMode.PLAIN, 10.0, 0.005),
+    L2("l2", StickerMode.SIMPLE, 10.0, 0.005),
+    L3("l3", StickerMode.SIMPLE, 20.0, 0.0),
+    ;
+
+    /** 這一檔的完整參數：[base] 只換貼紙篩選三欄、關偽泡與亮島填黑。 */
+    fun apply(base: NightReadParams = NightReadParams()): NightReadParams = base.copy(
+        stickerMode = mode,
+        stickerRoughMax = roughMax,
+        stickerSimpleMinFrac = minFrac,
+        pseudoBubbles = false,
+        harmonize = false,
+    )
+
+    companion object {
+        /** [key] → 檔位；不認得（含 null）回 null，舊值對應（protect／aggressive）由呼叫端決定。 */
+        fun fromKey(key: String?): NightTier? = entries.firstOrNull { it.key == key }
+    }
 }
 
 /** 文字區（偵測器的輸出經區域合併後的結果）。座標是原圖像素。 */

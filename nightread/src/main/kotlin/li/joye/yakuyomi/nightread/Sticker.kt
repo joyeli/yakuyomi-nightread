@@ -346,6 +346,16 @@ internal object Sticker {
      */
     fun filterPlan(g: Gray, cc: CC, plan: Plan, charRaw: Mask, frame: Mask, p: NightReadParams): Plan {
         if (p.stickerMode == StickerMode.ALL) return plan
+        return selectKeep(plan, plainSet(g, cc, plan, charRaw, frame, p), p)
+    }
+
+    /**
+     * [filterPlan] 的前半：[plan] 的 accept 裡哪些是 plain（「無畫面背景」，判準見 [filterPlan]）。
+     * 與檔位無關（只讀 stickerPlain*、inkDarkTh、whiteTh，不讀 stickerMode／rough／面積門檻），三檔共用分析時算一次。
+     */
+    internal fun plainSet(g: Gray, cc: CC, plan: Plan, charRaw: Mask, frame: Mask, p: NightReadParams): Set<Int> {
+        val keep = HashSet<Int>()
+        if (plan.accept.isEmpty()) return keep     // 下面兩道整頁膨脹只給逐元件迴圈用
         val w = g.w
         val r = p.stickerPlainRingR
         val kr = Cv.ellipse(2 * r + 1)
@@ -353,7 +363,6 @@ internal object Sticker {
         val fd = Cv.dilate(frame, Cv.rect(p.stickerPlainFrameDil, p.stickerPlainFrameDil))
         // 暗墨的抗鋸齒暈：整頁算一次（不能在逐元件的窗裡算——窗只外擴 r，外圈邊上像素的暈來源可能落在窗外）
         val halo = Cv.dilate(g.lt(p.inkDarkTh), Cv.rect(p.stickerPlainFaintHalo, p.stickerPlainFaintHalo))
-        val keep = HashSet<Int>()
         for (i in plan.accept.sorted()) {
             // 不碰人物：元件像素與原始人物遮罩無交集（只掃元件 bbox）
             var touches = false
@@ -365,33 +374,44 @@ internal object Sticker {
                     }
                 }
             }
-            if (!touches) {
-                // 外圈：元件膨脹減元件。膨脹最遠只到 r，所以在 bbox 外擴 r 的窗內算與全頁算一樣（窗外的像素本來就不在外圈）
-                val win = window(g, cc, i, r)
-                val grown = Cv.dilate(win.comp, kr)
-                var ring = 0
-                var art = 0
-                var faint = 0
-                for (y in 0 until win.h) {
-                    val src = (win.y0 + y) * w + win.x0
-                    for (x in 0 until win.w) {
-                        val k = y * win.w + x
-                        if (!grown.data[k] || win.comp.data[k]) continue
-                        ring++
-                        val j = src + x
-                        if (fd.data[j]) continue
-                        val v = g.data[j]
-                        if (v < p.inkDarkTh) art++                              // 非格線的墨＝線稿
-                        else if (v < p.whiteTh && !halo.data[j]) faint++        // 淡線稿：雲／效果線／淡網點（不是暗線的暈）
-                    }
-                }
-                if (ring > 0 && art.toDouble() / ring < p.stickerPlainArtMax &&
-                    faint.toDouble() / ring < p.stickerPlainFaintMax
-                ) {
-                    keep.add(i)                         // plain：外圈只碰格線／頁邊（暗墨、淡線稿都沒碰）
-                    continue
+            if (touches) continue
+            // 外圈：元件膨脹減元件。膨脹最遠只到 r，所以在 bbox 外擴 r 的窗內算與全頁算一樣（窗外的像素本來就不在外圈）
+            val win = window(g, cc, i, r)
+            val grown = Cv.dilate(win.comp, kr)
+            var ring = 0
+            var art = 0
+            var faint = 0
+            for (y in 0 until win.h) {
+                val src = (win.y0 + y) * w + win.x0
+                for (x in 0 until win.w) {
+                    val k = y * win.w + x
+                    if (!grown.data[k] || win.comp.data[k]) continue
+                    ring++
+                    val j = src + x
+                    if (fd.data[j]) continue
+                    val v = g.data[j]
+                    if (v < p.inkDarkTh) art++                              // 非格線的墨＝線稿
+                    else if (v < p.whiteTh && !halo.data[j]) faint++        // 淡線稿：雲／效果線／淡網點（不是暗線的暈）
                 }
             }
+            if (ring > 0 && art.toDouble() / ring < p.stickerPlainArtMax &&
+                faint.toDouble() / ring < p.stickerPlainFaintMax
+            ) {
+                keep.add(i)                             // plain：外圈只碰格線／頁邊（暗墨、淡線稿都沒碰）
+            }
+        }
+        return keep
+    }
+
+    /**
+     * [filterPlan] 的後半：由 [plainSet] 的結果依檔位挑 keep（PLAIN＝plain；SIMPLE＝plain ∪ rough／面積門檻放行的；
+     * ALL＝[plan] 原樣）。這一步才看檔位參數，成本可忽略——三檔共用分析時每檔各叫一次。
+     */
+    internal fun selectKeep(plan: Plan, plain: Set<Int>, p: NightReadParams): Plan {
+        if (p.stickerMode == StickerMode.ALL) return plan
+        val keep = HashSet<Int>()
+        for (i in plan.accept.sorted()) {
+            if (i in plain) { keep.add(i); continue }
             if (p.stickerMode == StickerMode.SIMPLE) {
                 val met = plan.metrics[i] ?: continue
                 if (pyRound(met.rough, 1) <= p.stickerRoughMax && pyRound(met.areaFrac, 4) >= p.stickerSimpleMinFrac) keep.add(i)

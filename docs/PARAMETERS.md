@@ -474,6 +474,14 @@ Switches for the pseudo-bubble and floating-head layers. All three product level
 pseudo-bubbles grow from the text into the background and cost 2 guard boxes; harmonization has no effect on
 the guard but digs black holes into panel backgrounds. The default keeps both on.
 
+### Kotlin: `NightTier` and `renderTiers`
+`NightTier.L1/L2/L3.apply(base)` is the single source of the three parameter sets: it sets `stickerMode`,
+`stickerRoughMax` and `stickerSimpleMinFrac` as above, turns `pseudoBubbles` and `harmonize` off, and keeps
+everything else (brightness and so on) from `base`. `NightRead.renderTiers` renders several levels from one
+analysis and requires exactly this shape: the levels may differ only in those three fields, and every level
+must have pseudo-bubbles and harmonization off, because both make the character-restore mask or the gutter
+depend on the level. `key` (`l1`/`l2`/`l3`) is the string the app stores in its preference and file names.
+
 ---
 
 ## Any-angle separators (`nightread_sep.py`)

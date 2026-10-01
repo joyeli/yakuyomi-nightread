@@ -242,6 +242,17 @@ flowchart LR
 The night version and the normal version switch freely, because both are images that have already been
 computed.
 
+**All three fill levels are produced at once.** The reader can switch between L1, L2 and L3 while reading, so
+generation has to have all three ready. `NightRead.render` is split into a level-independent analysis
+(`analyze`: paper white, character mask, frame lines, white components, bubbles and leak sealing, the sticker
+plan, the scene curve, any-angle separators) and a per-level composition (`composeTier`: the fill-level filter,
+gutter band, stickers, bubbles, residual fill, character restore). `render` is exactly analyze → filter →
+compose, so there is one code path. `renderTiers` runs the analysis once and streams the levels one at a time
+to a sink; a level whose kept-component set equals the previous level's is not composed at all and arrives as
+null, because the output depends on the levels only through that set. The three parameter sets come from
+`NightTier.apply(base)`. Each level's output is bit-for-bit identical to a single-level `render`, and the
+lowest heap the streaming version runs in is the same as for one level.
+
 ## Two red lines
 
 1. **Never paint the wrong thing.** Faces, hands, skin, white clothes and white hair must never be filled
