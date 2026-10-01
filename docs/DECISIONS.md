@@ -16,6 +16,8 @@ tiers: List<NightReadParams>, …)` 照舊收任意檔位序列。
 
 **為什麼**（47 頁，`research/out/l2_aggressive/REPORT.md`，gitignore）：L1 與 L2 只有 **14 頁**不同，守護框違規相同（**12／664**），
 使用者切 L1↔L2 多數頁看不到差別；L2 與 L3 有 **25 頁**不同，真正有取捨（守護框 12 → 16）的是 L3。三顆鈕裡一顆幾乎是空鈕。
+出處：REPORT.md 第 6 節第 1 點（PEAK_MAX 800 之後、成品逐像素比）三檔全同 17、只有 L3 不同 16、L2＝L3 5、三檔全不同 9
+⇒ L1≠L2＝5＋9＝14、L2≠L3＝16＋9＝25。
 
 **落地**（下游，函式庫 API 不變）：
 - engine `NightReadRenderer.renderTiers(…, tiers: List<NightTier> = NightTier.entries)`：產品傳 `[L2, L3]`，依給定順序產生；去重語意
