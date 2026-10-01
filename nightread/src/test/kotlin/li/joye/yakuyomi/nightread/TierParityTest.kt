@@ -23,7 +23,8 @@ import kotlin.math.abs
  *
  * demo06（2026-10-02 加）守泡內淺條修法 e（[NightReadParams.bubbleCleanInkHoles]＋[NightReadParams.bubbleGuardRaw]）：
  * ch34_011／demo05 在 e 下四檔 0 px 變化，整頁容差又寬（demo06 的淺條只佔頁面 0.1%），只有逐像素比的泡遮罩抓得到漏移植。
- * demo06 的泡遮罩 e 與舊行為差 3,634 px；只移植 d 差 3,278、只移植 c 差 3,508（研究端同輸入量），兩半漏哪一半都會不符。
+ * demo06 的泡遮罩 e 與舊行為差 3,634 px；只移植 d 時與 e 差 356 px、只移植 c 時差 126 px（研究端同輸入量；兩者與舊行為各差
+ * 3,278、3,508），兩半漏哪一半都會不符。
  */
 class TierParityTest {
 

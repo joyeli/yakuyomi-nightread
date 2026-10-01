@@ -43,7 +43,7 @@
   - ch34_010 第2格小男孩白襯衫袖(含手) 0.0% → 26.3%（四檔）
   - demo06 第2格淺髮少女左側長髮 11.0% → 16.2%（只有標準檔過門檻；L1–L3 2.8% → 7.9%）
 
-  其餘有變動但沒過門檻的框（ch34_014 兩框 1.8%、2.9%，demo06 三框 1.1–3.2%）也都是泡框內那條淺條。
+  其餘有變動但沒過門檻的框（ch34_014 兩框 1.8%、2.9%，demo06 五框 0.5–3.2%）也都是泡框內那條淺條。
 - **python ↔ Kotlin**（`NightRead.render` 整頁、47 頁 × 4 檔，同一份凍結輸入）：泡、留白、SEP 遮罩 **188／188 逐像素相同**；成品
   188／188 在 `PageParityTest` 容差內，MAE 平均 標準 0.278、L1–L3 0.255–0.256，最大 標準 1.267（demo02，>96 階 0.748%）、L1–L3 0.521
   （demo03）；>96 階 L1–L3 最大 0.084%（demo01）；紅線最大 標準 0.028%（demo04）、L1–L3 0.046%（demo01）——與改之前的 parity 數字相同。
@@ -59,8 +59,8 @@
   其餘 58 個逐位元組相同；`make_seal_fixture.py` 重產的 `ch34_011_gapA_*` 4 檔逐位元組相同。`fixtures/baseline/tiers/L1–L3/` 新增 demo06（ch34_011、
   demo05 不變）。`fixtures/baseline/*_final.png`（標準檔參考輸出）照舊不動。
 - `TierParityTest` 加 demo06（`bubbleStripPageMatchesTierBaselines`）：既有 parity 頁（ch34_011、demo02、demo04、demo05）在 e 下四檔
-  0 px 變化，整頁容差又寬，只有逐像素比的泡遮罩抓得到漏移植——demo06 的泡遮罩 e 與舊行為差 3,634 px，只移植 d 差 3,278、只移植 c
-  差 3,508，漏哪一半都會不符。keep 期望值抄自研究端 `_regions.json`（L1 空、L2 兩個、L3 三個）。`:nightread:clean :nightread:test` 44 項全過。
+  0 px 變化，整頁容差又寬，只有逐像素比的泡遮罩抓得到漏移植——demo06 的泡遮罩 e 與舊行為差 3,634 px；只移植 d 時與 e 差 356 px、只移植 c 時差 126 px
+  （兩者與舊行為各差 3,278、3,508），漏哪一半都會不符。keep 期望值抄自研究端 `_regions.json`（L1 空、L2 兩個、L3 三個）。`:nightread:clean :nightread:test` 44 項全過。
 
 **代價與還沒定的**：
 - **守護框要不要修**（使用者待決）：ch34_010 兩框、demo06 一框的框邊伸進泡裡 10–15 px，照 ch34_006 的前例修到泡框線為止的話，
