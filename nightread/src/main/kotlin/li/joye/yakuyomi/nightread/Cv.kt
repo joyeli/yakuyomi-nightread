@@ -1822,7 +1822,7 @@ object Cv {
     /**
      * `np.argsort(v)`（預設 kind='quicksort'）對 int32 的結果：numpy 1.26 在沒有 AVX-512 的機器上走
      * `aquicksort_`（introsort：三數取中、≤16 插入排序、深度超過 2·⌊log2 n⌋ 改 heapsort）。**不穩定**——
-     * 同值的順序由這個演算法決定，格溝取峰的截斷（前 400 峰）與後續「同長度保持輸入順序」都吃它。
+     * 同值的順序由這個演算法決定，格溝取峰的截斷（前 `SeparatorParams.peakMax` 峰，預設 800）與後續「同長度保持輸入順序」都吃它。
      */
     fun npArgsort(v: IntArray): IntArray {
         val num = v.size

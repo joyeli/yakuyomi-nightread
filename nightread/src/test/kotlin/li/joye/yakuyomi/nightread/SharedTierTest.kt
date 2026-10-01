@@ -120,7 +120,10 @@ class SharedTierTest {
         assertTrue("demo06 放寬門檻後 L1 keep 要非空（plain 分支有走到）", separate[0].keep.isNotEmpty())
     }
 
-    /** 單檔 render 結果裡這裡要比的部分（成品壓成 1 B/px、不留遮罩：demo04 是 7.2 MPx，四檔整份結果會讓測試 JVM OOM）。 */
+    /**
+     * 單檔 render 結果裡這裡要比的部分（成品壓成 1 B/px、不留遮罩：demo04 是 7.2 MPx，三／四檔整份結果加上共用輸出會讓
+     * 測試 JVM（Gradle 預設 512 MB）OOM——checkPage 原本留整份結果，2026-10-01 在 demo04 OOM 過一次）。
+     */
     private class Slim(val out: ByteArray, val keep: Set<Int>, val frameless: Boolean)
 
     private fun bytes(g: Gray) = ByteArray(g.data.size) { g.data[it].toByte() }
@@ -157,43 +160,44 @@ class SharedTierTest {
     private fun checkPage(page: String) {
         val inp = input(page)
         val tiers = NightTier.entries.map { it.apply() }
-        val separate = tiers.map { NightRead.render(inp, it) }
+        val separate = tiers.map { t -> NightRead.render(inp, t).let { Slim(bytes(it.out), it.stickerAccept, it.frameless) } }
 
         val order = ArrayList<Int>()
-        val shared = arrayOfNulls<Gray>(tiers.size)
+        val shared = arrayOfNulls<ByteArray>(tiers.size)
         val t0 = System.currentTimeMillis()
         NightRead.renderTiers(inp, tiers) { k, g ->
             order.add(k)
-            shared[k] = g
+            shared[k] = g?.let(::bytes)
         }
         val ms = System.currentTimeMillis() - t0
         assertEquals("$page sink 依檔位順序各呼叫一次", listOf(0, 1, 2), order)
         assertNotNull("$page 第 0 檔不會是 null", shared[0])
 
         for (k in tiers.indices) {
-            val keepSameAsPrev = k > 0 && separate[k].stickerAccept == separate[k - 1].stickerAccept
+            val keepSameAsPrev = k > 0 && separate[k].keep == separate[k - 1].keep
             val g = shared[k]
             if (g == null) {
                 assertTrue("$page/L${k + 1}：傳 null 只能是 keep 與前一檔相同", keepSameAsPrev)
                 assertArrayEquals("$page/L${k + 1}：keep 相同 ⇒ 單檔成品與前一檔逐位元相同",
-                    separate[k - 1].out.data, separate[k].out.data)
+                    separate[k - 1].out, separate[k].out)
             } else {
                 assertTrue("$page/L${k + 1}：keep 與前一檔相同卻沒去重", !keepSameAsPrev)
-                assertArrayEquals("$page/L${k + 1}：共用分析與單檔 render 逐位元相同", separate[k].out.data, g.data)
+                assertArrayEquals("$page/L${k + 1}：共用分析與單檔 render 逐位元相同", separate[k].out, g)
             }
         }
 
         // keep 巢狀：結構保證（filterPlan：plain 先收、SIMPLE 的門檻 L2 ⊆ L3）
-        val keeps = separate.map { it.stickerAccept }
+        val keeps = separate.map { it.keep }
         assertTrue("$page keep L1 ⊆ L2", keeps[1].containsAll(keeps[0]))
         assertTrue("$page keep L2 ⊆ L3", keeps[2].containsAll(keeps[1]))
 
         // 暗像素巢狀：實測性質（見類別說明）
-        val o = separate.map { it.out.data }
+        val o = separate.map { it.out }
+        fun v(t: Int, i: Int) = o[t][i].toInt() and 0xFF
         var viol = 0
         for (i in o[0].indices) {
-            if (o[0][i] <= 40 && o[1][i] > 40) viol++
-            if (o[1][i] <= 40 && o[2][i] > 40) viol++
+            if (v(0, i) <= 40 && v(1, i) > 40) viol++
+            if (v(1, i) <= 40 && v(2, i) > 40) viol++
         }
         println("  $page：shared ${ms}ms 檔=${shared.map { if (it == null) "-" else "●" }} keep=${keeps.map { it.size }} 暗像素巢狀違規=$viol")
         assertEquals("$page 暗像素巢狀違規（低檔暗、高檔不暗）", 0, viol)
