@@ -249,9 +249,9 @@ sealed off and sent down the bubble path again, and what it recovers joins only 
 
 **Never paint over a face, a hand, a white sleeve or white hair.** The only acceptable failure is "not dark
 enough". Acceptance is 704 hand-annotated foreground boxes; on the 664-box fixture subset the full pipeline
-currently sits at 21 violations, the product "Standard" level (L2) at 14 and "More" (L3 with rule A2) at 20 (one
-ch34_006 box turned out to be drawn over a slanted gutter and was re-annotated; the boxes that reach into bubbles are
-awaiting a decision — see `docs/DECISIONS.md`).
+currently sits at 17 violations, the product "Standard" level (L2) at 11 and "More" (L3 with rule A2) at 16 with the
+Python reference (17 / 10 / 15 with this Kotlin library). One ch34_006 box turned out to be drawn over a slanted
+gutter and three boxes reached into a speech bubble; all four were re-annotated — see `docs/DECISIONS.md`.
 
 Meeting that line requires a semantic character mask. Pure geometry tops out at 37 violations, and pays 14
 percentage points of light area to get there.

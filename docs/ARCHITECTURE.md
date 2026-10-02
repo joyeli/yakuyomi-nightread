@@ -295,7 +295,7 @@ Two implementations do work:
 
 | Metric | Value |
 |---|---|
-| Guard-box violations | 17 / 664 (standard level; L1–L3 11 / 11 / 15, 2026-10-02) |
+| Guard-box violations | Python: full pipeline 17 / 664; product "Standard" (L2) 11; product "More" (L3 + rule A2) 16; L1 11; L3 without A2 15. Kotlin: 17 / 10 / 15 (full / Standard / More). 2026-10-02 |
 | Light area (share of the output at ≥110) | 38.6% |
 | Pipeline | 1351 lines of Python |
 

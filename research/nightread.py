@@ -2304,9 +2304,14 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None, 
         sx = slice(max(0, bx_ - 2), bx_ + bw_ + 2)
         blob = lb_b[sy, sx] == i
         hh, ww = blob.shape
-        ffm = np.zeros((hh + 2, ww + 2), np.uint8)
-        tmp = blob.astype(np.uint8).copy()
+        # 外圍補 1 px 的 0 再從角落灌水＝從裁窗四邊灌水（同 _hole_ink_ratio 與 Kotlin 的 Cv.holes）。泡貼著頁緣時裁窗
+        # 那一側沒有 2 px 的邊：只從裁窗的 (0,0) 灌，泡與頁緣圍住的泡外口袋會被當成洞（泡蓋住左上角時連泡本身都被灌到、
+        # 整片泡外都算洞）。47 頁沒有這種泡，改前改後逐像素相同。
+        tmp = np.zeros((hh + 2, ww + 2), np.uint8)
+        tmp[1:-1, 1:-1] = blob
+        ffm = np.zeros((hh + 4, ww + 4), np.uint8)
         cv2.floodFill(tmp, ffm, (0, 0), 2)
+        tmp = tmp[1:-1, 1:-1]
         holes = (tmp != 2) & ~blob & ~segd_c[sy, sx]
         if BUBBLE_CLEAN_INK_HOLES:
             # d：洞只算非紙白。字欄之間沒被核心填色收進泡的紙白小縫（47 頁判不乾淨的 39 顆真泡有 33 顆洞只有紙白）
