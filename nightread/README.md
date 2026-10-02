@@ -228,7 +228,8 @@ components on top of the old L3; the old L3 is the same row with `more` left at 
 
 `TierParityTest` runs three fixture pages through L1, L2, the old L3 and More (plus demo02 for More only) against
 `fixtures/baseline/tiers/`; `MoreRuleParityTest` checks A2's per-component features and decisions against the
-research side.
+research side; `BubbleLeakParityTest` pins the bubble-leak test (`bubbleLeak`) on demo04, where the bubble mask
+must match the research side pixel for pixel.
 
 Two more switches default to on, and stay on in all three levels: `separators` (any-angle gutters and page
 margins, `Separators.kt`; `NIGHTREAD_SEP` on the research side) and `bleedFilter` (the bleed-panel filter,

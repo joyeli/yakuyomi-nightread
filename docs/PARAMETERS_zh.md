@@ -11,6 +11,7 @@
 `NIGHTREAD_STICKER_MINFRAC`、`NIGHTREAD_PB`、`NIGHTREAD_HM`，見「背景填黑三檔」），任意角度格溝與出血格過濾各有
 開關（`NIGHTREAD_SEP`、`NIGHTREAD_BLEED`，預設開），漏泡封縫的半徑也在這裡（`NIGHTREAD_BUBBLE_SEAL_R`，預設 1、0＝關），
 泡內淺條的兩個修法也各有開關（`NIGHTREAD_CLEAN_INK_HOLES`、`NIGHTREAD_GUARD_RAW`，預設開、0＝舊行為），
+漏泡判準也是（`NIGHTREAD_ELEAK`，預設開；門檻 `NIGHTREAD_ELEAK_*`，見 `BUBBLE_LEAK`），
 產品「更多」的新規則 A2 也是（`NIGHTREAD_MORE`，預設關＝舊 L3；門檻 `NIGHTREAD_MORE_*`，見「「更多」新規則 A2」），
 另有幾個研究開關也讀環境（`NIGHTREAD_EDGE_INK`、`NIGHTREAD_REQUIRE_CLEAN`、`NIGHTREAD_TEXT_*`）。其餘參數要試就直接改檔案，這樣每次跑都可重現。
 
@@ -158,7 +159,10 @@ DBNet 筆畫遮罩的二值化門檻，與引擎的 `segThreshold` 同值。
 ### `BUBBLE_CLEAN_INK_HOLES` = 開（`NIGHTREAD_CLEAN_INK_HOLES`；Kotlin `bubbleCleanInkHoles`）
 乾淨泡判準的「洞」只算非紙白（原圖 < `WHITE_TH`）。直排字欄之間沒被核心填色收進泡的紙白小縫不算「泡裡有別的東西」——47 頁判
 不乾淨的 39 顆真泡有 33 顆洞只有紙白，0.5% 門檻對它們像擲硬幣（縮放、JPEG、手機的 NCNN 輸入差一點就翻面），翻成不乾淨就留下
-泡內淺條（見下一條）。代價：沒框線的泡漏進白髮時，髮絲間的白縫也不再算洞（demo04，見 DECISIONS）。設 0 回到舊行為。
+泡內淺條（見下一條）。設 0 回到舊行為。
+
+原本這裡寫的代價「沒框線的泡漏進白髮時，髮絲間的白縫也不再算洞（demo04）」是錯的：demo04 那顆泡的紙白洞全在字框裡，
+是字欄之間的縫。頭髮被塗黑是因為那顆泡沒有框線、泡的白直接連到頭髮的白色高光，由下面的 `BUBBLE_LEAK` 處理。
 
 ### `BUBBLE_GUARD_RAW` = 開（`NIGHTREAD_GUARD_RAW`；Kotlin `bubbleGuardRaw`）· `BUBBLE_CONFIRM_TEXT_IN` = 0.5（Kotlin `bubbleConfirmTextIn`）
 仍判不乾淨的泡，碰到人物那側要讓給人物。舊做法扣的是收邊＋平滑後的人物遮罩，收邊沿泡內紙白長進去，留下一條 4–17 像素的淺條。
@@ -166,6 +170,35 @@ DBNet 筆畫遮罩的二值化門檻，與引擎的 `segThreshold` 同值。
 `BUBBLE_CLEAN_TEXT_MAX`，而且至少一個字框的完整 bbox 面積有 ≥ 0.5 落在填洞後的塊內。不是字確認的泡照舊。
 
 不做成「泡一律贏」：被誤當成泡的白襯衫（demo04）和手（demo05）會被塗黑。設 0 回到舊行為。
+
+### `BUBBLE_LEAK` = 開（`NIGHTREAD_ELEAK`；Kotlin `bubbleLeak`）
+漏泡判準。乾淨泡整顆塗黑、不讓開人物，前提是「泡畫在人物之上」。沒有框線的泡，泡的白會直接連到人物身上的白（demo04 的白髮
+高光、白襯衫），整顆塗就塗到人物。泡的內部一定停在框線上：人物站在泡後面時，泡和人物之間隔著框線；泡的白沒被框線擋住、
+直接流進人物的那一段不是泡，是人物身上的白。
+
+做法：乾淨泡 ∩ 人物模型**原輸出**的 8 連通塊逐塊看。每塊往外擴 `BUBBLE_LEAK_RING` px，取落在「泡與乾淨泡的洞」之外的那一圈
+（它貼著的泡外緣）。這一圈沒有框線，就把這一塊併回泡的讓開遮罩，後面的修剪照舊（只扣碰到泡外緣的塊）。設 0＝只有修法 e。
+與檔位無關。
+
+| 參數 | 值 | 研究端環境變數 | Kotlin |
+|---|---|---|---|
+| `BUBBLE_LEAK_MODE` | `lc` | `NIGHTREAD_ELEAK_MODE` | 只有 `lc` |
+| `BUBBLE_LEAK_RING` | 3 | `NIGHTREAD_ELEAK_RING` | `bubbleLeakRing` |
+| `BUBBLE_LEAK_RANGE` | 60 | `NIGHTREAD_ELEAK_LC_RANGE` | `bubbleLeakRange` |
+| `BUBBLE_LEAK_WIN` | 9 | — | `bubbleLeakWin` |
+| `BUBBLE_LEAK_EDGE_MAX` | 0.85 | `NIGHTREAD_ELEAK_LC_MAX` | `bubbleLeakEdgeMax` |
+| `BUBBLE_LEAK_RING_MIN` | 100 | `NIGHTREAD_ELEAK_RINGMIN` | `bubbleLeakRingMin` |
+| `BUBBLE_LEAK_MIN_AREA` | 100 | `NIGHTREAD_ELEAK_MINAREA` | `bubbleLeakMinArea` |
+| `BUBBLE_LEAK_INK_MAX` | 0.10 | `NIGHTREAD_ELEAK_INK` | 沒有（研究對照） |
+
+- **`lc`（局部亮度差，產品）**：環上一個像素算「有線」＝以它為中心 9×9 的窗裡最亮減最暗 ≥ 60。「有線」的像素佔比 < 0.85＝
+  這段泡緣沒有框線。19 種輸入（縮放 0.5–1.2 倍、JPEG q50–q85、高斯模糊 σ 1.0–2.0、黑位抬高、縮小再放回）量 1,458 塊：demo04
+  該還給人物的塊最高 75.7%（模糊 σ=2.0 的一個 106 px 小塊，其餘最高 62.8%），其他頁最低 92.3%。
+- **`ink`（研究對照，不要用）**：環上墨（< `INK_DARK_TH`）佔比 < 0.10。清晰的頁上與 `lc` 結果相同，但 2–3 px 的框線糊掉後
+  中心亮度高過 128、量不到墨：模糊 σ=1.5 有 3 塊誤觸發，σ=2.0 有 65 塊（24 頁、整顆泡留灰，少塗黑 120 萬 px）。`lc` 看的是線與
+  旁邊的落差，糊掉還在。
+- 環少於 `BUBBLE_LEAK_RING_MIN` px 不判：這一塊幾乎被泡包住、沒碰到泡外緣。小於 `BUBBLE_LEAK_MIN_AREA` px 的塊不看。
+- 60 和 0.85 是看著這 19 種輸入定的，沒有另外留資料驗；47 頁裡會觸發的只有 demo04 一頁（垂髮、男主白襯衫兩處）。
 
 ### `BUBBLE_REST_NEAR` = 20
 泡元件減掉核心的剩餘部分，只在泡外 20 像素內填深。全部取消會吃掉白鬍老人的鬍鬚。

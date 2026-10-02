@@ -222,13 +222,19 @@ object NightRead {
         var bubbleGuard = charMask
         if (bubble.any()) {
             val bcc = Cv.ccStats(bubble, 8)
-            val clean = cleanBubbles(g, bcc, seg, p)
+            val cb = cleanBubbles(g, bcc, seg, p)
+            val clean = cb.clean
             if (p.bubbleGuardRaw) {
                 // 泡內淺條修法 c：字確認的泡只讓開人物原輸出（收邊／平滑長出來的安全邊被泡蓋過），其餘照舊讓開收邊後的遮罩
                 val confirmed = confirmedBubbles(bcc, g.w, g.h, seg, input.regions, p)
                 if (confirmed.any()) bubbleGuard = (charRaw and confirmed) or charMask.andNot(confirmed)
             }
             bubbleGuard = bubbleGuard.andNot(clean)
+            if (p.bubbleLeak) {
+                // 漏泡判準：乾淨泡裡壓在人物原輸出上、貼著的泡外緣又沒有框線的那一塊，還給人物（無框泡的白直接連到白髮高光／白衣）
+                val leak = leakIntoCharacter(g, clean, cb.filled, bubble, charRaw, p)
+                if (leak != null) bubbleGuard = bubbleGuard or leak
+            }
         }
         debug?.invoke("cleanBubbles", 0)
         val bubbleBeforeTrim = bubble.copy()
@@ -396,9 +402,13 @@ object NightRead {
      *
      * [NightReadParams.bubbleCleanInkHoles]（預設開）時洞只算非紙白：字欄之間沒收進泡的紙白小縫不算「泡裡有別的東西」。
      * [cc]＝泡遮罩的 8 連通標號（與 [confirmedBubbles] 共用）。
+     *
+     * 回傳 [CleanBubbles]：`clean`＝乾淨泡本身；`filled`＝乾淨泡加上它們的洞（補洞後的實心塊，洞含字筆畫附近的；
+     * [leakIntoCharacter] 拿它判「泡外」——泡的洞不算泡外）。
      */
-    private fun cleanBubbles(g: Gray, cc: CC, seg: Mask, p: NightReadParams): Mask {
+    private fun cleanBubbles(g: Gray, cc: CC, seg: Mask, p: NightReadParams): CleanBubbles {
         val clean = Mask(g.w, g.h)
+        val filled = Mask(g.w, g.h)
         val segD = Cv.dilate(seg, Cv.ellipse(7))
         for (i in 1 until cc.n) {
             val a = cc.area[i]
@@ -432,10 +442,91 @@ object NightRead {
             if (blobN > 0 && textN.toDouble() / blobN > p.bubbleCleanTextMax) continue
             for (y in 0 until sh) {
                 val dst = (by + y) * g.w + bx
-                for (x in 0 until sw) if (blob.data[y * sw + x]) clean.data[dst + x] = true
+                for (x in 0 until sw) {
+                    val idx = y * sw + x
+                    if (blob.data[idx]) { clean.data[dst + x] = true; filled.data[dst + x] = true }
+                    else if (holes.data[idx]) filled.data[dst + x] = true
+                }
             }
         }
-        return clean
+        return CleanBubbles(clean, filled)
+    }
+
+    /** [cleanBubbles] 的結果：乾淨泡，與乾淨泡加上它們的洞。 */
+    private class CleanBubbles(val clean: Mask, val filled: Mask)
+
+    /**
+     * 漏泡判準（[NightReadParams.bubbleLeak]；研究端 `BUBBLE_LEAK`）：乾淨泡整顆塗黑的前提是「泡畫在人物之上」。沒有框線的泡，
+     * 泡的白會直接連到人物身上的白（白髮高光、白襯衫），整顆塗就把人物一起塗掉。泡的內部一定停在框線上——人物站在泡後面時，
+     * 泡與人物之間隔著框線；泡的白沒被框線擋住、直接流進人物原輸出的那一段不是泡，是人物身上的白。
+     *
+     * 做法：乾淨泡 ∩ 人物**原輸出** [charRaw] 的 8 連通塊（面積 ≥ [NightReadParams.bubbleLeakMinArea]）逐塊看它貼著的
+     * 泡外緣——塊外擴 [NightReadParams.bubbleLeakRing] px（橢圓核）、扣掉「泡與乾淨泡的洞」[filled]∪[bubble] 的那一圈。
+     * 圈少於 [NightReadParams.bubbleLeakRingMin] px＝這塊幾乎被泡包住，不判。圈上「有線」的像素（以它為中心
+     * [NightReadParams.bubbleLeakWin]² 的窗裡最亮減最暗 ≥ [NightReadParams.bubbleLeakRange]）佔比 <
+     * [NightReadParams.bubbleLeakEdgeMax]＝這段泡緣沒有框線＝這一塊還給人物（回傳的遮罩併回泡的讓開遮罩，後面的修剪照舊）。
+     *
+     * 看局部亮度差而不是「墨（< inkDarkTh）佔比」：2–3 px 的框線糊掉以後中心亮度會高過墨門檻，但線與旁邊的落差還在；
+     * 柔邊（白連白）沒有落差。窗在頁緣截掉（同 cv2 的 dilate／erode 預設邊界）。沒有任何一塊觸發＝回 null。
+     */
+    private fun leakIntoCharacter(g: Gray, clean: Mask, filled: Mask, bubble: Mask, charRaw: Mask, p: NightReadParams): Mask? {
+        val w = g.w
+        val h = g.h
+        val cand = clean and charRaw
+        if (!cand.any()) return null
+        val cc = Cv.ccStats(cand, 8)
+        val kr = Cv.ellipse(2 * p.bubbleLeakRing + 1)
+        val pad = p.bubbleLeakRing + 1
+        val half = p.bubbleLeakWin / 2
+        var leak: Mask? = null
+        for (k in 1 until cc.n) {
+            if (cc.area[k] < p.bubbleLeakMinArea) continue
+            val x0 = max(0, cc.left[k] - pad)
+            val y0 = max(0, cc.top[k] - pad)
+            val x1 = min(w, cc.left[k] + cc.width[k] + pad)
+            val y1 = min(h, cc.top[k] + cc.height[k] + pad)
+            val sw = x1 - x0
+            val sh = y1 - y0
+            val comp = Mask(sw, sh)
+            for (y in 0 until sh) {
+                val src = (y0 + y) * w + x0
+                for (x in 0 until sw) comp.data[y * sw + x] = cc.labels[src + x] == k
+            }
+            val dil = Cv.dilate(comp, kr)
+            var ringN = 0
+            var edgeN = 0
+            for (y in 0 until sh) {
+                val py = y0 + y
+                val src = py * w + x0
+                for (x in 0 until sw) {
+                    if (!dil.data[y * sw + x]) continue
+                    val i = src + x
+                    if (filled.data[i] || bubble.data[i]) continue
+                    ringN++
+                    // 局部亮度差：窗在頁緣截掉
+                    val px = x0 + x
+                    var lo = 255
+                    var hi = 0
+                    for (yy in max(0, py - half)..min(h - 1, py + half)) {
+                        val row = yy * w
+                        for (xx in max(0, px - half)..min(w - 1, px + half)) {
+                            val v = g.data[row + xx]
+                            if (v < lo) lo = v
+                            if (v > hi) hi = v
+                        }
+                    }
+                    if (hi - lo >= p.bubbleLeakRange) edgeN++
+                }
+            }
+            if (ringN < p.bubbleLeakRingMin) continue
+            if (edgeN.toDouble() / ringN >= p.bubbleLeakEdgeMax) continue
+            val out = leak ?: Mask(w, h).also { leak = it }
+            for (y in 0 until sh) {
+                val dst = (y0 + y) * w + x0
+                for (x in 0 until sw) if (comp.data[y * sw + x]) out.data[dst + x] = true
+            }
+        }
+        return leak
     }
 
     /**

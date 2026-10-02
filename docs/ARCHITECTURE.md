@@ -281,7 +281,10 @@ Two implementations do work:
   component judged a real bubble is filled black whole and is not subtracted by the character mask. Only
   non-paper-white pixels count as holes, so the paper-white gaps between text columns do not. A bubble still
   judged not clean, but with a text box inside it, gives way only to the character model's raw output; the
-  strip that the character mask's snap grows into the bubble is painted black anyway (2026-10-02).
+  strip that the character mask's snap grows into the bubble is painted black anyway (2026-10-02). The
+  exception is a bubble without an outline: a block of a clean bubble that lies on the character model's raw
+  output, where the bubble edge it sits against has no outline, goes back to the character (the bubble-leak
+  test, 2026-10-02).
 - **Let only the text itself win.** Once the bubble mask has been subtracted by the character mask, the text
   in that area loses its bright-text-in-a-bubble treatment; the measured contrast is −6, meaning the text is
   darker than its own backing and completely unreadable. The fix is not to let the whole bubble win, but to
@@ -292,7 +295,7 @@ Two implementations do work:
 
 | Metric | Value |
 |---|---|
-| Guard-box violations | 21 / 664 (standard level; L1–L3 14 / 14 / 18, 2026-10-02) |
+| Guard-box violations | 20 / 664 (standard level; L1–L3 13 / 13 / 17, 2026-10-02) |
 | Light area (share of the output at ≥110) | 38.6% |
 | Pipeline | 1351 lines of Python |
 

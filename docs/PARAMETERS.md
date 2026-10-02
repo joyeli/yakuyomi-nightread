@@ -14,7 +14,8 @@ product fill levels are also selected through the environment (`NIGHTREAD_STICKE
 any-angle separator and the bleed-panel filter each have a switch (`NIGHTREAD_SEP`, `NIGHTREAD_BLEED`, on by
 default), bubble-leak sealing has its radius there (`NIGHTREAD_BUBBLE_SEAL_R`, 1 by default, 0 = off), the two
 bubble-strip fixes each have a switch (`NIGHTREAD_CLEAN_INK_HOLES`, `NIGHTREAD_GUARD_RAW`, on by default, 0 = old
-behaviour), so does the "More" rule A2 (`NIGHTREAD_MORE`, off by default = the old L3; thresholds `NIGHTREAD_MORE_*`, see
+behaviour), so does the bubble-leak test (`NIGHTREAD_ELEAK`, on by default; thresholds `NIGHTREAD_ELEAK_*`, see
+`BUBBLE_LEAK`), so does the "More" rule A2 (`NIGHTREAD_MORE`, off by default = the old L3; thresholds `NIGHTREAD_MORE_*`, see
 *"More" rule A2*), and a few research toggles read it too (`NIGHTREAD_EDGE_INK`, `NIGHTREAD_REQUIRE_CLEAN`,
 `NIGHTREAD_TEXT_*`).
 Everything else is edited in the file, so a run reproduces.
@@ -192,9 +193,13 @@ The clean-bubble test counts only non-paper-white pixels (original < `WHITE_TH`)
 gaps between vertical text columns that the core fill does not take into the bubble no longer count as
 "something else inside the bubble". Across the 47 pages, 33 of the 39 real bubbles judged not clean had
 nothing but paper white in their holes, and the 0.5% threshold was a coin toss for them (scaling, JPEG, or the
-phone's NCNN inputs flip them); a flipped bubble leaves the light strip described next. Cost: when a frameless
-bubble leaks into white hair, the white gaps between the strands no longer count as holes either (demo04, see
-DECISIONS). 0 restores the old behaviour.
+phone's NCNN inputs flip them); a flipped bubble leaves the light strip described next. 0 restores the old
+behaviour.
+
+This entry used to list a cost: "when a frameless bubble leaks into white hair, the white gaps between the
+strands no longer count as holes either (demo04)". That was wrong. All the paper-white holes of that demo04
+bubble lie inside its text boxes; they are gaps between text columns. The hair was painted because the bubble
+has no outline and its white runs straight into the white highlights of the hair. `BUBBLE_LEAK` below handles it.
 
 ### `BUBBLE_GUARD_RAW` = on (`NIGHTREAD_GUARD_RAW`; Kotlin `bubbleGuardRaw`) · `BUBBLE_CONFIRM_TEXT_IN` = 0.5 (Kotlin `bubbleConfirmTextIn`)
 A bubble still judged not clean gives way to the character where the two touch. The old code subtracted the
@@ -206,6 +211,46 @@ bubble component (before trimming) is at most `BUBBLE_CLEAN_TEXT_MAX` text, and 
 
 It is not "the bubble always wins": that paints a white shirt (demo04) and a hand (demo05) that were mistaken
 for bubbles. 0 restores the old behaviour.
+
+### `BUBBLE_LEAK` = on (`NIGHTREAD_ELEAK`; Kotlin `bubbleLeak`)
+The bubble-leak test. A clean bubble is painted black whole and does not give way to the character, on the
+assumption that the bubble is drawn on top of the character. A bubble without an outline breaks that: its white
+runs straight into white on the character (demo04: white hair highlights, a white shirt), and painting the
+whole bubble paints the character. The inside of a bubble always stops at its outline. When a character stands
+behind a bubble there is an outline between them; where the bubble's white reaches the character with no
+outline in between, that part is not bubble, it is white on the character.
+
+How: take the 8-connected blocks of clean bubble ∩ the character model's **raw** output, one at a time. Dilate
+the block by `BUBBLE_LEAK_RING` px and keep the part of that ring outside "the bubbles and the clean bubbles'
+holes" (the bubble edge the block sits against). If that ring has no outline, the block goes back into the
+mask the bubble gives way to; the trimming that follows is unchanged (only blocks touching the bubble's outer
+edge are cut). 0 = fix e only. Independent of the fill level.
+
+| Parameter | Value | Research env var | Kotlin |
+|---|---|---|---|
+| `BUBBLE_LEAK_MODE` | `lc` | `NIGHTREAD_ELEAK_MODE` | `lc` only |
+| `BUBBLE_LEAK_RING` | 3 | `NIGHTREAD_ELEAK_RING` | `bubbleLeakRing` |
+| `BUBBLE_LEAK_RANGE` | 60 | `NIGHTREAD_ELEAK_LC_RANGE` | `bubbleLeakRange` |
+| `BUBBLE_LEAK_WIN` | 9 | — | `bubbleLeakWin` |
+| `BUBBLE_LEAK_EDGE_MAX` | 0.85 | `NIGHTREAD_ELEAK_LC_MAX` | `bubbleLeakEdgeMax` |
+| `BUBBLE_LEAK_RING_MIN` | 100 | `NIGHTREAD_ELEAK_RINGMIN` | `bubbleLeakRingMin` |
+| `BUBBLE_LEAK_MIN_AREA` | 100 | `NIGHTREAD_ELEAK_MINAREA` | `bubbleLeakMinArea` |
+| `BUBBLE_LEAK_INK_MAX` | 0.10 | `NIGHTREAD_ELEAK_INK` | none (research comparison) |
+
+- **`lc` (local contrast, the product rule).** A ring pixel "has a line" when the brightest minus the darkest
+  value in the 9×9 window around it is ≥ 60. A share of such pixels below 0.85 means this stretch of bubble
+  edge has no outline. Measured on 1,458 blocks across 19 inputs (scaling 0.5–1.2×, JPEG q50–q85, Gaussian blur
+  σ 1.0–2.0, raised black level, downscale-then-upscale): the demo04 blocks that should go back to the
+  character reach at most 75.7% (one 106 px block at blur σ=2.0; 62.8% otherwise), every other page is at
+  least 92.3%.
+- **`ink` (research comparison, do not use).** Share of ink (< `INK_DARK_TH`) on the ring below 0.10. Same
+  results as `lc` on sharp pages, but a blurred 2–3 px outline rises above 128 at its centre and no ink is
+  seen: 3 blocks misfire at blur σ=1.5 and 65 at σ=2.0 (24 pages, whole bubbles left grey, 1.2 M px less
+  black). `lc` looks at the step between the line and its surroundings, which survives blurring.
+- A ring smaller than `BUBBLE_LEAK_RING_MIN` px is not judged: the block is almost enclosed by the bubble and
+  does not reach its outer edge. Blocks smaller than `BUBBLE_LEAK_MIN_AREA` px are ignored.
+- 60 and 0.85 were chosen looking at these 19 inputs, with no held-out data. Among the 47 pages only demo04
+  triggers the rule (two places: the hanging hair and the man's white shirt).
 
 ### `BUBBLE_REST_NEAR` = 20
 Whatever is left of the bubble component once the core is removed is filled only within 20 px of the bubble.

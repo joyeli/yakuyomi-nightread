@@ -135,6 +135,17 @@ BUBBLE_CLEAN_TEXT_MAX = 0.8 # 但文字佔比 > 此＝那不是泡（是被誤�
 BUBBLE_CLEAN_INK_HOLES = os.environ.get("NIGHTREAD_CLEAN_INK_HOLES", "1") == "1"   # d：乾淨泡判準的洞只算非紙白（< WHITE_TH）；字欄間沒收進泡的紙白小縫不再算「泡裡有別的東西」。0＝關＝舊行為
 BUBBLE_GUARD_RAW = os.environ.get("NIGHTREAD_GUARD_RAW", "1") == "1"   # c：仍判不乾淨、但「字確認」的泡，修剪只讓開人物模型原輸出（收邊／平滑長出來的安全邊被泡蓋過）。0＝關＝舊行為
 BUBBLE_CONFIRM_TEXT_IN = 0.5    # 字確認：至少一個字框（完整 bbox 面積）有 ≥ 此落在填洞後的泡內（另要字佔比 ≤ BUBBLE_CLEAN_TEXT_MAX）
+# 漏泡判準（2026-10-02，使用者拍板）：乾淨泡整顆塗黑的前提是「泡畫在人物之上」。沒有框線的泡，泡的白會直接連到人物身上的白
+# （demo04 白髮高光、白襯衫），整顆塗就塗到人物。乾淨泡 ∩ 人物原輸出的連通塊，如果它貼著的泡外緣沒有框線，這一塊還給人物。
+BUBBLE_LEAK = os.environ.get("NIGHTREAD_ELEAK", "1") == "1"            # 0＝關＝只有修法 e
+BUBBLE_LEAK_MODE = os.environ.get("NIGHTREAD_ELEAK_MODE", "lc")        # lc＝局部亮度差（產品；耐模糊）｜ink＝環上墨佔比（研究對照：模糊 σ ≥ 1.5 會誤觸發）
+BUBBLE_LEAK_RING = int(os.environ.get("NIGHTREAD_ELEAK_RING", "3"))    # 外緣環寬（px，橢圓核 2r+1）
+BUBBLE_LEAK_RANGE = int(os.environ.get("NIGHTREAD_ELEAK_LC_RANGE", "60"))      # lc：環上一個像素算「有線」＝9×9 窗內最亮減最暗 ≥ 此
+BUBBLE_LEAK_WIN = 9                                                             # lc：量局部亮度差的方窗邊長
+BUBBLE_LEAK_EDGE_MAX = float(os.environ.get("NIGHTREAD_ELEAK_LC_MAX", "0.85")) # lc：環上「有線」像素佔比 < 此＝這段泡緣沒有框線＝漏
+BUBBLE_LEAK_INK_MAX = float(os.environ.get("NIGHTREAD_ELEAK_INK", "0.10"))     # ink：環上墨（< INK_DARK_TH）佔比 < 此＝漏
+BUBBLE_LEAK_RING_MIN = int(os.environ.get("NIGHTREAD_ELEAK_RINGMIN", "100"))   # 環至少這麼多 px 才判（更少＝幾乎被泡包住）
+BUBBLE_LEAK_MIN_AREA = int(os.environ.get("NIGHTREAD_ELEAK_MINAREA", "100"))   # 乾淨泡 ∩ 人物原輸出的連通塊至少這麼多 px 才看
 BUBBLE_REST_NEAR = 20       # 泡元件的剩餘部分只在泡外此距離內填深（三檔皆同）
 # 字壓背景閘（2026-09-27）：泡核心（cored 分支的 core）的「非字邊界」（core 的 1px 內邊界、扣掉外擴筆畫 segd_c）要貼著墨線——
 # 真泡由自己的框線圍住 ⇒ 邊界幾乎全落在墨線 ≤ BUBBLE_OUTLINE_DIST px 內（19 頁 105 顆真泡：d=6 實測 ≥ 0.977，d=4 時 ≥ 0.959）；
@@ -600,6 +611,44 @@ def _fill_holes(m):
     mm = np.zeros((ff.shape[0] + 2, ff.shape[1] + 2), np.uint8)
     cv2.floodFill(ff, mm, (0, 0), 2)
     return ff[1:-1, 1:-1] != 2
+
+
+def bubble_leak(g, clean, clean_filled, bubble, char_raw):
+    """漏泡判準（BUBBLE_LEAK）：乾淨泡裡壓在人物**原輸出**上的 8 連通塊（≥ BUBBLE_LEAK_MIN_AREA），如果它貼著的泡外緣沒有
+    框線，就還給人物（回傳要併回泡的讓開遮罩的那幾塊）。泡的內部一定停在框線上——人物站在泡後面時，泡與人物之間隔著框線；
+    泡的白沒被框線擋住、直接流進人物的那一段不是泡，是人物身上的白（白髮高光、白襯衫）。
+
+    每塊外擴 BUBBLE_LEAK_RING px，取落在「泡與乾淨泡的洞」之外的那一圈；圈少於 BUBBLE_LEAK_RING_MIN px 不判（幾乎被泡包住）。
+    lc（產品）：圈上「9×9 窗內最亮減最暗 ≥ BUBBLE_LEAK_RANGE」的像素佔比 < BUBBLE_LEAK_EDGE_MAX＝沒有框線。糊掉的 2–3 px 框線
+    中心亮度會高過墨門檻，但線與旁邊的落差還在；柔邊（白連白）沒有落差。ink（研究對照）：圈上墨（< INK_DARK_TH）佔比 <
+    BUBBLE_LEAK_INK_MAX。"""
+    leak = np.zeros_like(bubble)
+    cand = clean & char_raw
+    if not cand.any():
+        return leak
+    nl, ll, sl, _ = cv2.connectedComponentsWithStats(cand.astype(np.uint8), 8)
+    kr = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * BUBBLE_LEAK_RING + 1,) * 2)
+    solid = clean_filled | bubble
+    pd = BUBBLE_LEAK_RING + 1
+    lc = None
+    if BUBBLE_LEAK_MODE == "lc":
+        kw = np.ones((BUBBLE_LEAK_WIN, BUBBLE_LEAK_WIN), np.uint8)
+        lc = cv2.dilate(g, kw).astype(np.int16) - cv2.erode(g, kw)
+    for k in range(1, nl):
+        if int(sl[k, cv2.CC_STAT_AREA]) < BUBBLE_LEAK_MIN_AREA:
+            continue
+        x, y, w, h = (int(sl[k, 0]), int(sl[k, 1]), int(sl[k, 2]), int(sl[k, 3]))
+        wy, wx = slice(max(0, y - pd), y + h + pd), slice(max(0, x - pd), x + w + pd)
+        comp = ll[wy, wx] == k
+        ring = (cv2.dilate(comp.astype(np.uint8), kr) > 0) & ~solid[wy, wx]
+        if int(ring.sum()) < BUBBLE_LEAK_RING_MIN:
+            continue
+        if lc is not None:
+            if float((lc[wy, wx][ring] >= BUBBLE_LEAK_RANGE).mean()) < BUBBLE_LEAK_EDGE_MAX:
+                leak[wy, wx] |= comp
+        elif float((g[wy, wx][ring] < INK_DARK_TH).mean()) < BUBBLE_LEAK_INK_MAX:
+            leak[wy, wx] |= comp
+    return leak
 
 
 def confirmed_bubbles(bubble, seg, regions):
@@ -2245,6 +2294,7 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None, 
                         cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))) > 0
     nb, lb_b, st_b, _ = cv2.connectedComponentsWithStats(bubble.astype(np.uint8), 8)
     clean = np.zeros_like(bubble)
+    clean_filled = np.zeros_like(bubble)     # 乾淨泡加上它們的洞（漏泡判準的「泡外」不含泡的洞）
     for i in range(1, nb):
         a_b = int(st_b[i, cv2.CC_STAT_AREA])
         if a_b < 4000:
@@ -2270,6 +2320,7 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None, 
         if float(seg[sy, sx][blob].mean()) > BUBBLE_CLEAN_TEXT_MAX:
             continue
         clean[sy, sx] |= blob
+        clean_filled[sy, sx] |= tmp != 2
     if BUBBLE_GUARD_RAW:
         # c：仍判不乾淨的泡，只要是「字確認」的（是容器、且有字框落在裡面），修剪只讓開人物模型原輸出——
         # 收邊（snap）／平滑沿泡內紙白長進去的那條安全邊（淺條的 67–100%）一律被泡的黑蓋過；原輸出直接畫到的照舊保護。
@@ -2277,6 +2328,8 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None, 
         confirmed = confirmed_bubbles(bubble, seg, regions)
         bubble_guard = (char_raw & confirmed) | (charmask & ~confirmed)
     bubble_guard = bubble_guard & ~clean
+    if BUBBLE_LEAK:
+        bubble_guard = bubble_guard | bubble_leak(g, clean, clean_filled, bubble, char_raw)
     # 泡遮罩不得跨進人物：氣泡是**畫在人物之上**的圖層 ⇒ 泡內部不可能是人物；反過來，泡的白
     # 元件常與人物白（髮/衣）連通（泡框有缺口、髮壓在泡邊），整顆填就把髮吃掉
     # （demo04 第2格垂髮 0→75%）。

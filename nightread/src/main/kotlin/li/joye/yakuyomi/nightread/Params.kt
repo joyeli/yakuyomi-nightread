@@ -94,6 +94,29 @@ data class NightReadParams(
     val bubbleGuardRaw: Boolean = true,
     /** 字確認：字框完整 bbox 面積落在填洞後泡內的比例下限（見 [bubbleGuardRaw]）。 */
     val bubbleConfirmTextIn: Double = 0.5,
+    /**
+     * 漏泡判準（2026-10-02）：乾淨泡（整顆塗黑、不讓開人物）裡壓在人物模型**原輸出**上的連通塊，如果它貼著的泡外緣沒有框線，
+     * 就還給人物。沒有框線的泡，泡的白會直接連到人物身上的白（demo04 白髮高光、白襯衫），整顆塗就塗到人物。逐塊判：塊外擴
+     * [bubbleLeakRing] px、扣掉泡與乾淨泡的洞的那一圈上，「有線」的像素（[bubbleLeakWin]² 窗內最亮減最暗 ≥ [bubbleLeakRange]）
+     * 佔比 < [bubbleLeakEdgeMax] 就算沒有框線。看局部亮度差而不是墨（< [inkDarkTh]）佔比：糊掉的框線亮度會高過墨門檻，
+     * 落差還在。研究端 `NIGHTREAD_ELEAK`；false＝只有修法 e。與檔位無關。見 docs/DECISIONS.md。
+     */
+    val bubbleLeak: Boolean = true,
+    /** 漏泡判準：外緣環寬（px，橢圓核 2r+1）。 */
+    val bubbleLeakRing: Int = 3,
+    /** 漏泡判準：環上一個像素算「有線」的局部亮度差下限（[bubbleLeakWin]² 窗內最亮減最暗，灰階）。 */
+    val bubbleLeakRange: Int = 60,
+    /** 漏泡判準：量局部亮度差的方窗邊長（px，奇數）。 */
+    val bubbleLeakWin: Int = 9,
+    /**
+     * 漏泡判準：環上「有線」像素佔比 < 此＝這段泡緣沒有框線。19 種輸入（縮放 0.5–1.2、JPEG q50–q85、模糊 σ 1.0–2.0、
+     * 黑位抬高、縮小再放回）1,458 塊：demo04 該還給人物的塊最高 75.7%，其他頁最低 92.3%。
+     */
+    val bubbleLeakEdgeMax: Double = 0.85,
+    /** 漏泡判準：環至少這麼多 px 才判（更少＝這塊幾乎被泡包住、沒碰到泡外緣）。 */
+    val bubbleLeakRingMin: Int = 100,
+    /** 漏泡判準：乾淨泡 ∩ 人物原輸出的連通塊至少這麼多 px 才看。 */
+    val bubbleLeakMinArea: Int = 100,
     /** 泡元件的剩餘部分只在泡外此距離內填深（三檔皆同）。 */
     val bubbleRestNear: Int = 20,
     /**
