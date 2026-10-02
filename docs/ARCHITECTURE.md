@@ -295,7 +295,7 @@ Two implementations do work:
 
 | Metric | Value |
 |---|---|
-| Guard-box violations | 20 / 664 (standard level; L1–L3 13 / 13 / 17, 2026-10-02) |
+| Guard-box violations | 17 / 664 (standard level; L1–L3 11 / 11 / 15, 2026-10-02) |
 | Light area (share of the output at ≥110) | 38.6% |
 | Pipeline | 1351 lines of Python |
 
