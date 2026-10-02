@@ -105,6 +105,22 @@ class SharedTierTest {
     }
 
     /**
+     * 合成了不保證成品不同：demo01 的「更多」比 L2 多收元件（合成鍵不同 ⇒ 照樣合成、交非 null），成品卻與 L2 逐像素相同
+     * （多收的元件核心填色是空的）。這裡守的是函式庫的契約——合成鍵不同就交圖，逐像素去重是呼叫端的事（engine 的
+     * NightReadRenderer.streamTiers；它的 NightReadTiersTest 用同一頁走「合成了但不交」那條分支）。這頁哪天不再是這種情況，
+     * 兩邊的測試要一起換頁。
+     */
+    @Test
+    fun composedTierMayEqualPreviousTier() {
+        val inp = input("demo01")
+        val out = arrayOfNulls<Gray>(2)
+        NightRead.renderTiers(inp, listOf(NightTier.L2.apply(), NightTier.L3.apply())) { k, g -> out[k] = g }
+        assertNotNull("demo01：L2 一定交圖", out[0])
+        assertNotNull("demo01：「更多」的合成鍵與 L2 不同，要照樣合成", out[1])
+        assertArrayEquals("demo01：「更多」的成品與 L2 逐像素相同（去重留給呼叫端）", out[0]!!.data, out[1]!!.data)
+    }
+
+    /**
      * 無框頁的留白帶快取換鍵：L1（keep 空）→ ALL（keep 非空、gutterShow 少了被接受的元件 ⇒ 換鍵重算）→ L1（換回、再重算）
      * → L3。四檔只差貼紙篩選三欄，renderTiers 放行。
      */

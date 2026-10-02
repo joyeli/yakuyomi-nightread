@@ -50,6 +50,23 @@ class MoreRuleParityTest {
     @Test
     fun softGateCandidatesMatchResearch() = checkPage("demo06")
 
+    /**
+     * 安全網選強／弱貼框那條路時，貼框分數先四捨五入到 3 位再比 0.4（研究端 `hug[i] = round(frac, 3)`）。原值 0.3995–0.4 的
+     * 元件拿原值比會走弱貼框、研究端走強貼框，兩邊收的元件不同（真機頁上遇過 0.39984、0.39990 兩顆，fixture 沒有，所以單獨守）。
+     */
+    @Test
+    fun strongHugRoundsLikeResearchAudit() {
+        val p = NightReadParams()
+        assertEquals(0.4, p.frameHugStrong, 0.0)
+        assertTrue(Sticker.strongHug(0.39983579638752054, p))
+        assertTrue(Sticker.strongHug(0.399899, p))
+        assertTrue(Sticker.strongHug(0.39951, p))
+        assertTrue(Sticker.strongHug(0.4, p))
+        assertTrue(!Sticker.strongHug(0.39949, p))
+        assertTrue(!Sticker.strongHug(0.3, p))
+        assertTrue("沒有貼框分數（格內白、無框頁）＝弱貼框", !Sticker.strongHug(null, p))
+    }
+
     private fun checkPage(page: String) {
         val input = NightReadInput(
             gray = readGray("${page}_gray.png"),

@@ -48,15 +48,19 @@ internal object Sticker {
      * 也會命中——兩者統計上分不開，所以後續一律走區域級保護而不是直接拒收。
      */
     fun eaten(sub: Gray, comp: Mask, p: NightReadParams): Mask {
+        // 墨密度先算（它的輸入與濾波暫存算完就丟），再算距離變換：兩者獨立，順序不影響結果，只是不讓中間量同時活著
+        val dens = inkDensity(sub, p)
         val dist = Cv.distanceL2(comp)
-        val inkF = FImg(sub.w, sub.h, FloatArray(sub.data.size) { if (sub.data[it] < p.whiteTh) 1f else 0f })
-        val dens = Cv.boxBlur(inkF, 15)
         val out = Mask(sub.w, sub.h)
         for (i in out.data.indices) {
             out.data[i] = comp.data[i] && dist.data[i] <= p.stickerEatenR && dens.data[i] >= p.stickerEatenDens
         }
         return out
     }
+
+    /** 局部墨密度：非白像素的 15×15 方框平均。 */
+    private fun inkDensity(sub: Gray, p: NightReadParams): FImg =
+        Cv.boxBlur(FImg(sub.w, sub.h, FloatArray(sub.data.size) { if (sub.data[it] < p.whiteTh) 1f else 0f }), 15)
 
     /**
      * 區域級保護＝「窄頸附屬白 ∧ 含 eaten」。
@@ -334,10 +338,9 @@ internal object Sticker {
             val met = metrics(g, chromaImg, cc, i, textRects, textRectsOn, p)
             mets[i] = met
             met.hug = hug[i]
-            val hugV = hug[i] ?: 0.0
             // 安全網＝一組門，全過才收；實際沒過的門記在 met.gates（「更多」新規則的候選看它）
             val ok: Boolean
-            if (hugV >= p.frameHugStrong) {
+            if (strongHug(hug[i], p)) {
                 // 強貼框：四道硬門＋字壓＋淡色門＋截斷型小元件（被格框切斷的前景物件，不是格背景）
                 val gates = java.util.EnumSet.noneOf(Gate::class.java)
                 figGates(met, p, gates)
@@ -365,6 +368,19 @@ internal object Sticker {
         }
         return Plan(accept, promoted, mets)
     }
+
+    /**
+     * 走強貼框那條路嗎：貼框分數先照研究端審計表的精度四捨五入到 3 位再比 [NightReadParams.frameHugStrong]
+     * （研究端 `hug[i] = round(frac, 3)` 之後才比 0.4；候選門檻 [NightReadParams.frameHugMin] 兩邊都拿原值比）。
+     * 拿原值比的話，0.3995–0.4 之間的元件 Kotlin 走弱貼框、研究端走強貼框，兩邊收的元件就不同
+     * （c362_012 一顆 0.3998、c362_005 旗上窄條放大 1.05 倍時 0.3999）。沒有貼框分數（格內白、無框頁）＝弱貼框。
+     * [moreSelect] 的貼框遲滯本來就拿四捨五入後的值，這樣兩處對「走哪條路」的認定才一致。
+     *
+     * 只對齊這一項：研究端其餘的門（整頁佔比、字壓、前景佔比…）也是拿審計表四捨五入後的值比，這裡仍拿原值——
+     * 那一類差異在門檻邊上半個末位內才會顯現，對齊它沒有帶來可量到的好處（見 DECISIONS「A2 審查後修正」）。
+     */
+    internal fun strongHug(hug: Double?, p: NightReadParams): Boolean =
+        hug != null && pyRound(hug, 3) >= p.frameHugStrong
 
     /**
      * 背景填黑三檔（[NightReadParams.stickerMode]）：在 [plan] 的安全網之後再挑一次，決定哪些白元件真的填黑。

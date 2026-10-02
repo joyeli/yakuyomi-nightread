@@ -751,74 +751,21 @@ object NightRead {
             val win = Sticker.window(g, cc, i, r + 2)
             val sw = win.w
             val sh = win.h
-            var fill: Mask
+            val fill: Mask
             if (i in coreIds) {
-                var fr = Mask(sw, sh)
-                for (y in 0 until sh) {
-                    val src = (win.y0 + y) * g.w + win.x0
-                    for (x in 0 until sw) fr.data[y * sw + x] = frame.data[src + x]
-                }
-                val kd = Cv.ellipse(p.frameHugDilate * 2 + 1)
-                if (edgeFb) fr = fr.orInPlace(edgeSeedFallback(win, fr, kd, g.w, g.h, p))
-                val seeds = Cv.dilate(fr, kd) and win.comp
-                fill = Regions.broadCoreFill(win.comp, seeds, p.coreNeckR, p.coreRecoverR)
-                if (fill.any()) {
-                    // 測地比刪填：背景從格框直直就到（比值≈1），衣料與皮膚要繞過人物墨線（比值高）。
-                    // Python 是「膨脹 6 次才交集、d < 4000 才再跑一批」；BFS 版的批次節奏相同，
-                    // 上限 4002 = 最後一批在 d=3996 時整批跑完。未到達 = -1。
-                    val geo = Cv.geodesicDistance(seeds and win.comp, win.comp, 6, 4002)
-                    val euc = Cv.distanceL2(fr.not())
-                    val subSeg = Mask(sw, sh)
-                    for (y in 0 until sh) {
-                        val src = (win.y0 + y) * g.w + win.x0
-                        for (x in 0 until sw) subSeg.data[y * sw + x] = seg.data[src + x]
-                    }
-                    val aura = Regions.thickInkAura(win.sub, subSeg, p)
-                    val strict = Mask(sw, sh)
-                    for (idx in strict.data.indices) {
-                        strict.data[idx] = fill.data[idx] && geo[idx] >= 0 &&
-                            geo[idx].toFloat() <= p.geoRatioMax * euc.data[idx] + p.geoSlack &&
-                            !aura.data[idx]
-                    }
-                    // 語意放行：把人物遮罩外擴當安全邊界，非人物的核心區照填
-                    val guardSub = Mask(sw, sh)
-                    for (y in 0 until sh) {
-                        val src = (win.y0 + y) * g.w + win.x0
-                        for (x in 0 until sw) guardSub.data[y * sw + x] = charMask.data[src + x]
-                    }
-                    val guard = Cv.dilate(guardSub, Cv.ellipse(p.coreReleasePad * 2 + 1))
-                    val released = Mask(sw, sh)
-                    for (idx in released.data.indices) {
-                        released.data[idx] = strict.data[idx] || (fill.data[idx] && !guard.data[idx])
-                    }
-                    fill = released
-                }
+                fill = coreFill(win, g, frame, seg, charMask, edgeFb, p)
                 if (!fill.any()) continue
             } else {
                 fill = win.comp
             }
 
-            // 前景＝窗內非白且非氣泡的內容；小噪點不描邊、直接併入背景
-            val fRaw = Mask(sw, sh)
-            for (y in 0 until sh) {
-                val src = (win.y0 + y) * g.w + win.x0
-                for (x in 0 until sw) {
-                    val idx = y * sw + x
-                    fRaw.data[idx] = win.sub.data[idx] < p.whiteTh && !bubble.data[src + x]
-                }
-            }
-            val fcc = Cv.ccStats(fRaw, 8)
-            val keep = BooleanArray(fcc.n)
-            for (j in 1 until fcc.n) keep[j] = fcc.area[j] >= p.figNoiseArea
-            val fMain = Mask(sw, sh)
-            val noiseRaw = Mask(sw, sh)
-            for (idx in fMain.data.indices) {
-                val l = fcc.labels[idx]
-                if (l > 0) { if (keep[l]) fMain.data[idx] = true else noiseRaw.data[idx] = true }
-            }
-            val fillClosed = Cv.close(fill, kc)
-            val noise = noiseRaw and fillClosed
+            // 區域級保護先算：eaten 內部是幾張窗大小的浮點圖，算完只留一張遮罩，之後才配前景的連通元件標號
+            // （兩者是各自獨立的純函式，順序不影響結果，只是不讓它們的中間量同時活著）
             val protect = Sticker.protect(Sticker.eaten(win.sub, win.comp, p), win.comp, p)
+            // 前景＝窗內非白且非氣泡的內容；小噪點不描邊、直接併入背景
+            val fg = stickerForeground(win, g.w, bubble, p)
+            val fMain = fg.first
+            val noise = fg.second and Cv.close(fill, kc)
             val band = (Cv.dilate(fMain, k) and fill).andNot(protect)
 
             for (y in 0 until sh) {
@@ -834,6 +781,93 @@ object NightRead {
                 }
             }
         }
+    }
+
+    /**
+     * 貼紙的前景（窗內非白且非氣泡的內容）依 8 連通面積分成兩份：first＝夠大的（≥ [NightReadParams.figNoiseArea]，描邊來源）、
+     * second＝小噪點（落在填色區閉運算內的併入背景）。獨立成函式：連通元件標號（4 B/px）只活在這裡。
+     */
+    private fun stickerForeground(win: Sticker.Window, pageW: Int, bubble: Mask, p: NightReadParams): Pair<Mask, Mask> {
+        val sw = win.w
+        val sh = win.h
+        val fRaw = Mask(sw, sh)
+        for (y in 0 until sh) {
+            val src = (win.y0 + y) * pageW + win.x0
+            for (x in 0 until sw) {
+                val idx = y * sw + x
+                fRaw.data[idx] = win.sub.data[idx] < p.whiteTh && !bubble.data[src + x]
+            }
+        }
+        val fcc = Cv.ccStats(fRaw, 8)
+        val keep = BooleanArray(fcc.n)
+        for (j in 1 until fcc.n) keep[j] = fcc.area[j] >= p.figNoiseArea
+        val fMain = Mask(sw, sh)
+        val noiseRaw = Mask(sw, sh)
+        for (idx in fMain.data.indices) {
+            val l = fcc.labels[idx]
+            if (l > 0) { if (keep[l]) fMain.data[idx] = true else noiseRaw.data[idx] = true }
+        }
+        return Pair(fMain, noiseRaw)
+    }
+
+    /**
+     * 擢升元件的核心填色：從格框種子出發、不擠過窄頸的寬闊區（[Regions.broadCoreFill]），過兩道幾何保護（[coreStrict]），
+     * 再做語意放行（人物遮罩外擴 [NightReadParams.coreReleasePad] 當安全邊界，非人物的核心區照填）。回傳要填的遮罩（可能全空）。
+     *
+     * 獨立成函式（連同 [coreStrict]、[subMask]）是為了記憶體：這裡的中間量都是窗大小，大元件的窗接近整頁
+     * （c362_013 一顆 68 萬 px 的格內白），回傳後只剩一張遮罩活著，不陪著後面的前景描邊一起疊高峰值。
+     */
+    private fun coreFill(
+        win: Sticker.Window, g: Gray, frame: Mask, seg: Mask, charMask: Mask, edgeFb: Boolean, p: NightReadParams,
+    ): Mask {
+        var fr = subMask(frame, win, g.w)
+        val kd = Cv.ellipse(p.frameHugDilate * 2 + 1)
+        if (edgeFb) fr = fr.orInPlace(edgeSeedFallback(win, fr, kd, g.w, g.h, p))
+        val seeds = Cv.dilate(fr, kd) and win.comp
+        val fill = Regions.broadCoreFill(win.comp, seeds, p.coreNeckR, p.coreRecoverR)
+        if (!fill.any()) return fill
+        val released = coreStrict(win, g, seg, fr, seeds, fill, p)
+        // 語意放行：把人物遮罩外擴當安全邊界，非人物的核心區照填
+        val guard = Cv.dilate(subMask(charMask, win, g.w), Cv.ellipse(p.coreReleasePad * 2 + 1))
+        for (idx in released.data.indices) {
+            released.data[idx] = released.data[idx] || (fill.data[idx] && !guard.data[idx])
+        }
+        return released
+    }
+
+    /**
+     * 核心填色的兩道幾何保護：測地比刪填（背景從格框直直就到、比值≈1，衣料與皮膚要繞過人物墨線、比值高）與厚墨灰暈。
+     * Python 的測地距離是「膨脹 6 次才交集、d < 4000 才再跑一批」；BFS 版的批次節奏相同，上限 4002＝最後一批在 d=3996 時
+     * 整批跑完。未到達＝-1。
+     *
+     * 厚墨灰暈先算：它內部的距離變換與連通元件標號都是窗大小的大陣列，算完只留一張遮罩，之後才配測地距離與直線距離
+     * （各 4 B/px）——三者是各自獨立的純函式，順序不影響結果，只是不讓它們的中間量同時活著。
+     */
+    private fun coreStrict(
+        win: Sticker.Window, g: Gray, seg: Mask, fr: Mask, seeds: Mask, fill: Mask, p: NightReadParams,
+    ): Mask {
+        val aura = Regions.thickInkAura(win.sub, subMask(seg, win, g.w), p)
+        val geo = Cv.geodesicDistance(seeds and win.comp, win.comp, 6, 4002)
+        val euc = Cv.distanceL2(fr.not())
+        val strict = Mask(win.w, win.h)
+        for (idx in strict.data.indices) {
+            strict.data[idx] = fill.data[idx] && geo[idx] >= 0 &&
+                geo[idx].toFloat() <= p.geoRatioMax * euc.data[idx] + p.geoSlack &&
+                !aura.data[idx]
+        }
+        return strict
+    }
+
+    /** 整頁遮罩 [m] 在 [win] 窗內的複本。 */
+    private fun subMask(m: Mask, win: Sticker.Window, pageW: Int): Mask {
+        val sw = win.w
+        val sh = win.h
+        val out = Mask(sw, sh)
+        for (y in 0 until sh) {
+            val src = (win.y0 + y) * pageW + win.x0
+            for (x in 0 until sw) out.data[y * sw + x] = m.data[src + x]
+        }
+        return out
     }
 
     /**

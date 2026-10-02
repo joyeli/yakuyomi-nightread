@@ -729,10 +729,10 @@ object Cv {
             i = x
             for (y in 0 until h) { f[i] = d[y]; i += w }
         }
-        // 就地開平方，省一次 2.6 MPx 的配置；用 Float 版 sqrt 不繞 Double
-        val out = FloatArray(w * h)
-        for (i in out.indices) out[i] = kotlin.math.sqrt(f[i])
-        return FImg(w, h, out)
+        // 就地開平方，省一次 2.6 MPx 的配置（這個函式是合成階段的記憶體峰值所在：留白帶的格線距離、核心填色的直線距離）；
+        // 用 Float 版 sqrt 不繞 Double
+        for (i in f.indices) f[i] = kotlin.math.sqrt(f[i])
+        return FImg(w, h, f)
     }
 
     /** Felzenszwalb & Huttenlocher 的一維平方距離變換（拋物線下包絡）。 */
@@ -1130,7 +1130,7 @@ object Cv {
         val w = seed.w
         val h = seed.h
         val dist = IntArray(w * h) { -1 }
-        val queue = IntArray(w * h)          // 每個像素一生只進一次
+        val queue = IntArray(within.count()) // 每個像素一生只進一次，而且只有 within 內的像素會進
         var qEnd = 0
         for (i in dist.indices) if (seed.data[i] && within.data[i]) { dist[i] = 0; queue[qEnd++] = i }
         var qStart = 0

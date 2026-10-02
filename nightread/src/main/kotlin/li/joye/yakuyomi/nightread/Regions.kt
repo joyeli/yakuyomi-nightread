@@ -532,6 +532,12 @@ internal object Regions {
         return BubbleResult(bubble or local, cored, sealed)
     }
 
+    /** 墨（[ink]）裡離非墨 ≥ [NightReadParams.pbAuraThick] 的像素。 */
+    private fun thickPixels(ink: Mask, p: NightReadParams): Mask {
+        val dist = Cv.distanceL2(ink)
+        return Mask(ink.w, ink.h, BooleanArray(ink.data.size) { ink.data[it] && dist.data[it] >= p.pbAuraThick })
+    }
+
     /**
      * 厚墨灰暈：距離「厚墨塊」一定距離內不填。厚墨塊＝距離變換夠大、面積夠大的暗區，
      * 所以字框與泡框那種細筆畫不算。這是臉旁髮團的第二道保險。
@@ -539,17 +545,16 @@ internal object Regions {
     fun thickInkAura(g: Gray, seg: Mask?, p: NightReadParams): Mask {
         var ink = g.lt(p.whiteTh)
         if (seg != null) ink = ink.andNot(seg)      // 粗體字筆畫本身也 ≥6px，不扣掉會在每個字周圍挖洞
-        val dist = Cv.distanceL2(ink)
+        // 「厚」是元件的性質不是像素的性質：面積夠大、且元件內部最厚處 ≥ thick，整顆才算厚墨。
+        // 「最厚處 ≥ thick」＝元件裡有任何一個像素的距離 ≥ thick：先把距離變換收成一張遮罩再做連通元件，
+        // 兩個窗大小的大陣列（距離 4 B/px、標號＋並查集 6 B/px）就不會同時活著
+        val deep = thickPixels(ink, p)
         val cc = Cv.ccStats(ink, 8)
-        // 「厚」是元件的性質不是像素的性質：面積夠大、且元件內部最厚處 ≥ thick，整顆才算厚墨
-        val maxDist = FloatArray(cc.n)
-        for (i in ink.data.indices) {
-            val l = cc.labels[i]
-            if (l > 0 && dist.data[i] > maxDist[l]) maxDist[l] = dist.data[i]
-        }
+        val hasDeep = BooleanArray(cc.n)
+        for (i in ink.data.indices) if (deep.data[i]) hasDeep[cc.labels[i]] = true
         val thickIds = BooleanArray(cc.n)
         for (i in 1 until cc.n) {
-            thickIds[i] = cc.area[i] >= p.pbAuraMinArea && maxDist[i] >= p.pbAuraThick
+            thickIds[i] = cc.area[i] >= p.pbAuraMinArea && hasDeep[i]
         }
         val big = Mask(g.w, g.h)
         var anyBig = false
