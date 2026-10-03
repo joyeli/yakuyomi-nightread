@@ -606,10 +606,27 @@ internal object BgObjects {
         var txt: Mask? = null
         if (ccT.n > 1) {
             val ringm = dil(sd, 6).andNot(sd)
-            val ltd = Cv.morphGrayGather(Gray(w, h, ccT.labels), Cv.ellipse(13), wantMax = true).data
+            // 外圈像素歸給 6 px（橢圓 13）內標號最大的字塊（研究端整頁對標號做灰階膨脹）；只有外圈像素要，逐點掃核的 run
+            val k13 = Cv.ellipse(13)
+            val lb = ccT.labels
             val tot = IntArray(ccT.n)
             val hit = IntArray(ccT.n)
-            for (i in 0 until n) if (ringm.data[i]) { tot[ltd[i]]++; if (fill.data[i]) hit[ltd[i]]++ }
+            for (i in 0 until n) {
+                if (!ringm.data[i]) continue
+                val x = i % w
+                val y = i / w
+                var mx = 0
+                for (ky in 0 until k13.h) {
+                    val yy = y + ky - k13.ay
+                    if (yy < 0 || yy >= h || k13.runEnd[ky] <= k13.runStart[ky]) continue
+                    val x0 = max(0, x + k13.runStart[ky] - k13.ax)
+                    val x1 = min(w - 1, x + k13.runEnd[ky] - 1 - k13.ax)
+                    val b = yy * w
+                    for (xx in x0..x1) { val v = lb[b + xx]; if (v > mx) mx = v }
+                }
+                tot[mx]++
+                if (fill.data[i]) hit[mx]++
+            }
             val okt = BooleanArray(ccT.n) { it > 0 && 2 * hit[it] >= max(tot[it], 1) }
             val t = Mask(w, h, BooleanArray(n) { okt[ccT.labels[it]] })
             if (t.any()) {

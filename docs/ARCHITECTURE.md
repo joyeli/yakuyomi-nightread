@@ -50,7 +50,8 @@ flowchart TB
         direction TB
         SC[scene curve<br/><small>linear, order-preserving</small>] --> GUT[fill the gutter]
         GUT --> STK[sticker-style background<br/><small>fill dark + white outline on the figure</small>]
-        STK --> BB[bubbles<br/><small>dark ground, strokes lit</small>]
+        STK --> OBJ[background-object rule, More only<br/><small>veto white between objects, blacken object-free light background</small>]
+        OBJ --> BB[bubbles<br/><small>dark ground, strokes lit</small>]
         BB --> PB[pseudo-bubbles<br/><small>open bubbles, text over art</small>]
         PB --> HM[head-tone harmonization]
         HM --> RST[residual fill<br/><small>the ring outside the bubble frame</small>]
@@ -148,6 +149,13 @@ component-level gates check foreground share, speckle share, chroma (which block
 share of foreground white that looks eaten. The region-level protection recognizes attached white that can
 only be reached through a narrow gap — the white-bearded old man's beard is exactly this shape — and leaves
 the whole clump unfilled and un-outlined.
+
+**Background-object rule ("More" only).** In "More", background blackening no longer asks whether something is white but
+whether it holds an object (`nightread_obj.py` / `BgObjects.kt`). Two parts: white that the sticker layer painted beyond
+"Standard" goes back to its "Standard" look when, closed across thin lines, its surroundings carry objects (wall-panel lines,
+table edges, floor-tile lines); light background regions (white or light tone) are measured as a whole — lines, tone
+boundaries, surface residual, chroma, width, sparkles — and if they hold no object they are painted from a core far from any
+evidence, grown back to the line edges, so narrow pockets enclosed by lines stay out of reach. "Standard" skips this layer.
 
 **Semantic release for core fill.** Core fill has two geometric protections: a geodesic-ratio veto (background
 reaches the panel border in a straight line, cloth has to detour) and a thick-ink aura (no fill around a mass

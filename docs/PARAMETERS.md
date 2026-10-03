@@ -17,7 +17,9 @@ bubble-strip fixes each have a switch (`NIGHTREAD_CLEAN_INK_HOLES`, `NIGHTREAD_G
 behaviour), so does the bubble-leak test (`NIGHTREAD_ELEAK`, on by default; thresholds `NIGHTREAD_ELEAK_*`, see
 `BUBBLE_LEAK`), so does the "More" rule A2 (`NIGHTREAD_MORE`, off by default = the old L3; thresholds `NIGHTREAD_MORE_*`, see
 *"More" rule A2*), so does character ring thinning (`NIGHTREAD_RING`, `NIGHTREAD_RING_SEEDCONN`, both on by default;
-constants at the top of `research/nightread_ring.py`, see *Character ring thinning*), and a few research toggles read it too (`NIGHTREAD_EDGE_INK`, `NIGHTREAD_REQUIRE_CLEAN`,
+constants at the top of `research/nightread_ring.py`, see *Character ring thinning*), so does the "More" background-object
+rule (`NIGHTREAD_OBJ`, `NIGHTREAD_OBJ_VETO`, `NIGHTREAD_OBJ_LT`, on by default and only effective with `NIGHTREAD_MORE=1`;
+constants at the top of `research/nightread_obj.py`, see *"More" background-object rule*), and a few research toggles read it too (`NIGHTREAD_EDGE_INK`, `NIGHTREAD_REQUIRE_CLEAN`,
 `NIGHTREAD_TEXT_*`).
 Everything else is edited in the file, so a run reproduces.
 
@@ -946,6 +948,72 @@ Finish: a radius-3 opening of the black (seed ∪ claim) drops thin fingers, and
 4-connected to a seed through claimed pixels are kept. The second part was added at integration time: over 47
 pages and five tiers it removes 14 distinct small isolated black specks (standard 5 specks, 1,065 px; more 7
 specks, 1,201 px) and leaves the guard boxes unchanged. 0 = the research prototype zhe.py.
+
+---
+
+## "More" background-object rule (`nightread_obj.py`)
+
+Decided by the user on 2026-10-03 (rules version 3): background blackening in "More" no longer asks *is it white*, it asks
+*is there an object*. Active only in "More" (`NIGHTREAD_MORE=1` on the research side; Kotlin `MoreRuleParams.enabled`);
+"Standard" is unchanged pixel for pixel. Two mechanisms: **V** vetoes A2 whites that sit between objects; **L** blackens
+light background (white or light tone alike) that holds no object. The thresholds were tuned by the prototype against 385
+localized regions (`research/out/more_v3`); rules and numbers are in docs/DECISIONS.md, *「更多」背景物件規則*; Kotlin
+`ObjectRuleParams` (`NightReadParams.obj`), `BgObjects`. Every brightness measurement runs on an integer Gaussian (Q16), so the
+research side and Kotlin agree bit for bit.
+
+### `OBJ_ON` = 1 · `OBJ_VETO` = 1 · `OBJ_LT` = 1 (`NIGHTREAD_OBJ` / `_VETO` / `_LT`; Kotlin `enabled` / `veto` / `lightFill`)
+Master switch and one switch per mechanism (for ablation). `NIGHTREAD_OBJ=0` gives rules-version-2 "More", pixel for pixel.
+
+### `VETO_EPM` = 25 · `VETO_RC` = 5 · `VETO_MIN_AREA` = 300 · `VETO_EV_DIL` = 2 (Kotlin also `vetoBackPad` = 2)
+V: each connected block that "More" paints black beyond the standard-only stickers (≥ 300 px) closes its paper white
+(≥ 235) across thin lines (ellipse radius 5) into a super-region; if the veto evidence (thin dark lines without the line
+kernel, or σ2 Canny) within 2 px of the super-region exceeds 25 ‰, the block goes back to its standard-only state (inside a
+square of stroke radius + 2 around it). The white itself shows no object (A2 only picks clean white); the objects are on its
+rim: wall-panel lines, table edges, floor-tile lines. Blocks with objects bottom out at 26.7 ‰ (c371_017 white table),
+object-free ones top out at 22.7 ‰ (behind the boy on c362_009) — a 4 ‰ margin. The prototype's 15 ‰ also vetoed five
+object-free whites and two caption boxes. Blocks whose (hole-filled) area contains a text-region centre are never vetoed
+(caption and narration boxes).
+
+### `DARK_G` = 63
+"Already black" = pixels already painted `BG` ∪ source gray ≤ 63 (the top of scene-curve ≤ 40 at the default levels). It does
+not read the output values, which carry the floating-point scene curve and ink glow and move with the brightness settings.
+Used by V's "painted beyond standard" and by L's candidates, context, islands and light edge.
+
+### `BH_TH` = 20 · `LINE_R` = 12 · `BRIGHT_TH` = 12 · `BRIGHT_LR` = 36/5 · `DOT` = 10 (bright marks 8) · `EV_MIN_AREA` = 15
+Object evidence. Thin dark lines: σ2 blackhat (ellipse radius 5) > 20 and the mean along one of 8 directional 17 px line
+kernels > 12 — a line stays dark along its length, halftone dots only here and there. Bright marks (sparkles, white
+highlight lines): σ1.5 tophat > 12 with an 11 px line-kernel mean > 7.2. Components whose bounding box is shorter than 10 px
+(8 for bright marks) are halftone and do not count; evidence components under 15 px do not count either.
+
+### `CANNY_LO` = 15 · `CANNY_HI` = 40 · `CANNY4_LO` = 10 · `CANNY4_HI` = 25
+σ2 Canny feeds the veto evidence; σ4 Canny (tone boundaries: the edges of clouds and light/shadow patches, with coarse
+halftone already smoothed away at σ4) feeds the object evidence.
+
+### `T` = 150 · `AMIN` = 0.002
+L's candidates: connected components (after an opening of radius 2) with σ5 brightness ≥ 150 that are not accounted for
+(characters, bubbles dilated 6, text dilated 3, frame lines dilated 2) and not yet black, at least 0.2% of the page.
+
+### `LINE` = 20 · `CAN4` = 12 · `FIT` = 9 · `TONE` = 215 · `TONE_GRAD` = 0.8 · `CHROMA` = 6 · `THICK` = 24 · `MARKS` = 4 · `MARKS_DEN` = 4
+The whole region must pass every test: thin lines + bright marks ≤ 20 ‰ and σ4 Canny ≤ 12 ‰ inside it; residual of σ2.5
+brightness against a quadratic surface ≤ 9 gray levels; tone edges (median 7 → σ3 → Sobel, gradient > 0.8 / page scale)
+≤ 215 ‰; mean chroma ≤ 6 (colour pages untouched); largest inscribed radius ≥ 24 px (a strip pinched between two lines is
+usually a table edge or wall panel); fewer than 4 isolated bright marks, or fewer than 4 per 100,000 px (sparkles count as
+objects). The c362_006 bottom cell #6, which the user decided stays grey, is held by the residual: 10.6, a margin of about 1.5.
+
+### `RLOC` = 24 · `CORE_MIN` = 0.0008 · `SEAL` = 4 · `LONG_LEN` = 80 · `LONG_R` = 40
+A passing region is painted from its core only: more than 24 px (5×5 chamfer) from any evidence and not within 40 px of a
+long line (bounding box ≥ 80 px); only blocks (after sealing evidence gaps with a closing of radius 4) whose core covers
+≥ 0.08% of the page are painted. The core grows out at most 30 px, then back to the line edges by 7 px without crossing
+evidence, so narrow pockets enclosed by lines (under a table, between wall panels) stay out of reach.
+
+### `CTX_EPM` = 25 · `CTX_WHITE` = 230
+A white block (σ2.5 median brightness ≥ 230) together with the light area it closes into across thin lines forms a
+super-region; if its evidence exceeds 25 ‰ the block is not painted (white wedged between objects).
+
+### `ISLAND_MAX` = 0.015 · `ISLAND_TOUCH` = 12 · `ISLAND_TOUCH_MIN` = 20 · `HUG_MAX` = 0.6
+For blocks under 1.5% of the page: fewer than 20 painted-black pixels (originally light, outside bubbles) within 12 px makes
+it a black hole in a grey sea, not painted; more than 60% of its rim hugging the character mask (dilated 4) is not painted
+either (hair and clothing the mask missed tend to sit there).
 
 ---
 

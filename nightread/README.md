@@ -231,11 +231,20 @@ components on top of the old L3; the old L3 is the same row with `more` left at 
 research side; `BubbleLeakParityTest` pins the bubble-leak test (`bubbleLeak`) on demo04, where the bubble mask
 must match the research side pixel for pixel; `RingParityTest` pins character ring thinning (`ring` / `Ring.kt`,
 `nightread_ring.py` on the research side): the page-level evidence on six pages and the growth and finish on demo01
-must match the research side pixel for pixel.
+must match the research side pixel for pixel; `BgObjectsParityTest` pins the "More" background-object rule (`obj` /
+`BgObjects.kt`, `nightread_obj.py` on the research side): the primitives (integer Gaussian, Canny, median, chamfer,
+quadratic-surface residual) and, on ch34_010, the page-level measurements, the veto and the light-background fill must
+match the research side pixel for pixel (bit for bit).
 
 Character ring thinning (`ring`, on by default and in both product levels; `NIGHTREAD_RING` on the research side):
 only where a drawn outline separates the background from the figure does the already-black background grow up to
 the outline; elsewhere the old grey ring stays. Rules and numbers: *Character ring thinning* in
+`docs/PARAMETERS.md` and `docs/DECISIONS.md`.
+
+The "More" background-object rule (`obj`, on by default but only effective in levels with `more` on, i.e. product
+"More"; `NIGHTREAD_OBJ` on the research side): in "More", background blackening asks whether there is an object —
+white the sticker layer painted between objects goes back to its "Standard" look, and object-free light background
+(white or light tone) is blackened. "Standard" is unaffected. Rules and numbers: *"More" background-object rule* in
 `docs/PARAMETERS.md` and `docs/DECISIONS.md`.
 
 Two more switches default to on, and stay on in all three levels: `separators` (any-angle gutters and page

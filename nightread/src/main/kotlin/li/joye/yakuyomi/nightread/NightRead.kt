@@ -1223,6 +1223,12 @@ object NightRead {
         val h = g.h
         val n = w * h
         val stdKeep = Sticker.selectKeep(a.plan, a.plain, NightTier.L2.apply(p)).accept.intersect(plan.accept)
+        if (stdKeep.size == plan.accept.size) {
+            // 沒有多收的元件：兩趟相同、沒有塊可否決（研究端照樣塗兩趟，結果相同）
+            paintSticker(out, g, a.wc.cc, plan.accept, a.bubbleStruct, plan.promoted, a.frame, a.seg, a.charMask, p, ring)
+            if (diag != null) diag["obj_vetomask"] = Mask(w, h)
+            return null
+        }
         // 只塗標準是空的（常見：大頁的貼紙全是「更多」才收）＝只塗標準的成品就是貼紙層之前的成品：不必複製整頁，
         // 「已經黑」先記、還原時由場景曲線與留白／格溝遮罩重建（[prePaintValue]）
         val st = if (stdKeep.isEmpty()) {
