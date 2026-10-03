@@ -1015,6 +1015,69 @@ For blocks under 1.5% of the page: fewer than 20 painted-black pixels (originall
 it a black hole in a grey sea, not painted; more than 60% of its rim hugging the character mask (dilated 4) is not painted
 either (hair and clothing the mask missed tend to sit there).
 
+### Effect lines (A) and sparkles (C) (`nightread_fx.py`, `nightread_obj.py`; Kotlin `EffectLines`, `ObjectRuleParams.fx` = `EffectLineParams`)
+The user's ruling 2 of 2026-10-03: concentration lines / speed lines / "井" cross-hatching are not objects (black between the
+lines, the lines stay light), sparkles / star dots are not objects (the region is painted, sparkles stay light grey), magic
+swirls / wind / splashes are objects. This round only accepts radial concentration lines whose whole field is clean;
+cross-hatching and parallel speed lines still count as objects (see DECISIONS, *「更多」效果線與閃光*). Angle thresholds are
+written as cosine literals on both sides; no trigonometry runs at decision time.
+
+### `OBJ_FXA` = 1 · `OBJ_FXC` = 1 (`NIGHTREAD_OBJ_FXA` / `_FXC`; Kotlin `fxLines` / `fxSparks`)
+One switch each for A and C, effective only while the background-object rule is on. Both off = rules version 3 before the
+effect lines, pixel for pixel.
+
+### Finding lines: `SEG_SD` = 1.2 · `SEG_MIN` = 8 · join 6° · `PERP` = 2.5 · `GAP` = 20 · `LMIN` = 30
+Thin dark lines (minus accounted-for ⊕ 3) are thinned to a skeleton (Zhang–Suen); junctions (crossing number ≥ 3) are removed
+with a 3×3 dilation and the rest split into 8-connected branches. A branch of at least 8 points whose RMS distance to its
+principal axis is ≤ 1.2 px is straight; straight branches within 6° of each other, ≤ 2.5 px apart and with an along-line gap
+≤ 20 px are chained into one line, and only lines ≥ 30 px (× page scale) count.
+
+### Families: `VP_TOP` = 120 · `NFAM` = 4 · converge 3° · `NMIN` = 8 · spread 30°
+Pairwise intersections of the 120 longest lines are candidate vanishing points; the one with the largest total length of
+lines whose direction is within 3° of (midpoint → point) wins, its members are removed, and the search repeats, up to 4
+families. An effect-line family needs at least 8 members and an angular spread of ≥ 30° around the point (parallel families
+are rejected this round: wall-panel lines, railings and door panels are parallel too).
+
+### `TAPER` = 1.3 · `TAPER_FRAC` = 0.45 · `FREE_MIN` = 2 · `FREE_FRAC` = 0.1 · free ends 4–16 px, gray < 215
+Thick outside, thin inside: sampling along each member and summing (250 − gray) over ±4 px across it, the median ratio of the
+outer 40% (far from the point) to the inner 40% is ≥ 1.3, with ≥ 45% of members above 1.3. Free ends: 4–16 px beyond each
+end along the line, offset ±1 px, σ1 gray stays ≥ 215 (ink within 2 px of a small mark does not count) — the line fades into
+paper; at least 2 such ends and ≥ 10% of (free + blocked). The taper is the least stable measure: c371_008 is 1.36 at
+original size, 1.28 at 1.1× and 1.21 after a σ1.5 blur.
+
+### Effect ink: `TERR` = 48 · direction 10° · `COH` = 0.5 · `SI` = 4 · `VP_NEAR` = 24 · `MARK` = 16 · `LINE_R` = 3
+A family's territory = its member lines (1 px) dilated by an ellipse of 48 px (× page scale). Thin dark ink in the territory
+(small marks excluded) whose structure-tensor line direction (blackhat → σ1 → Sobel → products σ4, all integer Q16) is within
+10° of the vanishing point, with coherence ≥ 0.5 and ≥ 24 px from the point, plus ink within 3 px of a member line, is effect
+ink; ink specks in the territory whose bounding box is ≤ 16 px (× page scale) — dot patterns, short ticks — count too.
+
+### Veto exception: `FX_EXCL` = 4 · `FX_NMEM` = 4
+An A2 white block that would be vetoed is kept when its super-region evidence minus effect ink dilated by 4 px is ≤ 25 ‰ and
+the super-region dilated by 2 px touches ≥ 4 member lines (c362_008 behind the duke, 43.0 ‰ before; c371_008 A1, 127.6 ‰).
+
+### Effect-line regions: `FX_AGREE` = 0.85 · `FX_RESID` = 25 · `FX_EXCL_T` = 14
+A region that failed the whole-region test, with chroma ≤ 6 and not a thin strip: ≥ 85% of its ink is effect ink, non-effect
+ink ≤ 25 ‰, and its hole-filled area holds at least 4 member lines; after removing effect ink dilated by 14 px, σ4 Canny
+≤ 12 ‰ and fit residual ≤ 9. If any region (with ≥ 4 member lines) in the same field — a connected piece of territory minus
+already-black and frame lines ⊕ 2 — fails, no region of that field is painted (the top cell of c362_011 stays grey because
+its cross-hatched part fails).
+
+### Painting: `FX_GROW` = 120 · `FX_HALO` = 8 · `FX_ER_MIN` = 30 · `FX_MIN_PART` = 400 · `FX_LINE_V` = 170
+From the (hole-filled) effect-line regions, grow up to 120 px through "effect ink dilated by 14, or light area" (into the
+dense line ends, so no seam is left along the brightness threshold), avoiding accounted-for pixels, already-black pixels and
+residual evidence (non-effect lines and tone edges, components ≥ 30 px) dilated by 8 px; drop pieces under 400 px. The rest
+is painted from the source ink: BG + ((255 − gray)/255)^1.4 × (170 − BG), floored (paper → BG, solid line → 170: black between
+the lines, lines light). Afterwards "already black" gains the pixels painted to ≤ 40.
+
+### Sparkles: `FXC_ISO` = 4 · `FXC_MIN` = 5 · `FXC_MAX` = 60 · `FXC_DIL` = 3 · `SPARK_V` = 170 · `LONG_STRAIGHT` = 2
+A bright-mark component whose 4 px elliptical dilation touches no dark (< 128) and no thin dark line, with a bounding box of
+5–60 px (× page scale), is a sparkle (halftone gaps, white outlines and clothing highlights all have ink next to them). Sparkles
+are not evidence or thin lines, σ4 Canny within 3 px of them is not a tone edge, and the "many isolated bright marks keep the
+whole region grey" test is off. Inside painted areas each sparkle (dilated 1) is drawn as max(current, BG + (gray/255)^1.4 ×
+(170 − BG)), floored. Also, a long line (bounding box ≥ 80) that is ruler-straight (square root of the minor eigenvalue of its
+pixel coordinates ≤ 2 px) gets no long-line zone: that zone (40 px) is wider than the core growth (30 + 7 px) and leaves a
+square grey notch beside straight lines.
+
 ---
 
 ## Text

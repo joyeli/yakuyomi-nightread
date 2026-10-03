@@ -155,7 +155,11 @@ whether it holds an object (`nightread_obj.py` / `BgObjects.kt`). Two parts: whi
 "Standard" goes back to its "Standard" look when, closed across thin lines, its surroundings carry objects (wall-panel lines,
 table edges, floor-tile lines); light background regions (white or light tone) are measured as a whole — lines, tone
 boundaries, surface residual, chroma, width, sparkles — and if they hold no object they are painted from a core far from any
-evidence, grown back to the line edges, so narrow pockets enclosed by lines stay out of reach. "Standard" skips this layer.
+evidence, grown back to the line edges, so narrow pockets enclosed by lines stay out of reach. Effect lines and sparkles are
+not objects (`nightread_fx.py` / `EffectLines.kt`): radial concentration-line families are found on the whole page, and a
+region that is clean once the ink running along a family is set aside is painted black with the lines kept light; isolated
+bright marks with no dark ink around them are sparkles — the region is painted and the sparkles drawn light grey.
+Cross-hatching and parallel speed lines still count as objects this round. "Standard" skips this layer.
 
 **Semantic release for core fill.** Core fill has two geometric protections: a geodesic-ratio veto (background
 reaches the panel border in a straight line, cloth has to detour) and a thick-ink aura (no fill around a mass

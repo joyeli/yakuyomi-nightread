@@ -233,8 +233,9 @@ must match the research side pixel for pixel; `RingParityTest` pins character ri
 `nightread_ring.py` on the research side): the page-level evidence on six pages and the growth and finish on demo01
 must match the research side pixel for pixel; `BgObjectsParityTest` pins the "More" background-object rule (`obj` /
 `BgObjects.kt`, `nightread_obj.py` on the research side): the primitives (integer Gaussian, Canny, median, chamfer,
-quadratic-surface residual) and, on ch34_010, the page-level measurements, the veto and the light-background fill must
-match the research side pixel for pixel (bit for bit).
+quadratic-surface residual), the effect-line thinning and straight branches (`EffectLines.kt`, `nightread_fx.py`) and,
+on ch34_010 and ch34_015, the page-level measurements (sparkles, effect ink, territory and member lines included), the veto,
+the light-background fill and the effect-line regions must match the research side pixel for pixel (bit for bit).
 
 Character ring thinning (`ring`, on by default and in both product levels; `NIGHTREAD_RING` on the research side):
 only where a drawn outline separates the background from the figure does the already-black background grow up to
