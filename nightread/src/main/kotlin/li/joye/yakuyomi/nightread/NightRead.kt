@@ -35,15 +35,17 @@ object NightRead {
      *    修改（第 13 頁雲下、ch34_014 牆面、灰圈縮法）進產品時要加到 2：版本 1 的 APK 已交給使用者。
      *  - 2（2026-10-03）：人物外灰圈收細（折衷版，[Ring]；標準與更多都套）。版本 2 的 debug APK 同日交給使用者，之後的規則
      *    修改（含研究中的「更多」背景物件修改：雲下、牆面）一律加到 3。
+     *  - 3（2026-10-04，還沒交出）：「更多」背景物件規則（[BgObjects]；只動更多，標準與版本 2 逐像素相同）。效果線 A／C（集中線、
+     *    閃光不算物件）若在這版 APK 交出前做完，也算在 3 裡。
      */
-    const val RULES_VERSION: Int = 2
+    const val RULES_VERSION: Int = 3
 
     /**
      * 重繪一頁。
      *
      * 前半是分析（頁型、白元件、氣泡、貼紙計畫、場景曲線、格溝／頁邊），後半是合成（貼紙三檔篩選 → 留白（出血格過濾）→
-     * 格溝／頁邊 → 貼紙 → 氣泡 → 偽泡 → 人頭一致化 → 剩餘填色 → 灰圈收細（[Ring]）→ 人物還原（跳過泡與格溝））。
-     * 內部就是 [analyze] → [keepFor] → [composeTier]，與 [renderTiers] 同一條程式路徑。
+     * 格溝／頁邊 → 貼紙 →（「更多」）背景物件規則（[BgObjects]）→ 氣泡 → 偽泡 → 人頭一致化 → 剩餘填色 → 灰圈收細（[Ring]）→
+     * 人物還原（跳過泡與格溝））。內部就是 [analyze] → [keepFor] → [composeTier]，與 [renderTiers] 同一條程式路徑。
      */
     fun render(
         input: NightReadInput,
@@ -121,8 +123,11 @@ object NightRead {
      */
     private fun drawKey(p: NightReadParams, plan: Sticker.Plan): Any? {
         val m = p.more
-        if (!m.enabled || plan.accept.isEmpty()) return null
-        return listOf(m.keepDarkStroke, m.edgeSeedFallback, m.edgeBand, m.edgeReach)
+        if (!m.enabled) return null
+        // 背景物件規則（[BgObjects]）在貼紙之外也會塗（亮背景區），keep 是空的也要合成
+        val obj = if (p.obj.enabled) p.obj else null
+        if (plan.accept.isEmpty() && obj == null) return null
+        return listOf(m.keepDarkStroke, m.edgeSeedFallback, m.edgeBand, m.edgeReach, obj)
     }
 
     /** 合成一檔交給 sink。獨立成函式：回傳後這一檔的成品與中間量就沒有任何參照（下一檔合成時不跟它疊高峰值）。 */
@@ -361,11 +366,14 @@ object NightRead {
     ): NightReadResult {
         val w = a.g.w
         val h = a.g.h
+        // 「更多」背景物件規則（[BgObjects]；只在開了「更多」新規則的檔）的整頁量測：在合成配置成品之前算（它的暫存不疊在合成的峰值上）
+        val objCtx = ObjHolder(if (p.more.enabled && p.obj.enabled) objContext(a, p, diag) else null)
+        debug?.invoke("objContext", 0)
         // 無框頁的留白層用加「更多」新規則之前的 keep（新收的元件整顆當貼紙塗、留白帶照舊；研究端 P3）
         val gutterShow = if (a.frameless) a.wc.gutterIds - plan.baseAccept else a.wc.gutterIds
         val gutter = maskOfIds(a.wc.cc, gutterShow, w, h)
         val rest = bubbleRest(a, plan, p, debug)
-        val out = compose(a, gutter, gutterShow, plan, rest?.rest, rest?.pre, p, debug, diag)
+        val out = compose(a, gutter, gutterShow, plan, rest?.rest, rest?.pre, objCtx, p, debug, diag)
         return NightReadResult(out, gutter, a.bubble, a.charMask, a.frameless, plan.accept, plan.promoted, a.sep)
     }
 
@@ -1059,17 +1067,21 @@ object NightRead {
     // ── 合成 ─────────────────────────────────────────────────────────
 
     /**
-     * 整頁合成（一檔）：[Analysis.scene] 的複本 → 留白填深（出血格過濾）→ 格溝／頁邊 → 貼紙式背景 → 氣泡重繪 → 灰圈收細 → 人物還原。
-     * 檔位相依的只有 [gutterIn]（無框頁＝留白元件扣掉 keep）、[plan]、[bubbleRest]／[bubbleRestPre]；其餘全讀 [a]、不改寫它
-     * （灰圈收細的頁面級證據在 [Analysis.ringEvidence]，各檔共用）。
+     * 整頁合成（一檔）：[Analysis.scene] 的複本 → 留白填深（出血格過濾）→ 格溝／頁邊 → 貼紙式背景 →（「更多」）背景物件規則
+     * （[BgObjects]：貼紙層接否決、之後亮背景區塗黑）→ 氣泡重繪 → 灰圈收細 → 人物還原。
+     * 檔位相依的只有 [gutterIn]（無框頁＝留白元件扣掉 keep）、[plan]、[bubbleRestIn]／[bubbleRestPreIn]、[objHolder]；其餘全讀 [a]、
+     * 不改寫它（灰圈收細的頁面級證據在 [Analysis.ringEvidence]，各檔共用）。
      *
      * 封縫救回的泡（[Analysis.bubbleLocal]）從泡重繪起（泡重繪、偽泡、亮島、人物還原）才當泡，
      * 上面的結構層（格溝、線稿密度否決、出血過濾、貼紙）只看 [Analysis.bubbleStruct]。
      */
     private fun compose(
-        a: Analysis, gutterIn: Mask, gutterShow: Set<Int>, plan: Sticker.Plan, bubbleRest: Mask?, bubbleRestPre: LongArray?,
-        p: NightReadParams, debug: NightReadDebug?, diag: MutableMap<String, Any>?,
+        a: Analysis, gutterIn: Mask, gutterShow: Set<Int>, plan: Sticker.Plan, bubbleRestIn: Mask?, bubbleRestPreIn: LongArray?,
+        objHolder: ObjHolder, p: NightReadParams, debug: NightReadDebug?, diag: MutableMap<String, Any>?,
     ): Gray {
+        val objCtx = objHolder.ctx
+        var bubbleRest = bubbleRestIn
+        var bubbleRestPre = bubbleRestPreIn
         val g = a.g
         val seg = a.seg
         val w = g.w
@@ -1081,16 +1093,36 @@ object NightRead {
         val ring = if (p.ring.enabled) Ring.Collect(w, h) else null
 
         // 留白：有框頁只填「深入不超過短邊 12%」的部分；無框頁只填真頁邊帶
-        val gvWh = paintGutterBand(out, a, gutterIn, gutterShow, p, debug, diag)
+        val gbb = paintGutterBand(out, a, gutterIn, gutterShow, p, debug, diag, keepBand = objCtx != null && p.obj.veto)
+        val gvWh = gbb.gv
 
         // 任意角度格溝／頁邊：同留白待遇（填 BG、邊界描亮），在貼紙層之前
         if (sep != null && sep.any()) paintGutter(out, g, sep, p)
 
+        // 「更多」背景物件規則（[BgObjects]；[objCtx] 非 null＝這一檔開了）：V 否決、L 亮背景區
         if (plan.accept.isNotEmpty()) {
-            paintSticker(out, g, a.wc.cc, plan.accept, a.bubbleStruct, plan.promoted, a.frame, seg, a.charMask, p, ring)
+            if (objCtx != null && p.obj.veto) {
+                val vz = paintStickerVeto(out, a, plan, objCtx, gbb.band, p, ring, diag)
+                if (vz != null) {
+                    // 否決元件：泡外圈不塗、灰圈收細的可認領像素（泡外圈讓開人物前的範圍）也拿掉
+                    bubbleRest = bubbleRest?.andNot(vz)
+                    bubbleRestPre = bubbleRestPre?.let { b ->
+                        val c = b.copyOf()
+                        for (i in vz.data.indices) if (vz.data[i]) c[i ushr 6] = c[i ushr 6] and (1L shl (i and 63)).inv()
+                        c
+                    }
+                }
+            } else {
+                paintSticker(out, g, a.wc.cc, plan.accept, a.bubbleStruct, plan.promoted, a.frame, seg, a.charMask, p, ring)
+            }
         }
         debug?.invoke("paintSticker", 0)
-        // 灰圈收細：背景填黑（留白／格溝／貼紙）到此為止塗成 BG 的像素（1 bit/px，到人物還原前才攤開）
+        if (objCtx != null && p.obj.lightFill) {
+            BgObjects.lightFill(out, g, objCtx, a.charMask, a.charRaw, a.bubbleUntrim, a.frame, seg, a.chroma, p.obj, p, diag)
+            debug?.invoke("objLightFill", 0)
+        }
+        objHolder.ctx = null                    // 量測到此用完：不陪著後面的泡重繪／灰圈收細（那裡是合成的峰值）
+        // 灰圈收細：背景填黑（留白／格溝／貼紙／亮背景區）到此為止塗成 BG 的像素（1 bit/px，到人物還原前才攤開）
         val ringBg = if (ring == null) null else {
             val bgf = p.bg.toFloat()
             val bits = LongArray((w * h + 63) ushr 6)
@@ -1162,6 +1194,119 @@ object NightRead {
             out.data[i] = out.data[i] * (1f - al) + sceneKeep.data[i] * al
         }
         return Gray(w, h, IntArray(w * h) { out.data[it].roundToInt().coerceIn(0, 255) })
+    }
+
+    /** [compose] 用完就放掉的整頁量測（參數或區域變數會被編譯後的框架一直抱到函式結束）。 */
+    private class ObjHolder(var ctx: BgObjects.Context?)
+
+    /**
+     * 背景物件規則的整頁量測。不快取在 [Analysis]：產品只有「更多」一檔用它，快取（約 1.25 B/px）會一路活到人物還原（灰圈收細的
+     * 連通元件是那時的峰值）；每個開了規則的檔各算一次。
+     */
+    private fun objContext(a: Analysis, p: NightReadParams, diag: MutableMap<String, Any>?): BgObjects.Context =
+        BgObjects.context(a.g, a.charMask, a.charRaw, a.bubbleUntrim, a.seg, a.frame, p.obj, diag)
+
+    /**
+     * 背景物件規則 V（研究端 compose 的否決分支）：先只塗標準（[NightTier.L2] 的 keep ∩ 這一檔的 keep）、再塗全部；多塗的連通塊
+     * 逐塊看超區證據（[BgObjects.vetoBlocks]），否決的塊（方核外擴描亮邊半徑＋[ObjectRuleParams.vetoBackPad]）還原成只塗標準的
+     * 樣子。回傳否決元件的遮罩（沒有＝null）。
+     *
+     * 灰圈收細的收集：研究端在否決元件上改用只塗標準那一趟的收集；標準那一趟塗的是別的元件，而「核心沒填」與「描亮邊」都落在
+     * 塗它的元件自己的像素裡，所以在否決元件上那一趟的收集恆空——這裡直接把否決元件上的收集清掉（逐位元相同、不必多收一份）。
+     */
+    private fun paintStickerVeto(
+        out: FImg, a: Analysis, plan: Sticker.Plan, ctx: BgObjects.Context, gutterBand: LongArray?, p: NightReadParams,
+        ring: Ring.Collect?, diag: MutableMap<String, Any>?,
+    ): Mask? {
+        val g = a.g
+        val w = g.w
+        val h = g.h
+        val n = w * h
+        val stdKeep = Sticker.selectKeep(a.plan, a.plain, NightTier.L2.apply(p)).accept.intersect(plan.accept)
+        // 只塗標準是空的（常見：大頁的貼紙全是「更多」才收）＝只塗標準的成品就是貼紙層之前的成品：不必複製整頁，
+        // 「已經黑」先記、還原時由場景曲線與留白／格溝遮罩重建（[prePaintValue]）
+        val st = if (stdKeep.isEmpty()) {
+            val preBits = packBits(BgObjects.blackish(out, g, p.obj, p))      // 1 bit/px：貼紙層（核心填色）是合成的峰值
+            paintSticker(out, g, a.wc.cc, plan.accept, a.bubbleStruct, plan.promoted, a.frame, a.seg, a.charMask, p, ring)
+            val pre = unpackBits(preBits, w, h)
+            TwoPasses(pre, BgObjects.blackish(out, g, p.obj, p).andNot(pre), null, null)
+        } else {
+            paintTwoPasses(out, a, plan, stdKeep, p, ring)
+        }
+        val vet = BgObjects.vetoBlocks(g, st.extra, st.stdDark, ctx, a.charMask, a.charRaw, a.bubbleUntrim, a.frame, a.regions,
+            p.obj, diag)
+        if (diag != null) diag["obj_vetomask"] = vet
+        if (!vet.any()) return null
+        val r = Math.rint(p.strokeObjFrac * min(h, w)).toInt().coerceIn(p.strokeObjMin, p.strokeObjMax) + p.obj.vetoBackPad
+        val back = Cv.dilatePacked(vet, Cv.rect(2 * r + 1, 2 * r + 1))
+        val di = st.diffIdx
+        val dv = st.diffStd
+        if (di != null && dv != null) {
+            for (k in di.indices) { val i = di[k]; if (back.data[i]) out.data[i] = dv[k] }
+        } else {
+            for (i in 0 until n) if (back.data[i]) out.data[i] = prePaintValue(i, a, gutterBand, p)
+        }
+        val vids = HashSet<Int>()
+        for (i in 0 until n) if (vet.data[i]) { val l = a.wc.cc.labels[i]; if (l > 0 && l !in stdKeep) vids.add(l) }
+        if (vids.isEmpty()) return null
+        val vz = maskOfIds(a.wc.cc, vids, w, h)
+        if (ring != null) {
+            for (i in 0 until n) {
+                if (!vz.data[i]) continue
+                val bit = (1L shl (i and 63)).inv()
+                ring.withheld[i ushr 6] = ring.withheld[i ushr 6] and bit
+                ring.stkBand[i ushr 6] = ring.stkBand[i ushr 6] and bit
+            }
+        }
+        return vz
+    }
+
+    /** [paintTwoPasses] 的結果：只塗標準時「已經黑」、多塗的「已經黑」、兩趟不同的像素（位置與只塗標準時的值）。 */
+    private class TwoPasses(val stdDark: Mask, val extra: Mask, val diffIdx: IntArray?, val diffStd: FloatArray?)
+
+    /**
+     * 只塗標準（複本上）與塗全部（[out] 上，收灰圈）兩趟。獨立成函式：只塗標準的整頁複本只活在這裡，回傳後只剩兩趟不同的像素
+     * （稀疏），不陪著否決的整頁標號一起疊高峰值。
+     *
+     * 貼紙層逐像素獨立（每顆元件只寫自己的窗；某像素的結果只由它原本的值與蓋到它的元件依序決定），而兩趟只差「更多」多收的元件：
+     * 兩趟只可能在那些元件的窗的聯集 U 裡不同。所以只塗標準那一趟只塗窗碰到 U 的標準元件，U 外直接當成與塗全部相同（研究端
+     * 兩趟都塗全部的標準元件；結果逐位元相同）。
+     */
+    private fun paintTwoPasses(
+        out: FImg, a: Analysis, plan: Sticker.Plan, stdKeep: Set<Int>, p: NightReadParams, ring: Ring.Collect?,
+    ): TwoPasses {
+        val g = a.g
+        val w = g.w
+        val h = g.h
+        val n = w * h
+        val cc = a.wc.cc
+        // 窗＝paintSticker 的 Sticker.window(…, r + 2)
+        val m = (p.strokeObjFrac * min(g.h, g.w)).roundToInt().coerceIn(p.strokeObjMin, p.strokeObjMax) + 2
+        fun rect(id: Int) = intArrayOf(max(0, cc.left[id] - m), max(0, cc.top[id] - m),
+            min(w, cc.left[id] + cc.width[id] + m), min(h, cc.top[id] + cc.height[id] + m))
+        val extraRects = (plan.accept - stdKeep).map(::rect)
+        val u = Mask(w, h)
+        for (r in extraRects) for (y in r[1] until r[3]) java.util.Arrays.fill(u.data, y * w + r[0], y * w + r[2], true)
+        val stdHit = stdKeep.filter { id ->
+            val r = rect(id)
+            extraRects.any { e -> r[0] < e[2] && e[0] < r[2] && r[1] < e[3] && e[1] < r[3] }
+        }.toSet()
+        val outStd = out.copy()
+        if (stdHit.isNotEmpty()) {
+            paintSticker(outStd, g, cc, stdHit, a.bubbleStruct, plan.promoted.intersect(stdHit), a.frame, a.seg, a.charMask, p, null)
+        }
+        paintSticker(out, g, cc, plan.accept, a.bubbleStruct, plan.promoted, a.frame, a.seg, a.charMask, p, ring)
+        val bgf = p.bg.toFloat()
+        val dg = p.obj.darkG
+        val stdDark = Mask(w, h, BooleanArray(n) { (if (u.data[it]) outStd.data[it] else out.data[it]) == bgf || g.data[it] <= dg })
+        val extra = BgObjects.blackish(out, g, p.obj, p).andNot(stdDark)
+        var nd = 0
+        for (i in 0 until n) if (u.data[i] && out.data[i] != outStd.data[i]) nd++
+        val idx = IntArray(nd)
+        val v = FloatArray(nd)
+        var k = 0
+        for (i in 0 until n) if (u.data[i] && out.data[i] != outStd.data[i]) { idx[k] = i; v[k] = outStd.data[i]; k++ }
+        return TwoPasses(stdDark, extra, idx, v)
     }
 
     /**
@@ -1270,12 +1415,46 @@ object NightRead {
      */
     private fun paintGutterBand(
         out: FImg, a: Analysis, gutterIn: Mask, gutterShow: Set<Int>, p: NightReadParams,
-        debug: NightReadDebug?, diag: MutableMap<String, Any>?,
-    ): LongArray? {
+        debug: NightReadDebug?, diag: MutableMap<String, Any>?, keepBand: Boolean = false,
+    ): GutterBandBits {
         val gb = gutterBand(a, gutterIn, gutterShow, p, debug, diag)
         val band = gb.band
         if (band != null && band.any()) paintGutter(out, a.g, band, p)
-        return gb.gv
+        return GutterBandBits(gb.gv, if (keepBand && band != null && band.any()) packBits(band) else null)
+    }
+
+    /** [paintGutterBand] 的結果：灰圈收細用的「只因人物自己的墨被否決」、塗了的留白帶（[keepBand] 才留；背景物件規則重建貼紙前的值用）。 */
+    private class GutterBandBits(val gv: LongArray?, val band: LongArray?)
+
+    /**
+     * 貼紙層之前的成品值（[compose] 的「場景曲線 → 留白帶 → 格溝／頁邊」）在像素 [i] 的值，由場景曲線與兩層遮罩重建（逐個浮點運算
+     * 照 [paintGutter]：填 bg、外擴方核 2·stroke+1 的邊帶取 max(原值, bg ＋ 墨度 ×(edgeInk − bg))）。
+     */
+    private fun prePaintValue(i: Int, a: Analysis, band: LongArray?, p: NightReadParams): Float {
+        val w = a.g.w
+        val h = a.g.h
+        var v = a.scene.data[i]
+        val x = i % w
+        val y = i / w
+        val s = p.stroke
+        fun edge(isFill: (Int) -> Boolean): Boolean {
+            if (isFill(i)) return false
+            for (yy in max(0, y - s)..min(h - 1, y + s)) for (xx in max(0, x - s)..min(w - 1, x + s)) if (isFill(yy * w + xx)) return true
+            return false
+        }
+        val ink = ((1.0 - a.g.data[i] / 255.0) * 1.6).coerceIn(0.0, 1.0).toFloat()
+        if (band != null) {
+            val f = { j: Int -> (band[j ushr 6] ushr (j and 63)) and 1L != 0L }
+            if (f(i)) v = p.bg.toFloat()
+            if (edge(f)) v = max(v, p.bg + ink * (p.edgeInk - p.bg))
+        }
+        val sep = a.sep
+        if (sep != null && sep.any()) {
+            val f = { j: Int -> sep.data[j] }
+            if (f(i)) v = p.bg.toFloat()
+            if (edge(f)) v = max(v, p.bg + ink * (p.edgeInk - p.bg))
+        }
+        return v
     }
 
     /** [gutterBand] 的結果：要塗的留白帶（null＝不塗），與只因人物自己的墨被線稿否決的像素（null＝沒算或沒有）。 */

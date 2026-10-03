@@ -25,7 +25,9 @@ import kotlin.math.abs
  * L3 的環境變數 ＋ `NIGHTREAD_MORE=1`。ch34_011 加了三顆元件（核心填色幾乎沒塗、成品只差 15 px，守 P1 描亮邊不蓋黑）、demo06 加兩顆
  * （C1 長髮旁背景＋C2 只卡字壓的元件）、demo02 加三顆（C3 頁邊留白門檻邊上的旁白卡片兩張＋C1 一顆；demo02 只有 MORE 一檔的基線）、
  * demo05 沒有元件過安全網（與 L3 同一份基線）。這裡的 "L3" 是舊 L3（[MoreRuleParams.enabled] 預設關），研究對照用。
- * 逐元件（特徵、門、判定）的 parity 另見 [MoreRuleParityTest]。
+ * 逐元件（特徵、門、判定）的 parity 另見 [MoreRuleParityTest]。規則版本 3（2026-10-04）起「更多」另有背景物件規則（[ObjectRuleParams]）：
+ * 四頁裡只有 demo06 的成品變了（亮背景區塗黑 6,635 px），MORE 的 demo06 基線換成研究端版本 3 的成品；其餘三頁與版本 2 相同。
+ * 規則本身的逐像素 parity 見 [BgObjectsParityTest]。
  *
  * demo06（2026-10-02 加）守泡內淺條修法 e（[NightReadParams.bubbleCleanInkHoles]＋[NightReadParams.bubbleGuardRaw]）：
  * ch34_011／demo05 在 e 下四檔 0 px 變化，整頁容差又寬（demo06 的淺條只佔頁面 0.1%），只有逐像素比的泡遮罩抓得到漏移植。

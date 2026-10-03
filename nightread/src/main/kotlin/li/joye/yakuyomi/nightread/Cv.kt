@@ -480,6 +480,14 @@ object Cv {
 
     fun erodeGray(g: Gray, k: Kernel): Gray = morphGray(g, k, wantMax = false)
 
+    /**
+     * 不限 8 位元的灰階膨脹／侵蝕（背景物件規則的 Q16 影像、字塊標號）：外側不影響極值（同 cv2 的形態學預設邊界）。
+     * 與 [dilateGray]／[erodeGray] 只差單位元（Int 的最小／最大值）；核都含錨點，8 位元影像兩者逐位元相同。
+     */
+    fun dilateGrayI(g: Gray, k: Kernel): Gray = morphGray(g, k, wantMax = true, lo = Int.MIN_VALUE, hi = Int.MAX_VALUE)
+
+    fun erodeGrayI(g: Gray, k: Kernel): Gray = morphGray(g, k, wantMax = false, lo = Int.MIN_VALUE, hi = Int.MAX_VALUE)
+
     /** `cv2.morphologyEx(g, MORPH_BLACKHAT, k)` ＝ close(g) − g（灰階，結果 ≥ 0）。 */
     fun blackhat(g: Gray, k: Kernel): Gray {
         val closed = erodeGray(dilateGray(g, k), k)
@@ -508,10 +516,10 @@ object Cv {
      *
      * 邊界照 cv2 的形態學預設：dilate 外側視為 0、erode 外側視為 255，兩者都不影響極值。
      */
-    private fun morphGray(g: Gray, k: Kernel, wantMax: Boolean): Gray {
+    private fun morphGray(g: Gray, k: Kernel, wantMax: Boolean, lo: Int = 0, hi: Int = 255): Gray {
         val w = g.w
         val h = g.h
-        val out = Gray(w, h, IntArray(w * h) { if (wantMax) 0 else 255 })
+        val out = Gray(w, h, IntArray(w * h) { if (wantMax) lo else hi })
         val row = IntArray(w)
         val widths = k.runStart.indices
             .filter { k.runEnd[it] > k.runStart[it] }
@@ -545,7 +553,7 @@ object Cv {
                         val lo = max(a0, 0)
                         val hi = min(b0, w - 1)
                         if (lo > hi) {
-                            if (wantMax) 0 else 255
+                            if (wantMax) lo else hi
                         } else {
                             var acc = row[lo]
                             for (j in lo + 1..hi) acc = if (wantMax) max(acc, row[j]) else min(acc, row[j])
@@ -2140,4 +2148,350 @@ object Cv {
         }
         return out
     }
+
+    // ── 背景物件規則的確定性原語（研究端 research/nightread_obj.py 照同一套整數寫法；逐位元相同）──────────
+
+    /**
+     * 整數高斯核（研究端 `gauss_w`）：核長＝round(8σ+1)|1（同 cv2 浮點版）；權重＝exp(−d²/2σ²) 逐項加總正規化、×65536 四捨五入
+     * （半進位），中心補足使總和＝65536。
+     */
+    fun gaussW(sigma: Double): IntArray {
+        val ks = Math.rint(sigma * 8 + 1).toInt() or 1
+        val c = ks / 2
+        val k = DoubleArray(ks) { val d = (it - c).toDouble(); exp(-(d * d) / (2.0 * sigma * sigma)) }
+        var t = 0.0
+        for (v in k) t += v
+        val w = IntArray(ks) { floor(k[it] / t * 65536.0 + 0.5).toInt() }
+        var sum = 0
+        for (v in w) sum += v
+        w[c] += 65536 - sum
+        return w
+    }
+
+    /**
+     * uint8 影像的整數高斯（研究端 `gauss_q16`）：[gaussW] 兩趟可分離卷積（BORDER_REFLECT_101；橫向 Int、直向 Long 累加），
+     * 結果四捨五入到 Q16（灰階 ×65536）。整數運算與加總順序無關，與研究端的 cv2.sepFilter2D(float64) 逐位元相同。
+     */
+    fun gaussQ16(g: Gray, sigma: Double): Gray {
+        val w = g.w
+        val h = g.h
+        val k = gaussW(sigma)
+        val c = k.size / 2
+        val src = g.data
+        // 橫向那一趟只留直向核涵蓋的 2c+1 列（環形緩衝）：輸出列 y 要的來源列（REFLECT_101 之後）都落在 [y−c, y+c] 裡，
+        // 以「列號 mod (2c+1)」放槽不會撞；整頁只配輸出那一張
+        val nr = 2 * c + 1
+        val rows = Array(nr) { IntArray(w) }
+        val rowId = IntArray(nr) { -1 }
+        val xi = IntArray(w + 2 * c) { reflect101(it - c, w) }
+        val line = IntArray(w + 2 * c)
+        fun hrow(r: Int): IntArray {
+            val slot = r % nr
+            val dst = rows[slot]
+            if (rowId[slot] == r) return dst
+            val base = r * w
+            for (i in line.indices) line[i] = src[base + xi[i]]
+            for (x in 0 until w) {
+                val m = x + c
+                var acc = k[c] * line[m]
+                for (j in 1..c) acc += k[c + j] * (line[m - j] + line[m + j])
+                dst[x] = acc
+            }
+            rowId[slot] = r
+            return dst
+        }
+        val out = IntArray(w * h)
+        val acc = LongArray(w)
+        for (y in 0 until h) {
+            // 對稱核：上下對稱的兩列先相加（Int：兩個 ≤ 255·65536 的值）再乘一次，整數運算與順序無關
+            val hc = hrow(y)
+            val kc = k[c].toLong()
+            for (x in 0 until w) acc[x] = kc * hc[x]
+            for (j in 1..c) {
+                val kj = k[c + j].toLong()
+                if (kj == 0L) continue
+                val ha = hrow(reflect101(y - j, h))
+                val hb = hrow(reflect101(y + j, h))
+                for (x in 0 until w) acc[x] += kj * (ha[x] + hb[x])
+            }
+            val ob = y * w
+            for (x in 0 until w) out[ob + x] = ((acc[x] + 32768L) shr 16).toInt()
+        }
+        return Gray(w, h, out)
+    }
+
+    /**
+     * `cv2.medianBlur(u8, ksize)`（ksize 奇數、uint8；BORDER_REPLICATE）：窗內 ksize² 個值排序後第 ksize²/2 個（0 起算）。
+     * 逐列滑動直方圖（16×16 兩層計數）。
+     */
+    fun medianBlur8(g: Gray, ksize: Int): Gray {
+        val w = g.w
+        val h = g.h
+        val r = ksize / 2
+        val need = ksize * ksize / 2 + 1          // 第 need 小（1 起算）
+        val src = g.data
+        val out = IntArray(w * h)
+        val fine = IntArray(256)
+        val coarse = IntArray(16)
+        val cols = IntArray(ksize)
+        for (y in 0 until h) {
+            java.util.Arrays.fill(fine, 0)
+            java.util.Arrays.fill(coarse, 0)
+            for (dy in -r..r) cols[dy + r] = (y + dy).coerceIn(0, h - 1) * w
+            // x = 0 的窗：列 −r..r（複製邊）
+            for (dx in -r..r) {
+                val xx = dx.coerceIn(0, w - 1)
+                for (cb in cols) { val v = src[cb + xx]; fine[v]++; coarse[v ushr 4]++ }
+            }
+            for (x in 0 until w) {
+                var cnt = 0
+                var cbin = 0
+                while (cnt + coarse[cbin] < need) { cnt += coarse[cbin]; cbin++ }
+                var v = cbin shl 4
+                while (cnt + fine[v] < need) { cnt += fine[v]; v++ }
+                out[y * w + x] = v
+                if (x + 1 < w) {
+                    val xo = (x - r).coerceIn(0, w - 1)
+                    val xn = (x + 1 + r).coerceIn(0, w - 1)
+                    for (cb in cols) {
+                        val a = src[cb + xo]; fine[a]--; coarse[a ushr 4]--
+                        val b = src[cb + xn]; fine[b]++; coarse[b ushr 4]++
+                    }
+                }
+            }
+        }
+        return Gray(w, h, out)
+    }
+
+    /**
+     * `cv2.Canny(u8, lo, hi)`（aperture 3、L1 梯度；OpenCV 4.11 canny.cpp 的非 IPP 路徑）：BORDER_REPLICATE 的 3×3 Sobel、
+     * 梯度＝|dx|＋|dy|；非極大抑制用定點正切（TG22＝13573、CANNY_SHIFT 15；影像外的梯度當 0）：近水平比左右（左 >、右 ≥）、
+     * 近垂直比上下（上 >、下 ≥）、斜向比對角（兩邊都 >）；> lo 的極大值是候選、> hi 的是強邊；結果＝與強邊 8 連通的候選。
+     * 輸入＝[src] 右移 [shift] 位的整數（背景物件規則餵 Q16 模糊的整數部分，不另配 uint8 影像）。梯度只留三列環形緩衝，
+     * 整頁只配 1 B/px 的狀態與按需長大的堆疊。
+     */
+    fun canny(src: IntArray, w: Int, h: Int, shift: Int, lo: Int, hi: Int): Mask {
+        val dx = Array(3) { IntArray(w) }
+        val dy = Array(3) { IntArray(w) }
+        val mag = Array(3) { IntArray(w + 2) }      // [x + 1]；兩側各一格 0
+        fun row(y: Int, slot: Int) {
+            val ym = max(0, y - 1) * w
+            val y0 = y * w
+            val yp = min(h - 1, y + 1) * w
+            val ddx = dx[slot]; val ddy = dy[slot]; val mm = mag[slot]
+            for (x in 0 until w) {
+                val xm = max(0, x - 1)
+                val xp = min(w - 1, x + 1)
+                val a = src[ym + xm] shr shift; val b = src[ym + x] shr shift; val c = src[ym + xp] shr shift
+                val d = src[y0 + xm] shr shift; val f = src[y0 + xp] shr shift
+                val e = src[yp + xm] shr shift; val gg = src[yp + x] shr shift; val k = src[yp + xp] shr shift
+                val gx = (c + 2 * f + k) - (a + 2 * d + e)
+                val gy = (e + 2 * gg + k) - (a + 2 * b + c)
+                ddx[x] = gx; ddy[x] = gy
+                mm[x + 1] = abs(gx) + abs(gy)
+            }
+        }
+        val zero = IntArray(w + 2)
+        // 0＝不是邊、1＝候選、2＝強邊
+        val st = ByteArray(w * h)
+        var stack = IntArray(1024)
+        var sp = 0
+        if (h > 0) row(0, 0)
+        for (y in 0 until h) {
+            val cur = y % 3
+            if (y + 1 < h) row(y + 1, (y + 1) % 3)
+            val mp = if (y > 0) mag[(y + 2) % 3] else zero
+            val mn = if (y + 1 < h) mag[(y + 1) % 3] else zero
+            val ma = mag[cur]
+            val ddx = dx[cur]; val ddy = dy[cur]
+            for (x in 0 until w) {
+                val mv = ma[x + 1]
+                if (mv <= lo) continue
+                val xs = ddx[x]
+                val ys = ddy[x]
+                val ax = abs(xs)
+                val ay = abs(ys) shl 15
+                val tg22x = ax * 13573
+                val isMax = if (ay < tg22x) {
+                    mv > ma[x] && mv >= ma[x + 2]
+                } else {
+                    val tg67x = tg22x + (ax shl 16)
+                    if (ay > tg67x) {
+                        mv > mp[x + 1] && mv >= mn[x + 1]
+                    } else {
+                        val sg = if ((xs xor ys) < 0) -1 else 1
+                        mv > mp[x + 1 - sg] && mv > mn[x + 1 + sg]
+                    }
+                }
+                if (!isMax) continue
+                val i = y * w + x
+                if (mv > hi) {
+                    st[i] = 2
+                    if (sp == stack.size) stack = stack.copyOf(stack.size * 2)
+                    stack[sp++] = i
+                } else st[i] = 1
+            }
+        }
+        while (sp > 0) {
+            val i = stack[--sp]
+            val x = i % w
+            val y = i / w
+            for (yy in max(0, y - 1)..min(h - 1, y + 1)) {
+                for (xx in max(0, x - 1)..min(w - 1, x + 1)) {
+                    val j = yy * w + xx
+                    if (st[j].toInt() == 1) {
+                        st[j] = 2
+                        if (sp == stack.size) stack = stack.copyOf(stack.size * 2)
+                        stack[sp++] = j
+                    }
+                }
+            }
+        }
+        return Mask(w, h, BooleanArray(w * h) { st[it].toInt() == 2 })
+    }
+
+    /**
+     * [distanceChamfer]（5×5、非 IPP）的整數版：回傳**外圍補 2 px** 的定點距離表（×65536；寬 w+4、第 (y+2)·(w+4)+(x+2) 格是像素
+     * (x, y)；前景到最近背景、背景＝0），與 Long 版逐點相同（上限飽和在 Int 範圍內，頁面上的距離遠不到），省掉 8 B/px 的 Long
+     * 暫存與輸出那一張。`(t × 2⁻¹⁶ 的 float) > thr` 對 t < 2²⁴ 等價於 `t > thr × 65536`（背景物件規則的門檻 24 px）。
+     */
+    fun chamfer5Padded(m: Mask): IntArray {
+        val w = m.w
+        val h = m.h
+        val border = 2
+        val hv = Math.rint(1.0 * 65536).toInt()
+        val diag = Math.rint(1.4f.toDouble() * 65536).toInt()
+        val lng = Math.rint(2.1969f.toDouble() * 65536).toInt()
+        val inf = Int.MAX_VALUE / 2
+        val sw = w + 2 * border
+        val sh = h + 2 * border
+        val t = IntArray(sw * sh)
+        for (bi in 0 until border) for (x in 0 until sw) { t[bi * sw + x] = inf; t[(sh - 1 - bi) * sw + x] = inf }
+        for (y in 0 until h) {
+            val row = (y + border) * sw + border
+            for (bj in 0 until border) { t[row - bj - 1] = inf; t[row + w + bj] = inf }
+            val src = y * w
+            for (x in 0 until w) {
+                val j = row + x
+                if (!m.data[src + x]) { t[j] = 0; continue }
+                var t0 = t[j - sw * 2 - 1] + lng
+                var c = t[j - sw * 2 + 1] + lng; if (t0 > c) t0 = c
+                c = t[j - sw - 2] + lng; if (t0 > c) t0 = c
+                c = t[j - sw - 1] + diag; if (t0 > c) t0 = c
+                c = t[j - sw] + hv; if (t0 > c) t0 = c
+                c = t[j - sw + 1] + diag; if (t0 > c) t0 = c
+                c = t[j - sw + 2] + lng; if (t0 > c) t0 = c
+                c = t[j - 1] + hv; if (t0 > c) t0 = c
+                t[j] = if (t0 > inf) inf else t0
+            }
+        }
+        for (y in h - 1 downTo 0) {
+            val row = (y + border) * sw + border
+            for (x in w - 1 downTo 0) {
+                val j = row + x
+                var t0 = t[j]
+                if (t0 > hv) {
+                    var c = t[j + sw * 2 + 1] + lng; if (t0 > c) t0 = c
+                    c = t[j + sw * 2 - 1] + lng; if (t0 > c) t0 = c
+                    c = t[j + sw + 2] + lng; if (t0 > c) t0 = c
+                    c = t[j + sw + 1] + diag; if (t0 > c) t0 = c
+                    c = t[j + sw] + hv; if (t0 > c) t0 = c
+                    c = t[j + sw - 1] + diag; if (t0 > c) t0 = c
+                    c = t[j + sw - 2] + lng; if (t0 > c) t0 = c
+                    c = t[j + 1] + hv; if (t0 > c) t0 = c
+                    t[j] = t0
+                }
+            }
+        }
+        return t
+    }
+
+    /**
+     * 灰階形態學（不限 8 位元，外側不影響極值）＝[morphGray]（[dilateGrayI]／[erodeGrayI]）逐位元相同的另一種算法：核每列是一段
+     * run，每條來源列對每種 run（起點偏移、寬度）先算一次夾邊的滑動極值（van Herk，兩端補單位元），環形快取核高那麼多列；輸出列
+     * 逐像素取核高個值的極值。[morphGray] 是把每條來源列散佈到核高條輸出列（讀改寫 11 次），這裡每個輸出像素只寫一次。
+     */
+    fun morphGrayGather(g: Gray, k: Kernel, wantMax: Boolean): Gray {
+        val w = g.w
+        val h = g.h
+        val id = if (wantMax) Int.MIN_VALUE else Int.MAX_VALUE
+        // 不同的 run（offL＝runStart − ax、win）
+        val runOf = IntArray(k.h) { -1 }
+        val offs = ArrayList<Int>()
+        val wins = ArrayList<Int>()
+        for (ky in 0 until k.h) {
+            val win = k.runEnd[ky] - k.runStart[ky]
+            if (win <= 0) continue
+            val off = k.runStart[ky] - k.ax
+            var r = -1
+            for (q in offs.indices) if (offs[q] == off && wins[q] == win) { r = q; break }
+            if (r < 0) { offs.add(off); wins.add(win); r = offs.size - 1 }
+            runOf[ky] = r
+        }
+        val nr = offs.size
+        var pad = 0
+        for (q in 0 until nr) pad = max(pad, max(abs(offs[q]), abs(offs[q] + wins[q] - 1)))
+        val pl = w + 2 * pad
+        val padded = IntArray(pl)
+        val pre = IntArray(pl)
+        val suf = IntArray(pl)
+        val kh = k.h
+        val cache = Array(kh) { Array(nr) { IntArray(w) } }
+        val cacheRow = IntArray(kh) { -1 }
+        fun rowExt(sy: Int): Array<IntArray> {
+            val slot = sy % kh
+            val dst = cache[slot]
+            if (cacheRow[slot] == sy) return dst
+            java.util.Arrays.fill(padded, id)
+            System.arraycopy(g.data, sy * w, padded, pad, w)
+            for (q in 0 until nr) {
+                val win = wins[q]
+                var i = 0
+                while (i < pl) {
+                    val end = min(i + win, pl)
+                    var acc = padded[i]
+                    pre[i] = acc
+                    for (j in i + 1 until end) { val v = padded[j]; if (if (wantMax) v > acc else v < acc) acc = v; pre[j] = acc }
+                    acc = padded[end - 1]
+                    suf[end - 1] = acc
+                    for (j in end - 2 downTo i) { val v = padded[j]; if (if (wantMax) v > acc else v < acc) acc = v; suf[j] = acc }
+                    i = end
+                }
+                val o = dst[q]
+                val base = pad + offs[q]
+                for (x in 0 until w) {
+                    val a = suf[x + base]
+                    val b = pre[x + base + win - 1]
+                    o[x] = if (wantMax) (if (a > b) a else b) else (if (a < b) a else b)
+                }
+            }
+            cacheRow[slot] = sy
+            return dst
+        }
+        val out = IntArray(w * h)
+        val cur = IntArray(w)
+        for (y in 0 until h) {
+            java.util.Arrays.fill(cur, id)
+            for (ky in 0 until kh) {
+                val r = runOf[ky]
+                if (r < 0) continue
+                val sy = y + (ky - k.ay)
+                if (sy < 0 || sy >= h) continue
+                val src = rowExt(sy)[r]
+                if (wantMax) { for (x in 0 until w) if (src[x] > cur[x]) cur[x] = src[x] }
+                else { for (x in 0 until w) if (src[x] < cur[x]) cur[x] = src[x] }
+            }
+            System.arraycopy(cur, 0, out, y * w, w)
+        }
+        return Gray(w, h, out)
+    }
+
+    /** 二值侵蝕的位元打包快路：`erode(m, k)` ＝ ¬`dilate`(¬m, k)（同一組位移；影像外：膨脹當 0 ⇔ 侵蝕當 1，同 cv2）。與 [erode] 逐像素相同。 */
+    fun erodePacked(m: Mask, k: Kernel): Mask = dilatePacked(m.not(), k).not()
+
+    /** [close]（cv2 MORPH_CLOSE）的位元打包快路。 */
+    fun closePacked(m: Mask, k: Kernel): Mask = erodePacked(dilatePacked(m, k), k)
+
+    /** [open]（cv2 MORPH_OPEN）的位元打包快路。 */
+    fun openPacked(m: Mask, k: Kernel): Mask = dilatePacked(erodePacked(m, k), k)
 }

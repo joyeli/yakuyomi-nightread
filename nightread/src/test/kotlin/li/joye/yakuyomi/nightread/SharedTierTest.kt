@@ -15,8 +15,8 @@ import javax.imageio.ImageIO
  * **逐位元相同**；合成鍵（keep，加上「更多」的繪製開關，見 [drawKeyOf]）與前一檔相同的那檔傳 null，而且那時單檔的成品也真的
  * 與前一檔逐位元相同（去重在建構上正確）。L3＝產品「更多」（[MoreRuleParams.enabled]），keep 與 L2 相同、但有貼紙要塗時照樣合成。
  *
- * 產品三檔跑五頁 fixture：ch34_011／demo02／demo06 有框；demo04、demo05 無框。demo05 三檔 keep 全空（只合成 L1、L2／L3
- * 都傳 null）；demo04 L1／L2 keep 空、「更多」加一顆。產品三檔在 fixture 上**走不到**兩條快取路徑，另外兩個 case 專門守：
+ * 產品三檔跑五頁 fixture：ch34_011／demo02／demo06 有框；demo04、demo05 無框。demo05 三檔 keep 全空（L2 傳 null；L3 開著背景
+ * 物件規則（[ObjectRuleParams]，規則版本 3），合成鍵與 L2 不同、照樣合成）；demo04 L1／L2 keep 空、「更多」加一顆。產品三檔在 fixture 上**走不到**兩條快取路徑，另外兩個 case 專門守：
  * - [gutterCacheRekeys]：無框頁留白帶依 gutterShow 快取，keep 換了要重算並覆蓋快取、換回來再重算（demo04 跑
  *   [L1, ALL, L1, L3]，只差 stickerMode）。
  * - [nonEmptyPlainSet]：產品參數下 47 頁的 L1 keep 全空（plain 集合從沒非空過），放寬 plain 門檻讓 selectKeep 的 plain 分支
@@ -28,7 +28,8 @@ import javax.imageio.ImageIO
  * 220 的前景白描邊（「更多」的 P1 讓它不蓋已經黑的像素）。L1 ⊆ L2 要求 0 px。L2 ⊆ L3（更多）只要求**不成塊**（違規像素沒有
  * 2×2 全是違規的位置）：「更多」新擢升的元件讓泡外圈填色變大，它 1 px 寬的描亮圈會落在原本黑的像素上——泡與剩餘填色同一白元件
  * 的接縫（泡內的淡灰抗鋸齒，提亮到 42–115）與新黑區邊上的墨線（輪廓描亮）。47 頁 python 892／Kotlin 887 px、最大 8 連通塊
- * 14 px、全是 1 px 寬的線（研究 HARDEN.md 已列、使用者拍板採用 A2 時知道；見 docs/DECISIONS.md）。這條斷言失敗代表
+ * 14 px、全是 1 px 寬的線（研究 HARDEN.md 已列、使用者拍板採用 A2 時知道；見 docs/DECISIONS.md）。背景物件規則（版本 3）把四周
+ * 大多被塗黑的字筆畫畫亮（同泡裡的字），那裡標準是場景的暗墨：字（DBNet 筆畫外擴 3 px）不算進 L2 ⊆ L3。這條斷言失敗代表
  * 使用者語意退步（調高一檔反而有暗處變亮），不一定是共用分析的 bug。
  */
 class SharedTierTest {
@@ -164,10 +165,16 @@ class SharedTierTest {
      */
     private class Slim(val out: ByteArray, val keep: Set<Int>, val frameless: Boolean, val draw: Any?)
 
-    /** 與 [NightRead.renderTiers] 的合成鍵同義的繪製部分：「更多」開了、而且有貼紙要塗，P1／P2 才影響成品。 */
-    private fun drawKeyOf(t: NightReadParams, keep: Set<Int>): Any? =
-        if (!t.more.enabled || keep.isEmpty()) null
-        else listOf(t.more.keepDarkStroke, t.more.edgeSeedFallback, t.more.edgeBand, t.more.edgeReach)
+    /**
+     * 與 [NightRead.renderTiers] 的合成鍵同義的繪製部分：「更多」開了、而且有貼紙要塗，P1／P2 才影響成品；背景物件規則
+     * （[ObjectRuleParams]，規則版本 3）在貼紙之外也會塗（亮背景區），開著的話 keep 空也要合成。
+     */
+    private fun drawKeyOf(t: NightReadParams, keep: Set<Int>): Any? {
+        if (!t.more.enabled) return null
+        val obj = if (t.obj.enabled) t.obj else null
+        if (keep.isEmpty() && obj == null) return null
+        return listOf(t.more.keepDarkStroke, t.more.edgeSeedFallback, t.more.edgeBand, t.more.edgeReach, obj)
+    }
 
     private fun slim(t: NightReadParams, r: NightReadResult) =
         Slim(bytes(r.out), r.stickerAccept, r.frameless, drawKeyOf(t, r.stickerAccept))
@@ -237,12 +244,14 @@ class SharedTierTest {
         assertTrue("$page keep L1 ⊆ L2", keeps[1].containsAll(keeps[0]))
         assertTrue("$page keep L2 ⊆ L3", keeps[2].containsAll(keeps[1]))
 
-        // 暗像素巢狀：實測性質（見類別說明）。L1 ⊆ L2 一個都不准；L2 ⊆ L3（更多）只准 1 px 寬的描亮線、不准成塊
+        // 暗像素巢狀：實測性質（見類別說明）。L1 ⊆ L2 一個都不准；L2 ⊆ L3（更多）只准 1 px 寬的描亮線、不准成塊。
+        // 字（DBNet 筆畫外擴 3 px 的塊）不算：背景物件規則把四周塗黑的字畫亮（同泡裡的字），標準那裡是場景的暗墨
         val o = separate.map { it.out }
         val w = inp.gray.w
         val h = inp.gray.h
+        val textZone = Cv.dilate(inp.seg, Cv.ellipse(7))
         fun v(t: Int, i: Int) = o[t][i].toInt() and 0xFF
-        fun bad(lo: Int, i: Int) = v(lo, i) <= 40 && v(lo + 1, i) > 40
+        fun bad(lo: Int, i: Int) = v(lo, i) <= 40 && v(lo + 1, i) > 40 && (lo == 0 || !textZone.data[i])
         var viol12 = 0
         var viol23 = 0
         var block23 = 0

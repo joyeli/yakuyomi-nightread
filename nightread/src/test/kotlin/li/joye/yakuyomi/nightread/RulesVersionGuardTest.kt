@@ -29,6 +29,10 @@ class RulesVersionGuardTest {
         1 to "852996dcb2d3dc5b0cf674feee343bfce9e3c115e6d3d2a8db014b5f2294bab0",
         // 2：人物外灰圈收細（折衷版＋開運算後只留與種子相連）。五頁裡 demo05 沒有認領、成品與版本 1 相同
         2 to "78a821623962844b53f7ff4c5f395c5dcc514df659a7ed3ef2293bce6dabbec7",
+        // 3：「更多」背景物件規則（BgObjects；只動更多、標準不變）。五頁裡 demo06 多了亮背景區塗黑（沒有否決）；demo05 的「更多」
+        // 以前與標準同一個合成鍵、不合成（摘要記 "="），現在規則開著就照樣合成（成品與標準相同）。還沒交出：效果線 A／C 若在這版
+        // APK 交出前做完，直接更新這一列（DECISIONS 歷史那一列跟著改）
+        3 to "70ad1ca1c02ab4da1129c8673ce9f65f2e95604d6bf4a1b2b8d91d53ce1ef73a",
     )
 
     /**

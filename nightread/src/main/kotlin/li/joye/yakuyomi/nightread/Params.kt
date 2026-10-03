@@ -294,6 +294,107 @@ data class NightReadParams(
      * 各檔一律開（與檔位無關）。
      */
     val ring: RingParams = RingParams(),
+    /**
+     * 「更多」背景物件規則（2026-10-03 使用者拍板，規則版本 3；研究端 `research/nightread_obj.py`）的參數組；同 [sep] 獨立成
+     * data class。只在開了「更多」新規則（[MoreRuleParams.enabled]＝[NightTier.L3]）的檔生效，其餘檔不受影響。見 [ObjectRuleParams]。
+     */
+    val obj: ObjectRuleParams = ObjectRuleParams(),
+)
+
+/**
+ * 「更多」背景物件規則（研究端 `research/nightread_obj.py` 的模組常數；預設值＝研究端定案值，規則與數字見 [BgObjects]、
+ * docs/DECISIONS.md「「更多」背景物件規則」）。使用者原則（2026-10-03）：「塗黑不用看白不白，以有沒有物件判斷」。
+ *
+ * 兩個機制，都在貼紙層之後、灰圈收細與泡重繪之前：
+ * - V（[veto]）：「更多」比只塗標準（L2）多塗黑的塊，白跨細線閉合成超區、超區證據 ‰ > [vetoEpm] ＝夾在物件之間的白 ⇒ 還原；
+ * - L（[lightFill]）：亮背景區（白與淺色調）整區判有沒有物件，過門的從核心塗起、長回線邊。
+ *
+ * 生效條件＝[enabled] ∧ [MoreRuleParams.enabled]（研究端 `NIGHTREAD_OBJ`（預設 1）只在 `NIGHTREAD_MORE=1` 時有作用）。
+ */
+data class ObjectRuleParams(
+    /** 總開關；false＝規則版本 2 的「更多」（逐像素相同）。只在 [MoreRuleParams.enabled] 的檔才看。 */
+    val enabled: Boolean = true,
+    /** V 開關（研究端 NIGHTREAD_OBJ_VETO；消融用）。 */
+    val veto: Boolean = true,
+    /** L 開關（研究端 NIGHTREAD_OBJ_LT；消融用）。 */
+    val lightFill: Boolean = true,
+    /** V：超區證據 ‰ 上限（原型 15；查核改 25：救回無物件的紙白與字幕框，有物件的 b 類最低 26.7）。 */
+    val vetoEpm: Double = 25.0,
+    /** V／L 脈絡：白跨細線閉合的橢圓半徑。 */
+    val vetoRc: Int = 5,
+    /** V：多塗的連通塊 ≥ 此 px 才看。 */
+    val vetoMinArea: Int = 300,
+    /** V：超區外擴此 px 內的證據。 */
+    val vetoEvDil: Int = 2,
+    /** V：否決時還原的帶＝否決塊方核外擴（描亮邊半徑＋此）。 */
+    val vetoBackPad: Int = 2,
+    /**
+     * 「已經黑」＝這時已經塗成 [NightReadParams.bg] 的像素 ∪ 原圖灰階 ≤ 此（預設場景曲線 ≤ 40 的原圖上限）。原型用成品 ≤ 40——
+     * 吃場景曲線與墨線增亮（兩邊浮點差 1 階）、也隨亮度偏好變；改成只看結構與原圖（V 與 L 都用）。
+     */
+    val darkG: Int = 63,
+    /** L：σ5 後亮度下限（Q16 比）。 */
+    val lightTh: Int = 150,
+    /** L：區最小整頁佔比。 */
+    val areaMin: Double = 0.002,
+    /** L：區內細暗線＋亮記號 ‰ 上限。 */
+    val lineMax: Double = 20.0,
+    /** L：區內調子邊界（σ4 Canny）‰ 上限。 */
+    val can4Max: Double = 12.0,
+    /** L：二次曲面殘差（σ2.5 亮度，灰階單位）上限。 */
+    val fitMax: Double = 9.0,
+    /** L：調子邊緣 ‰ 上限。 */
+    val toneMax: Double = 215.0,
+    /** L：調子邊緣的梯度門檻（灰階／px；除以頁面尺度 clip(H/1920, 0.5, 2)）。 */
+    val toneGrad: Double = 0.8,
+    /** L：平均彩度上限（彩頁不動）。 */
+    val chromaMax: Double = 6.0,
+    /** L：區的最大內切半徑（5×5 chamfer）下限。 */
+    val thickMin: Double = 24.0,
+    /** L：孤立亮記號 ≥ 此個… */
+    val marks: Int = 4,
+    /** …且每 10 萬 px ≥ 此 ⇒ 整區留灰。 */
+    val marksDen: Double = 4.0,
+    /** L：核心＝離證據 > 此 px（chamfer）。 */
+    val rLoc: Int = 24,
+    /** L：含核心 ≥ 此整頁佔比的塊才塗。 */
+    val coreMin: Double = 0.0008,
+    /** L：證據封縫閉合半徑。 */
+    val seal: Int = 4,
+    /** L 脈絡：白塊（σ2.5 中位亮度 ≥ [ctxWhite]）的超區證據 ‰ 上限。 */
+    val ctxEpm: Double = 25.0,
+    val ctxWhite: Int = 230,
+    /** L：孤島／貼人物檢查只對整頁佔比 < 此的塊。 */
+    val islandMax: Double = 0.015,
+    /** L：碰黑的距離（px）。 */
+    val islandTouch: Int = 12,
+    /** L：碰黑像素 < 此＝孤島。 */
+    val islandTouchMin: Int = 20,
+    /** L：外緣貼人物遮罩的比例上限。 */
+    val hugMax: Double = 0.6,
+    /** L：長線（外接框長邊 ≥ 此 px）四周 [longR] px 不當核心。 */
+    val longLen: Int = 80,
+    val longR: Int = 40,
+    /** 證據：σ2 blackhat（橢圓半徑 5）> 此… */
+    val bhTh: Int = 20,
+    /** …且 8 方向 17 px 線核平均 > 此＝細暗線。 */
+    val lineR: Int = 12,
+    /** 證據：σ1.5 tophat > 此… */
+    val brightTh: Int = 12,
+    /** …且 8 方向 11 px 線核平均 > [brightLrNum]／[brightLrDen]（7.2）＝亮記號。 */
+    val brightLrNum: Int = 36,
+    val brightLrDen: Int = 5,
+    /** 證據：網點＝連通塊外接框長邊 < 此 px（亮記號用 [dotBright]）。 */
+    val dot: Int = 10,
+    val dotBright: Int = 8,
+    /** 證據連通塊面積下限。 */
+    val evMinArea: Int = 15,
+    /** σ2 Canny（否決證據）。 */
+    val cannyLo: Int = 15,
+    val cannyHi: Int = 40,
+    /** σ4 Canny（調子邊界）。 */
+    val canny4Lo: Int = 10,
+    val canny4Hi: Int = 25,
 )
 
 /**
