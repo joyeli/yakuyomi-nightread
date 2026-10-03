@@ -11,10 +11,17 @@
     prim_gauss_<σ>.bin  gauss_q16（σ 1.5 與 5；int32 little-endian、w×h）
     prim_chamfer5.bin   5×5 chamfer（關 IPP）的 float32，輸入＝prim_gray ≥ 128
     quadfit.txt         兩組點的 quadfit（取樣步長 1 與 2）：每組一行「n0 s 期望值(repr)」再接取樣後的 gq ys xs
-二、整頁（resources/page/ch34_010_*）：這頁同時有亮背景區塗黑（裁定 3 的 A3 白地板）與否決（A4 牆板窄條、A1 牆），也有
-    字幕塊。輸入＝研究端 47 頁 parity 用的同一份（原圖灰階、DBNet 字遮罩、字區、人物遮罩、彩度）；期望＝研究端「更多」
-    （MORE=1）跑 run_page 時 nightread_obj 的整頁量測遮罩、否決的輸入（extra／std_dark）與輸出、亮背景區的輸入（dark）與
-    輸出（fill／band／txt），加上逐區特徵（obj_rows.txt，fit 以 repr 存）。
+    fx_lut.txt／spark_lut.txt   效果線區與閃光的亮度查表（ink_lut，repr）
+    fx_half_dir.txt     nightread_fx.half_dir 的 (d, b) → (ux, uy)（repr；含零向量、負 d、b＝0 的邊界）
+    fx_thin_in.png／fx_thin.png   ch34_015 細暗線（扣 X3）一塊 320×320 的 Zhang–Suen 細化
+    fx_segs.txt         同一塊的直分支（nightread_fx.segments：ax ay bx by sd，repr）
+二、整頁（resources/page/<頁>_*）：
+    ch34_010：同時有亮背景區塗黑（裁定 3 的 A3 白地板）與否決（A4 牆板窄條、A1 牆），也有字幕塊；沒有效果線族。
+    ch34_015：有效果線族（裁定 2 A：上排右格頂的集中線塗黑、線留亮），否決（A1 壁燈）走效果線的例外判斷。
+    輸入＝研究端 47 頁 parity 用的同一份（原圖灰階、DBNet 字遮罩、字區、人物遮罩、彩度）；期望＝研究端「更多」
+    （MORE=1）跑 run_page 時 nightread_obj 的整頁量測遮罩（含閃光、效果墨、地盤、成員線）、否決的輸入（extra／std_dark）與
+    輸出、亮背景區的輸入（dark）與輸出（fill／band／txt／效果線區 fxpaint），加上逐區特徵（obj_rows.txt，fit 以 repr 存；
+    效果線區的量測另存 obj_fxrows.txt）。
 
 用法：python3 make_obj_fixture.py（不要設任何 NIGHTREAD_ 環境變數）
 """
@@ -60,6 +67,18 @@ def primitives(O, ob):
                 f.write(f"{L} " + " ".join(f"{dy},{dx}" for dy, dx in o) + "\n")
     with open(os.path.join(O, "text_lut.txt"), "w") as f:
         f.write(" ".join(repr(float(v)) for v in ob.text_lut()) + "\n")
+    with open(os.path.join(O, "fx_lut.txt"), "w") as f:
+        f.write(" ".join(repr(float(v)) for v in ob.ink_lut(ob.FX_LINE_V, True)) + "\n")
+    with open(os.path.join(O, "spark_lut.txt"), "w") as f:
+        f.write(" ".join(repr(float(v)) for v in ob.ink_lut(ob.SPARK_V, False)) + "\n")
+    import nightread_fx as fxm
+    with open(os.path.join(O, "fx_half_dir.txt"), "w") as f:
+        rng_ = np.random.default_rng(20261005)
+        cases = [(0.0, 0.0), (1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0), (-3.0, 1e-12), (-3.0, -1e-12), (2.5, -7.0)]
+        cases += [(float(a), float(b)) for a, b in rng_.normal(0, 50, (40, 2))]
+        for d, b in cases:
+            ux, uy = fxm.half_dir(d, b)
+            f.write(f"{d!r} {b!r} {ux!r} {uy!r}\n")
     g = cv2.imread(os.path.join(PAGES, "ch34_011.jpg"), cv2.IMREAD_GRAYSCALE)[300:460, 250:442]
     rng = np.random.default_rng(20261004)
     blk = rng.integers(0, 256, (20, 8)).astype(np.uint8)
@@ -92,6 +111,37 @@ def primitives(O, ob):
             f.write(" ".join(str(int(x)) for x in ys[::s]) + "\n")
             f.write(" ".join(str(int(x)) for x in xs[::s]) + "\n")
     print("原語 fixture →", O)
+
+
+def fx_crop(O, N, ob):
+    """ch34_015 細暗線（扣 X3）一塊的細化與直分支（整頁量測照 run_page 的輸入算）。"""
+    import nightread_fx as fxm
+    jobs = {j["name"]: j for j in json.load(open(os.path.join(OUT, "more_and_strip/more/harden/pert/orig/jobs.json")))}
+    j = jobs["ch34_015"]
+    CAP = {}
+    c0 = ob.context
+
+    def context(*a, **kw):
+        CAP["ctx"] = c0(*a, **kw)
+        return CAP["ctx"]
+    ob.context = context
+    regions = json.load(open(j["det_json"]))
+    regions = regions["regions"] if isinstance(regions, dict) else regions
+    seg = np.load(j["det_npz"])["seg"].astype(bool)
+    N.CHARMASK_DIR = j["char_dir"]
+    try:
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
+            N.run_page(j["page"], outdir=tmp, regions=regions, seg=seg, diag={})
+    finally:
+        ob.context = c0
+    c = CAP["ctx"]
+    inkx = (c["ink"] & ~c["X3"])[60:380, 700:1020]
+    cv2.imwrite(os.path.join(O, "fx_thin_in.png"), inkx.astype(np.uint8) * 255, PNG9)
+    cv2.imwrite(os.path.join(O, "fx_thin.png"), fxm.thin(inkx).astype(np.uint8) * 255, PNG9)
+    with open(os.path.join(O, "fx_segs.txt"), "w") as f:
+        for sg in fxm.segments(inkx):
+            f.write(" ".join(repr(float(v)) for v in sg) + "\n")
+    print("效果線原語 fixture：細化", int(fxm.thin(inkx).sum()), "px、直分支", len(fxm.segments(inkx)), "段")
 
 
 def page(name, PO, N, ob):
@@ -136,9 +186,14 @@ def page(name, PO, N, ob):
     finally:
         ob.context, ob.veto_blocks, ob.light_fill = c0, v0, l0
     c = CAP["ctx"]
+    empty = np.zeros(g.shape, bool)
+    fx = c.get("fx")
     masks = dict(ink=c["ink"], bright=c["bright"], can4=c["tone_e"], tone=c["tone"], light=c["light"], E=c["E"],
                  Ev2=c["Ev2"], longz=c["longz"], X3=c["X3"], extra=CAP["extra"], stddark=CAP["std_dark"],
-                 veto=CAP["veto"], dark=CAP["dark"], fill=diag["obj_fill"], band=diag["obj_band"], txt=diag["obj_txt"])
+                 veto=CAP["veto"], dark=CAP["dark"], fill=diag.get("obj_fill", empty), band=diag.get("obj_band", empty),
+                 txt=diag.get("obj_txt", empty), spark=c["spark"], fxpaint=diag["obj_fxpaint"])
+    if fx is not None:
+        masks.update(fxe=fx["fxe"], fxe_t=fx["fxe_t"], terr=fx["terr"], memline=fx["memline"])
     for k, m in masks.items():
         cv2.imwrite(os.path.join(PO, f"{name}_obj_{k}.png"), np.asarray(m).astype(np.uint8) * 255, PNG9)
     with open(os.path.join(PO, f"{name}_obj_rows.txt"), "w") as f:
@@ -146,8 +201,16 @@ def page(name, PO, N, ob):
             nl, nc, nt, ae, fit, thick, csum, marks = r["raw"]
             f.write(" ".join(str(v) for v in r["bbox"]) + f" {r['area']} {nl} {nc} {nt} {ae} {fit!r} {thick!r} {csum} {marks} "
                     f"{str(r['ok']).lower()}\n")
-    print(f"{name}：fill {int(diag['obj_fill'].sum())} px、否決 {int(CAP['veto'].sum())} px、描亮邊 {int(diag['obj_band'].sum())} px、"
-          f"字 {int(diag['obj_txt'].sum())} px、逐區 {len(diag['obj_rows'])} 區")
+    fxr = [r for r in diag["obj_rows"] if "fxa" in r]
+    if fxr:
+        with open(os.path.join(PO, f"{name}_obj_fxrows.txt"), "w") as f:
+            for r in fxr:
+                f.write(" ".join(str(v) for v in r["bbox"]) + f" {r['fx_ink']} {r['fx_fe']} {r['fx_nmem']} "
+                        f"{len(r['fx_fams'])} {str(r['fxa']).lower()} {r.get('fx_nc', -1)} {r.get('fx_ae', -1)} "
+                        f"{r.get('fx_fit', -1.0)!r}\n")
+    print(f"{name}：fill {int(masks['fill'].sum())} px、否決 {int(CAP['veto'].sum())} px、描亮邊 {int(masks['band'].sum())} px、"
+          f"字 {int(masks['txt'].sum())} px、效果線區 {int(masks['fxpaint'].sum())} px、閃光 {int(masks['spark'].sum())} px、"
+          f"逐區 {len(diag['obj_rows'])} 區（效果線區判定 {len(fxr)} 區）")
 
 
 def main():
@@ -161,7 +224,9 @@ def main():
         import nightread as N
     ob = N.nightread_obj
     primitives(os.path.join(RES, "obj"), ob)
+    fx_crop(os.path.join(RES, "obj"), N, ob)
     page("ch34_010", os.path.join(RES, "page"), N, ob)
+    page("ch34_015", os.path.join(RES, "page"), N, ob)
 
 
 if __name__ == "__main__":

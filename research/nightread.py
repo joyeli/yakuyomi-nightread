@@ -53,6 +53,7 @@ detect-20241225.ckpt）torch 前向 ＋ m-i-t `SegDetectorRepresenter` 後處理
 「更多」背景物件規則（規則版本 3，預設開、只在 NIGHTREAD_MORE=1 時有作用；0＝版本 2 的「更多」，逐像素相同）：
     NIGHTREAD_OBJ=0    整個關掉（常數在 nightread_obj.py 檔頭；見 docs/DECISIONS.md「「更多」背景物件規則」）
     NIGHTREAD_OBJ_VETO=0 ／ NIGHTREAD_OBJ_LT=0   只關否決／只關亮背景區塗黑（消融用）
+    NIGHTREAD_OBJ_FXA=0 ／ NIGHTREAD_OBJ_FXC=0   只關效果線（集中線不算物件，nightread_fx.py）／只關閃光（兩個都關＝效果線之前的版本 3）
 格溝與出血格過濾各有開關（預設都開；兩個都關＝加入前 d3cfa92 的輸出，逐像素相同）：
     NIGHTREAD_SEP=0     不偵測任意角度格溝／頁邊（nightread_sep.py）
     NIGHTREAD_BLEED=0   不做出血格過濾（nightread_bleed.py）

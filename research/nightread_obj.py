@@ -23,8 +23,18 @@ decide/）＝V1 ＋ 否決門檻 25 ‰ ＋ 拿掉漸層暗端斜坡。兩個機
     固定順序的高斯消去；字筆畫的亮度是 256 格查表（向下取整）；字塊標號照掃描首見順序重編（同 Kotlin Cv.ccStats）。
   與原型（浮點）在 47 頁差的像素與成因見 docs/DECISIONS.md「「更多」背景物件規則」。
 
+效果線與閃光（2026-10-03 使用者裁定 2；原型 research/out/more_v3/fx/FX.md，gitignore）：
+  A（集中線／速度線不算物件，nightread_fx.py 找整頁的效果線族）：否決的例外（超區證據扣掉效果墨後 ≤ VETO_EPM、碰到
+     ≥ FX_NMEM 條成員線 ⇒ 不否決）；整區門沒過的區，區內的墨絕大多數是效果墨、扣掉效果墨後調子邊與殘差照樣過門 ⇒ 效果線區；
+     同一片場（地盤被格框線與已塗黑切開的連通塊）裡只要有一區沒過，整片不塗；效果線區另走一條塗法（沿效果墨或亮區往外長、
+     避開殘量證據的灰圈，紙白 → BG、墨 → 最亮 FX_LINE_V，＝線之間黑、線留亮）。「井」字紋與平行速度線這一輪做不到（當物件）。
+  C（閃光／星點不算物件）：亮記號裡四周 FXC_ISO px 沒有暗墨、大小在 FXC_MIN–FXC_MAX（×sH）的＝閃光：不算證據、不算調子邊、
+     「孤立亮記號多就整區留灰」那條關掉；塗黑區裡的閃光畫成淺灰。另外尺畫的直線（PCA 垂距均方根 ≤ LONG_STRAIGHT）不給長線帶
+     （否則核心在長線旁退 40 px、生長只到 37 px，留直角灰缺口）。
+
 開關（預設開；只在 NIGHTREAD_MORE=1 時有作用）：NIGHTREAD_OBJ=0 ＝ 規則版本 2 的「更多」（逐像素相同）；
-NIGHTREAD_OBJ_VETO=0 ／ NIGHTREAD_OBJ_LT=0 只關 V ／ L（消融用）。
+NIGHTREAD_OBJ_VETO=0 ／ NIGHTREAD_OBJ_LT=0 只關 V ／ L（消融用）；NIGHTREAD_OBJ_FXA=0 ／ NIGHTREAD_OBJ_FXC=0 只關效果線 A ／
+閃光 C（兩個都關＝效果線之前的規則版本 3，逐像素相同）。
 """
 import math
 import os
@@ -32,11 +42,14 @@ import os
 import cv2
 import numpy as np
 
+import nightread_fx
 import nightread_ring
 
 OBJ_ON = os.environ.get("NIGHTREAD_OBJ", "1") == "1"
 OBJ_VETO = os.environ.get("NIGHTREAD_OBJ_VETO", "1") == "1"
 OBJ_LT = os.environ.get("NIGHTREAD_OBJ_LT", "1") == "1"
+OBJ_FXA = os.environ.get("NIGHTREAD_OBJ_FXA", "1") == "1"      # 效果線 A（裁定 2）
+OBJ_FXC = os.environ.get("NIGHTREAD_OBJ_FXC", "1") == "1"      # 閃光 C（裁定 2）
 
 # ── V：否決 ──
 VETO_EPM = 25.0         # 超區證據 ‰ 上限（原型 15；VERIFY 改 25：c362_009 男孩背後紙白 21.6、字幕框 21.3 救回，b 類最低 26.7）
@@ -75,6 +88,25 @@ DOT = 10                # 網點：連通塊外接框長邊 < 此 px 不算（�
 EV_MIN_AREA = 15        # 證據連通塊面積下限
 CANNY_LO, CANNY_HI = 15, 40     # σ2 Canny（否決證據）
 CANNY4_LO, CANNY4_HI = 10, 25   # σ4 Canny（調子邊界）
+
+# ── C：閃光 ──
+FXC_ISO = 4             # 孤立：亮記號橢圓外擴此 px 碰不到暗（< 128）或細暗線
+FXC_MIN = 5.0           # 閃光大小（外接框長邊 px，×sH）下限
+FXC_MAX = 60.0          # 上限
+FXC_DIL = 3             # 閃光外擴此 px：調子邊（σ4 Canny）不算
+LONG_STRAIGHT = 2.0     # 長線帶不給「直的長線」（PCA 垂距均方根 ≤ 此 px）
+SPARK_V = 170           # 塗黑區裡的閃光（外擴 1）畫成 max(現值, BG ＋ (g/255)^1.4 ×(此 − BG))
+# ── A：效果線（整頁的線族在 nightread_fx）──
+FX_EXCL = 4             # 效果墨外擴：否決的超區證據扣掉這圈
+FX_EXCL_T = 14          # 效果墨外擴：區的調子邊／擬合殘差量測、塗法的殘量證據扣掉這圈（σ4 模糊把線的梯度推到 ~10 px 外）
+FX_AGREE = 0.85         # 區內墨裡效果墨的比例下限
+FX_RESID = 25.0         # 區內非效果墨 ‰ 上限
+FX_NMEM = 4             # 區（補洞後）裡至少幾條線族成員線；否決的例外也用
+FX_LINE_V = 170         # 效果線區：BG ＋ ((255−g)/255)^1.4 ×(此 − BG)（紙白＝BG、純黑線＝此）
+FX_GROW = 120           # 效果線區往外長（進線密處）最多幾 px
+FX_HALO = 8             # 殘量證據外擴：這圈不塗（物件旁留灰）
+FX_ER_MIN = 30          # 殘量證據連通塊至少這麼大才留灰圈（碎點不留）
+FX_MIN_PART = 400       # 塗的塊至少這麼大
 
 DARK_G = 63             # 「已經黑」＝塗成 BG 的像素 ∪ 原圖灰階 ≤ 此（預設場景曲線 ≤ 40 的上限；與亮度偏好、墨線增亮無關）
 
@@ -194,6 +226,20 @@ def text_lut():
 _TEXT_LUT = text_lut()
 
 
+def ink_lut(top, inv):
+    """效果線區（inv=True：BG ＋ ((255−g)/255)^1.4 ×(top − BG)）與閃光（inv=False：BG ＋ (g/255)^1.4 ×(top − BG)）的查表，
+    向下取整（float64）。"""
+    out = []
+    for g in range(256):
+        a = ((255.0 - g) / 255.0) ** 1.4 if inv else (g / 255.0) ** 1.4
+        out.append(float(math.floor(BG + a * (top - BG))))
+    return np.array(out, np.float32)
+
+
+_FX_LUT = ink_lut(FX_LINE_V, True)
+_SPARK_LUT = ink_lut(SPARK_V, False)
+
+
 def solve6(M, b):
     """6×6 線性方程（部分選主元高斯消去，固定順序；主元為 0 的那一維係數取 0）。"""
     A = [list(M[i]) + [b[i]] for i in range(6)]
@@ -289,12 +335,26 @@ def context(g, chroma, charmask, char_raw, bubble, seg, frame, regions):
     can = _nodots(cv2.Canny((gb2 >> 16).astype(np.uint8), CANNY_LO, CANNY_HI) > 0)
     del gb2, gb15, th
     can4 = cv2.Canny((gauss_q16(g, 4.0) >> 16).astype(np.uint8), CANNY4_LO, CANNY4_HI) > 0
+    sH = min(2.0, max(0.5, H / 1920.0))
+    spark = np.zeros((H, W), bool)
+    if OBJ_FXC:
+        # 閃光／星點（裁定 2 C）：亮記號裡四周沒有暗墨的（網點縫、白描邊、衣服高光旁邊都有墨，不算）；自己的調子邊也不算
+        n_s, lb_s, st_s, _ = cv2.connectedComponentsWithStats(bright.astype(np.uint8), 8)
+        if n_s > 1:
+            near = dil((g < 128) | ink, FXC_ISO)
+            bad = np.zeros(n_s, bool)
+            bad[np.unique(lb_s[near & bright])] = True
+            ext_s = np.maximum(st_s[:, cv2.CC_STAT_WIDTH], st_s[:, cv2.CC_STAT_HEIGHT])
+            okc = ~bad & (ext_s >= FXC_MIN * sH) & (ext_s <= FXC_MAX * sH)
+            okc[0] = False
+            spark = okc[lb_s]
+        if spark.any():
+            can4 &= ~dil(spark, FXC_DIL)
     light = gauss_q16(g, 5.0) >= T * Q
     gmed = gauss_q16(cv2.medianBlur(g, 7), 3.0).astype(np.float64)
     dx = cv2.Sobel(gmed, cv2.CV_64F, 1, 0, ksize=3)
     dy = cv2.Sobel(gmed, cv2.CV_64F, 0, 1, ksize=3)
     del gmed
-    sH = min(2.0, max(0.5, H / 1920.0))
     tg = TONE_GRAD / sH * 8.0 * Q
     tone = dx * dx + dy * dy > tg * tg
     del dx, dy
@@ -303,16 +363,58 @@ def context(g, chroma, charmask, char_raw, bubble, seg, frame, regions):
     pe[:6] = pe[-6:] = True
     pe[:, :6] = pe[:, -6:] = True
     X3 = dil(X, 3) | pe
-    E = _min_area((ink | can4 | bright) & ~X3, EV_MIN_AREA)
+    E = _min_area((ink | can4 | (bright & ~spark)) & ~X3, EV_MIN_AREA)
     Ev2 = _min_area((_nodots(bh_on) | can) & ~X3, EV_MIN_AREA)
     n3, lb3, st3, _ = cv2.connectedComponentsWithStats((ink & ~X3).astype(np.uint8), 8)
     lg = np.zeros(n3, bool)
     lg[1:] = np.maximum(st3[1:, cv2.CC_STAT_WIDTH], st3[1:, cv2.CC_STAT_HEIGHT]) >= LONG_LEN
+    if OBJ_FXC and lg.any():
+        lg &= ~_straight(lb3, st3, n3)
     longz = dil(lg[lb3], LONG_R)
     gb25 = gauss_q16(g, 2.5)
+    fx = None
+    if OBJ_FXA:
+        # 效果線（裁定 2 A）：整頁線族 → 效果墨（沿族方向的線＋地盤裡的小記號）；沒有收下的族＝None
+        info = {}
+        fx = nightread_fx.field(g, ink, X3, bh, sH, gauss_q16(g, 1.0), info)
+        if fx is not None:
+            fxe = fx["aligned"] | fx["marks"]
+            fx["fxe"] = fxe
+            fx["fxe_d"] = dil(fxe, FX_EXCL)
+            fx["fxe_t"] = dil(fxe, FX_EXCL_T)
+            fx["ml_lab"] = cv2.connectedComponents(fx["memline"].astype(np.uint8), connectivity=8)[1]
+        fx_info = info
+    else:
+        fx_info = None
     return dict(regions=regions, longz=longz, X=X, X3=X3, E=E, Ev2=Ev2, bright=bright, ink=ink, tone=tone,
                 tone_e=can4, gb25=gb25, light=light, chroma=chroma, seg=seg, frame=frame, charmask=charmask,
-                char_raw=char_raw, bubble=bubble)
+                char_raw=char_raw, bubble=bubble, spark=spark, sH=sH, fx=fx, fx_info=fx_info)
+
+
+def _straight(lb, st, n):
+    """每個連通塊是不是「尺畫的直線」：像素座標（減外接框左上）的整數動差 → 共變異（double）→ 次特徵值 λ₂；
+    √max(λ₂, 0) ≤ LONG_STRAIGHT。回傳長度 n 的布林（背景 0 為 False）。"""
+    ys, xs = np.nonzero(lb)
+    ids = lb[ys, xs]
+    lx = (xs - st[ids, cv2.CC_STAT_LEFT]).astype(np.float64)
+    ly = (ys - st[ids, cv2.CC_STAT_TOP]).astype(np.float64)
+    sx = np.bincount(ids, lx, n)
+    sy = np.bincount(ids, ly, n)
+    sxx = np.bincount(ids, lx * lx, n)
+    syy = np.bincount(ids, ly * ly, n)
+    sxy = np.bincount(ids, lx * ly, n)
+    out = np.zeros(n, bool)
+    for i in range(1, n):
+        c = float(st[i, cv2.CC_STAT_AREA])
+        mx = float(sx[i]) / c
+        my = float(sy[i]) / c
+        cxx = float(sxx[i]) / c - mx * mx
+        cyy = float(syy[i]) / c - my * my
+        cxy = float(sxy[i]) / c - mx * my
+        tr = cxx + cyy
+        l2 = tr / 2.0 - math.sqrt(max(tr * tr / 4.0 - (cxx * cyy - cxy * cxy), 0.0))
+        out[i] = math.sqrt(max(l2, 0.0)) <= LONG_STRAIGHT
+    return out
 
 
 # ── V：否決 A2 多塗的白 ─────────────────────────────────────────────────────
@@ -330,6 +432,7 @@ def veto_blocks(g, extra, std_dark, ctx, diag=None):
     n, lb = cv2.connectedComponents(Wc.astype(np.uint8), 8)
     nbk, lbk, stk, _ = cv2.connectedComponentsWithStats(extra.astype(np.uint8), 8)
     E = ctx["Ev2"] & ~dil(sd, 2)
+    fx = ctx.get("fx")
     info = []
     for i in range(1, nbk):
         if stk[i, cv2.CC_STAT_AREA] < VETO_MIN_AREA:
@@ -353,8 +456,16 @@ def veto_blocks(g, extra, std_dark, ctx, diag=None):
                 if 0 <= cx_ < w and 0 <= cy_ < h and Mf_[cy_, cx_]:
                     v = False
                     break
+        e2 = nmem = None
+        if v and fx is not None:
+            # 效果線不算物件（裁定 2 A）：超區證據扣掉效果墨（外擴 FX_EXCL）後 ≤ 門檻、且碰到 ≥ FX_NMEM 條線族成員線 ⇒ 不否決
+            Sd = dil(S, VETO_EV_DIL)
+            e2 = int((E & Sd & ~fx["fxe_d"]).sum())
+            nmem = int(np.unique(fx["ml_lab"][Sd & fx["memline"]]).size)
+            if 1000.0 * e2 <= VETO_EPM * max(1, sa) and nmem >= FX_NMEM:
+                v = False
         info.append(dict(bbox=[x, y, w, h], area=int(stk[i, cv2.CC_STAT_AREA]), sarea=sa, ev=e_,
-                         epm=round(1000.0 * e_ / max(1, sa), 1), veto=bool(v)))
+                         epm=round(1000.0 * e_ / max(1, sa), 1), ev_fx=e2, nmem=nmem, veto=bool(v)))
         if v:
             out |= M
     if diag is not None:
@@ -391,13 +502,19 @@ def _grow(seed, within, iters, step=4):
     return cur > 0
 
 
-def region_rows(g, ctx, L, H, W_):
-    """L 的每個連通塊（≥ AMIN 整頁）量特徵、判過門；回傳 (passed 遮罩, 逐區紀錄)。"""
+def region_rows(g, ctx, L, H, W_, tcomp=None):
+    """L 的每個連通塊（≥ AMIN 整頁）量特徵、判過門；回傳 (passed 遮罩, fxpf 遮罩, 逐區紀錄)。
+    [tcomp]＝效果線場的標號（light_fill 算；沒有效果線族時 None）。fxpf＝效果線區（補洞後）的聯集（見 _fx_region 與場一致性）。"""
     n, lb, st, _ = cv2.connectedComponentsWithStats(L.astype(np.uint8), 8)
     amin = AMIN * H * W_
     passed = np.zeros((H, W_), bool)
+    fxpf = np.zeros((H, W_), bool)
     rows = []
     gb, X3 = ctx["gb25"], ctx["X3"]
+    fx = ctx.get("fx")
+    spark = ctx.get("spark")
+    bright_l = ctx["bright"] & ~spark if spark is not None else ctx["bright"]
+    fx_field, fx_regs = {}, []
     for i in range(1, n):
         if st[i, cv2.CC_STAT_AREA] < amin:
             continue
@@ -405,14 +522,15 @@ def region_rows(g, ctx, L, H, W_):
         x0, y0, x1, y1 = max(0, x - 8), max(0, y - 8), min(W_, x + w + 8), min(H, y + h + 8)
         sl = (slice(y0, y1), slice(x0, x1))
         M = lb[sl] == i
-        Mm = fill_holes(M) & ~X3[sl]
+        Mf = fill_holes(M)
+        Mm = Mf & ~X3[sl]
         Me = cv2.erode(Mm.astype(np.uint8), ell(2)) > 0
         Ae = max(1, int(Me.sum()))
         Mi = cv2.erode(M.astype(np.uint8), ell(3)) > 0
         if int(Mi.sum()) < 200:
             Mi = M
         ys, xs = np.nonzero(Mi)
-        nl = int(((ctx["ink"][sl] | ctx["bright"][sl]) & Me).sum())
+        nl = int(((ctx["ink"][sl] | bright_l[sl]) & Me).sum())
         nc = int((ctx["tone_e"][sl] & Me).sum())
         nt = int((ctx["tone"][sl] & Me).sum())
         fit = quadfit(gb[sl][Mi], ys, xs)
@@ -420,30 +538,110 @@ def region_rows(g, ctx, L, H, W_):
         csum = int(ctx["chroma"][sl][M].sum(dtype=np.int64)) if ctx["chroma"] is not None else 0
         thick = float(chamfer5(np.pad(M, 1)).max())
         marks = _isolated_marks(ctx["bright"][sl] & Mm, g[sl], ctx["ink"][sl])
-        ok_marks = not (marks >= MARKS and 1e5 * marks >= MARKS_DEN * area)
+        # 閃光（C）開著：孤立亮記號多不再整區留灰（閃光本身已不算證據）
+        ok_marks = OBJ_FXC or not (marks >= MARKS and 1e5 * marks >= MARKS_DEN * area)
         ok = (1000.0 * nl <= LINE * Ae and 1000.0 * nc <= CAN4 * Ae and fit <= FIT and 1000.0 * nt <= TONE * Ae
               and thick >= THICK and csum <= CHROMA * area and ok_marks)
-        rows.append(dict(bbox=[x, y, w, h], area=int(st[i, cv2.CC_STAT_AREA]), line=round(1000.0 * nl / Ae, 1),
-                         can4=round(1000.0 * nc / Ae, 1), tone=round(1000.0 * nt / Ae, 1), fit=round(fit, 2),
-                         chroma=round(csum / area, 1), thick=round(thick, 1), marks=int(marks), ok=bool(ok),
-                         raw=[nl, nc, nt, Ae, fit, thick, csum, marks]))
+        row = dict(bbox=[x, y, w, h], area=int(st[i, cv2.CC_STAT_AREA]), line=round(1000.0 * nl / Ae, 1),
+                   can4=round(1000.0 * nc / Ae, 1), tone=round(1000.0 * nt / Ae, 1), fit=round(fit, 2),
+                   chroma=round(csum / area, 1), thick=round(thick, 1), marks=int(marks), ok=bool(ok),
+                   raw=[nl, nc, nt, Ae, fit, thick, csum, marks])
         if ok:
             passed[sl] |= M
-    return passed, rows
+        elif fx is not None and thick >= THICK and csum <= CHROMA * area and ok_marks:
+            fxa, fams, fxi = _fx_region(ctx, fx, sl, Mf, Me, Mi, tcomp)
+            row.update(fxi)
+            row["fxa"] = bool(fxa)
+            for k in fams:
+                fx_field.setdefault(k, []).append(fxa)
+            if fxa:
+                fx_regs.append((len(rows), sl, Mf, fams))
+        rows.append(row)
+    # 場一致性：同一片效果線場裡只要有一區（含 ≥ FX_NMEM 條成員線）沒過（「井」字紋、水花、物件），整片場的區都不塗
+    bad = {k for k, v in fx_field.items() if not all(v)}
+    for ri, sl, Mf, fams in fx_regs:
+        if fams & bad:
+            rows[ri]["fxa_drop"] = True
+            continue
+        fxpf[sl] |= Mf
+    return passed, fxpf, rows
+
+
+def _fx_region(ctx, fx, sl, Mf, Me, Mi, tcomp):
+    """效果線區（裁定 2 A）：區內的墨絕大多數是效果墨（比例 ≥ FX_AGREE、非效果墨 ‰ ≤ FX_RESID）、區（補洞後）裡有 ≥ FX_NMEM 條
+    成員線；扣掉效果墨外擴 FX_EXCL_T 後調子邊 ‰ ≤ CAN4、擬合殘差 ≤ FIT（細線門＝非效果墨 ‰）。
+    回傳 (過不過, 這區有 ≥ FX_NMEM 條成員線的場標號集合, 紀錄)。場標號在門檻之前算（沒過的區也要登記，給場一致性）。"""
+    ink_r = int((ctx["ink"][sl] & Me).sum())
+    fe_r = int((fx["fxe"][sl] & Me).sum())
+    Ae = max(1, int(Me.sum()))
+    mm = Mf & fx["memline"][sl]
+    ml = fx["ml_lab"][sl][mm]
+    nmem = int(np.unique(ml).size)
+    pairs = np.unique(np.stack([ml.astype(np.int64), tcomp[sl][mm].astype(np.int64)], 1), axis=0) if ml.size else np.zeros((0, 2), np.int64)
+    cnt = {}
+    for _, k in pairs:
+        if k > 0:
+            cnt[int(k)] = cnt.get(int(k), 0) + 1
+    fams = {k for k, v in cnt.items() if v >= FX_NMEM}
+    info = dict(fx_ink=ink_r, fx_fe=fe_r, fx_nmem=nmem, fx_fams=sorted(fams))
+    if not (fe_r / max(1, ink_r) >= FX_AGREE and 1000.0 * (ink_r - fe_r) <= FX_RESID * Ae and nmem >= FX_NMEM):
+        return False, fams, info
+    fzt = fx["fxe_t"][sl]
+    Me3 = Me & ~fzt
+    Ae3 = max(1, int(Me3.sum()))
+    nc3 = int((ctx["tone_e"][sl] & Me3).sum())
+    Mi2 = Mi & ~fzt
+    if int(Mi2.sum()) < 200:
+        Mi2 = Mi
+    yy, xx = np.nonzero(Mi2)
+    fit2 = quadfit(ctx["gb25"][sl][Mi2], yy, xx)
+    info.update(fx_nc=nc3, fx_ae=Ae3, fx_fit=fit2)
+    return bool(1000.0 * nc3 <= CAN4 * Ae3 and fit2 <= FIT), fams, info
+
+
+def _fx_paint(out, g, ctx, fx, fxpf, dark):
+    """效果線區的塗法：區（補洞）沿「效果墨外擴 FX_EXCL_T 或亮區」往外長最多 FX_GROW px（長進線密處，不在亮度門檻那條等亮線
+    留接縫），扣掉交代過（X）、已經黑、殘量證據（非效果的細線、調子邊，去 < FX_ER_MIN px 碎點）外擴 FX_HALO；拿掉
+    < FX_MIN_PART px 的塊；剩下的依原圖墨度反著畫（_FX_LUT：紙白 → BG、墨 → 最亮 FX_LINE_V＝線之間黑、線留亮）。
+    就地改 out；回傳塗的範圍（沒有＝None）。"""
+    X, X3 = ctx["X"], ctx["X3"]
+    fxt = fx["fxe_t"]
+    Er = _min_area((ctx["E"] | ctx["tone_e"]) & ~fxt & ~X3, FX_ER_MIN)
+    halo = dil(Er, FX_HALO)
+    allow = ~X & ~dark & ~halo & (fxt | ctx["light"])
+    P = _grow(fxpf & allow, allow, FX_GROW)
+    P = _min_area(P, FX_MIN_PART)
+    if not P.any():
+        return None
+    out[P] = _FX_LUT[g[P]]
+    return P
 
 
 def light_fill(out, g, ctx, diag=None, dark=None):
     """在貼紙層（含否決）之後的 [out] 上，把無物件的亮背景塗黑（就地改 out 並回傳）。[dark]＝「已經黑」的覆寫（函式層 parity
-    用：餵 Kotlin 那一邊的；None＝blackish(out, g)）。"""
+    用：餵 Kotlin 那一邊的；None＝blackish(out, g)）。
+    效果線區（A）在核心塗法之前另走一條（_fx_paint）；之後「已經黑」加上它塗到 ≤ 40 的像素（原型重算 out ≤ 40；查表後確定）。"""
     H, W_ = g.shape
     X, X3, E = ctx["X"], ctx["X3"], ctx["E"]
     if dark is None:
         dark = blackish(out, g)
     L0 = ctx["light"] & ~X & ~dark
     L = cv2.morphologyEx(L0.astype(np.uint8), cv2.MORPH_OPEN, ell(2)) > 0
-    passed, rows = region_rows(g, ctx, L, H, W_)
+    fx = ctx.get("fx")
+    tcomp = None
+    if fx is not None:
+        # 效果線場＝線族地盤被格框線與已經黑（格溝）切開的連通塊：一致性以「格內的一片場」為單位，不跨格
+        tcomp = cv2.connectedComponents((fx["terr"] & ~dark & ~dil(ctx["frame"], 2)).astype(np.uint8), connectivity=8)[1]
+    passed, fxpf, rows = region_rows(g, ctx, L, H, W_, tcomp)
     if diag is not None:
         diag["obj_rows"] = rows
+        if ctx.get("fx_info") is not None:
+            diag["obj_fx_info"] = ctx["fx_info"]
+    fxP = _fx_paint(out, g, ctx, fx, fxpf, dark) if fxpf.any() else None
+    if diag is not None:
+        diag["obj_fxpaint"] = fxP if fxP is not None else np.zeros((H, W_), bool)
+    if fxP is not None:
+        dark = dark | (fxP & (_FX_LUT[g] <= 40))
     if not passed.any():
         return out
     Ev = E | (ctx["tone_e"] & ~X3)
@@ -526,6 +724,12 @@ def light_fill(out, g, ctx, diag=None, dark=None):
     F = ~fill & (ctx["ink"] | (g < 100) | ctx["charmask"] | ctx["frame"]) & ~dark
     band = dil(F, r) & fill & ~dil(ctx["seg"], 2)
     out[band] = STROKE_OBJ_V
+    spark = ctx.get("spark")
+    if spark is not None and spark.any():
+        # 裁定 2 C：塗黑區裡的閃光（外擴 1）畫成淺灰（亮度依原圖）
+        sp = dil(spark, 1) & fill
+        if sp.any():
+            out[sp] = np.maximum(out[sp], _SPARK_LUT[g[sp]])
     # 字（DBNet 筆畫）四周大多被塗黑的：筆畫畫亮、字縫填黑（同泡裡的字）
     sd = dil(ctx["seg"], 3) & ~ctx["bubble"] & ~ctx["charmask"]
     nt, lt, _, _ = cv2.connectedComponentsWithStats(sd.astype(np.uint8), 8)
