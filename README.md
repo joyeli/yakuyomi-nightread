@@ -18,8 +18,8 @@ requirement.
 
 ![Six stages of the rebuild](docs/img/showcase.webp)
 
-**Status: desktop research.** Nothing ships yet. The pipeline has converged — 1351 lines of Python, 18
-violations out of 664 guard boxes — and the remaining work is the Kotlin port. Decisions and current numbers
+**Status: desktop research.** Nothing ships yet. The pipeline has converged — 1351 lines of Python, 11
+violations out of 688 scored guard boxes — and the remaining work is the Kotlin port. Decisions and current numbers
 live in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 
 ## Why a rebuild and not a filter
@@ -62,7 +62,7 @@ settled product shape are in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 ## The red line
 
 **Never paint over a face, a hand, a white sleeve or white hair.** The only acceptable failure is "not dark
-enough". This is measured, not eyeballed: `nightread_guard.py` checks 704 hand-annotated foreground boxes,
+enough". This is measured, not eyeballed: `nightread_guard.py` checks 732 hand-annotated foreground boxes,
 and any output that darkens more than 15% of a box's originally-white pixels is a violation. The test exists
 because visual inspection was proven unreliable — crops that looked clean were overturned once every box was
 measured.
@@ -79,7 +79,7 @@ percentage points of light area; with the mask the same pipeline sits at 18.
 | `research/nightread_bleed.py` | Bleed-panel filter: margin pieces whose outer ring touches artwork are dropped (skies and floors no longer torn into jagged black). |
 | `research/charmask.py` | The character-mask probe (CartoonSegmentation, YOLO11-seg, and their union). Its output is a **required input** to the pipeline. |
 | `research/nightread_batch.py` | Run the 11 fixture pages, print the light-area table. |
-| `research/nightread_guard.py` + `nightread_guard.json` | The red-line test: 704 hand-annotated foreground boxes. |
+| `research/nightread_guard.py` + `nightread_guard.json` | The red-line test: 732 hand-annotated foreground boxes. |
 | `research/nightread_translated.py` | The translated-page material-sharing check: run night reading on the engine's finished page, compare the three detection-material recipes. |
 | `research/make_showcase.py` | The six-stage showcase sheets. |
 | `research/pipeline_diagram.py` | The pipeline-stage figure at the top of this file. |

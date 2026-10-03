@@ -266,7 +266,7 @@ lowest heap the streaming version runs in is the same as for one level.
    black. The only permitted failure direction is "not dark enough".
 2. **Never invert the art.** The art region only ever gets a monotonic mapping; ink stays darker than paper.
 
-The first is enforced by `nightread_guard.py`: 704 hand-annotated foreground boxes, and any output that paints
+The first is enforced by `nightread_guard.py`: 732 hand-annotated foreground boxes, and any output that paints
 more than 15% of a box's originally-white pixels dark counts as a violation. The reason this test exists is
 that **my own visual inspection was proven unreliable** — areas I had looked at in a crop and called clean were
 overturned once every box was measured. Eyeballing does not count; the numbers do.
@@ -302,7 +302,7 @@ Two implementations do work:
 
 | Metric | Value |
 |---|---|
-| Guard-box violations | Python: full pipeline 17 / 664; product "Standard" (L2) 11; product "More" (L3 + rule A2) 16; L1 11; L3 without A2 15. Kotlin: 17 / 10 / 15 (full / Standard / More). 2026-10-02 |
+| Guard-box violations | Python: full pipeline 11 / 688; product "Standard" (L2) 10; product "More" (L3 + rule A2) 10; L1 10; L3 without A2 10. Kotlin: 11 / 9 / 9 (full / Standard / More). 2026-10-03, after the guard-box redraw |
 | Light area (share of the output at ≥110) | 38.6% |
 | Pipeline | 1351 lines of Python |
 
@@ -338,7 +338,7 @@ research/           desktop pipeline (the spec)
   nightread_sep.py    any-angle gutters and margins
   nightread_bleed.py  bleed-panel filter
   nightread_batch.py  run the 11 fixture pages, print the light-area table
-  nightread_guard.py  the red-line test: 704 guard boxes
+  nightread_guard.py  the red-line test: 732 guard boxes
   charmask.py         character-mask probe (cseg / yoloseg / union)
   make_showcase.py    six-stage result sheet
 fixtures/pages/     the 11 test pages
