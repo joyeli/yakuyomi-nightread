@@ -13,6 +13,7 @@
 泡內淺條的兩個修法也各有開關（`NIGHTREAD_CLEAN_INK_HOLES`、`NIGHTREAD_GUARD_RAW`，預設開、0＝舊行為），
 漏泡判準也是（`NIGHTREAD_ELEAK`，預設開；門檻 `NIGHTREAD_ELEAK_*`，見 `BUBBLE_LEAK`），
 產品「更多」的新規則 A2 也是（`NIGHTREAD_MORE`，預設關＝舊 L3；門檻 `NIGHTREAD_MORE_*`，見「「更多」新規則 A2」），
+人物外灰圈收細也是（`NIGHTREAD_RING`、`NIGHTREAD_RING_SEEDCONN`，預設開；常數在 `research/nightread_ring.py` 檔頭，見「人物外灰圈收細」），
 另有幾個研究開關也讀環境（`NIGHTREAD_EDGE_INK`、`NIGHTREAD_REQUIRE_CLEAN`、`NIGHTREAD_TEXT_*`）。其餘參數要試就直接改檔案，這樣每次跑都可重現。
 
 各值的實測由來、以及被否決的替代方案，見 [DECISIONS.md](DECISIONS.md)。
@@ -660,6 +661,47 @@ BB 泡（⊕r6）＞ TX 字（⊕r6）＞ CH 人物（⊕r8）＞ VT 被 veto �
 
 ### `EDGE_FEATHER` = 0.7
 人物還原邊界的抗鋸齒半徑，只在 1 到 2 像素內過渡。再大就會產生原作沒有的漸層。
+
+---
+
+## 人物外灰圈收細（`nightread_ring.py`）
+
+背景塗黑原本停在人物安全邊外面，人物與黑之間留一圈 15–20 像素的灰。折衷版（2026-10-03 使用者拍板，標準與更多都套）：
+**只在真的有畫出來的輪廓線把背景跟人物隔開的地方**，讓已經塗黑的背景長到輪廓線；沒有輪廓線的地方維持原寬度。
+47 頁圈寬中位 16.8 → 3.6 像素（標準）、4.0 像素（更多）。規則與數字見 docs/DECISIONS.md「人物外灰圈收細」；Kotlin
+`RingParams`（`NightReadParams.ring`）、`Ring`。
+
+### `RING_ON` = 1（`NIGHTREAD_RING`；Kotlin `enabled`）
+總開關。0＝加入前的輸出，逐像素相同。
+
+### `RING_R_OUT` = 18 · `RING_GV_GAP` = 24 · `RING_RAW_CLOSE` = 6 · `RING_SEED_MIN` = 200 · `RING_STEPS` = 64
+可認領的範圍（研究代號 F）。留白帶「只因人物自己的墨被線稿否決」的像素只看人物遮罩外擴 18 像素內，而且要夾在黑與人物
+之間：到種子 ＋ 到人物原輸出的 5×5 chamfer 距離 ≤ 24。人物原輸出閉運算（半徑 6）多出來的窄凹口不認領，模型在空白處多蓋
+一塊時黑不會鑽進它的指縫。種子是面積 ≥ 200 像素的背景黑（8 連通塊，見下）；從種子 4 連通最多長 64 步。
+
+### `RING_INK_SUM` = 957 · `RING_INK_BOX` = 5 · `RING_INK_MAX_GRAY` = 200
+深墨：5×5 窗（邊界複製）內 (255 − 灰階) 總和 ≥ 957（平均暗度 0.15），而且中心灰階 < 200。量的是墨的總量：模糊和 JPEG
+只把墨攤開、總量不變；demo01 肩甲右緣那種 2 像素寬、灰 186–216 的淡筆觸總量不到門檻。
+
+### `RING_HOLE_MAX` = 256 · `RING_EV_IN` = 8 · `RING_EV_OUT` = 3
+人物原輸出先補面積 < 256、不碰頁緣的洞（只給證據用）。邊界點離「落在原輸出內 8 像素或外 3 像素帶裡的深墨」在半徑 8 內
+＝有輪廓。洞與種子都是 **8 連通塊**：研究版寫的是 `connectedComponentsWithStats(m, 4)`，但 cv2 的第二個位置參數是
+labels 輸出不是 connectivity，實際走預設的 8 連通；照研究版的實際輸出。
+
+### `RING_RAY_FROM` = 3 · `RING_RAY_TO` = 24 · `RING_RAY_SIGMA` = 2.0
+前面要是開闊的背景：有輪廓的邊界點沿外法向（人物原輸出 σ2 高斯後的負梯度）走 3–24 像素又碰到人物的不算。c371_015
+下巴底下那塊上下都是人物的白就是這一條擋掉的。外法向是 float64 逐點計算、加總順序寫死（研究端與 Kotlin 逐位元相同）。
+
+### `RING_GAP_CLOSE` = 6 · `RING_BREAK_PAD` = 12
+連續：有輪廓的邊界點閉運算（半徑 6）補回短缺口；剩下沒輪廓的邊界點外擴 12 像素，範圍內的也算沒輪廓。
+
+### `RING_FAINT_GRAY` = 225 · `RING_FAINT_INK_PAD` = 2 · `RING_FAINT_WIN` = 21 · `RING_FAINT_MIN` = 7
+空白紙：淡筆觸＝灰階 < 225、不是深墨、離深墨 > 2 像素。21×21 窗（邊界複製）內 ≥ 7 個淡筆觸的地方不認領。demo01 肩甲右緣
+只有淡筆觸，這一條擋掉的。背景側另要「最近的人物邊是有輪廓的那一段」（兩張精確歐氏距離相等比較，無參數）。
+
+### `RING_OPEN` = 3 · `RING_SEED_CONN` = 1（`NIGHTREAD_RING_SEEDCONN`；Kotlin `seedConnected`）
+收尾：黑（種子 ∪ 認領）開運算（半徑 3），細指頭不要；開運算後只留經認領與種子 4 連通相連的。後者是整合時加的：
+47 頁五檔共 14 個不同的孤立小黑塊（標準 5 塊 1,065 像素、更多 7 塊 1,201 像素），守護框不變。0＝研究版 zhe.py。
 
 ---
 

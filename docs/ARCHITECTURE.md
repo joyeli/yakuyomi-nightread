@@ -54,7 +54,8 @@ flowchart TB
         BB --> PB[pseudo-bubbles<br/><small>open bubbles, text over art</small>]
         PB --> HM[head-tone harmonization]
         HM --> RST[residual fill<br/><small>the ring outside the bubble frame</small>]
-        RST --> RES[restore characters + anti-aliasing]
+        RST --> RNG[ring thinning<br/><small>black grows to drawn outlines</small>]
+        RNG --> RES[restore characters + anti-aliasing]
     end
 
     ANA --> SC
@@ -167,6 +168,12 @@ outside the bubble outline. It is neither gutter nor in-panel white, no mechanis
 is the ring the user sees around the outside of the bubble. The decision has a semantic basis: this component
 has already been identified as a white area containing a bubble, so what lies outside the bubble is the
 background behind that bubble.
+
+**Ring thinning.** Every earlier layer stays clear of a safety margin around the figures, which leaves a 15–20 px
+grey ring between the figure and the black. Just before the restore, and only where a drawn outline separates the
+background from the figure, the already-black background grows across the paper white up to that outline
+(`nightread_ring.py` / `Ring.kt`); where there is no outline, no open background in front of it, or faint strokes
+in the background, the ring keeps its old width. Claimed pixels are filled dark and dropped from the restore mask.
 
 **Character restore and anti-aliasing.** The final step restores the character regions to scene tone, using a
 small-radius Gaussian to soften the restore mask into a 0-to-1 alpha for blending, transitioning over one to

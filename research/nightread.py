@@ -15,7 +15,8 @@
       ├ 氣泡      白元件 ∩ 文字區 → 面積與局部性守門 → 文字種子核心填色
       ├ 格溝      任意角度框線 → 兩線夾白＝分鏡溝、頁緣到框線＝頁邊（nightread_sep.py）
       └ 合成      場景曲線 → 留白填深（出血格過濾，nightread_bleed.py）→ 格溝／頁邊
-                  → 貼紙式背景 → 氣泡 → 偽泡 → 人頭一致化 → 剩餘填色 → 人物還原（跳過泡與格溝）
+                  → 貼紙式背景 → 氣泡 → 偽泡 → 人頭一致化 → 剩餘填色
+                  → 灰圈收細（nightread_ring.py）→ 人物還原（跳過泡與格溝）
     暗色頁
 
 分區的待遇：
@@ -54,6 +55,9 @@ detect-20241225.ckpt）torch 前向 ＋ m-i-t `SegDetectorRepresenter` 後處理
     NIGHTREAD_BLEED=0   不做出血格過濾（nightread_bleed.py）
 漏泡封縫（預設開；0＝加入前 f1c2edd 的輸出，逐像素相同）：
     NIGHTREAD_BUBBLE_SEAL_R=0   不封泡框上的極窄縫（BUBBLE_SEAL_*；見 docs/DECISIONS.md「漏泡封縫」）
+人物外灰圈收細（預設開，五檔都套；0＝加入前的輸出，逐像素相同）：
+    NIGHTREAD_RING=0   人物還原前不認領灰圈（RING_*；見 nightread_ring.py 與 docs/DECISIONS.md「人物外灰圈收細」）
+    NIGHTREAD_RING_SEEDCONN=0   開運算後不做「只留與種子相連」（＝研究版 thin_ring/compromise 的 zhe.py）
 輸出（皆帶頁名前綴）：_final.png ／ _regions.json ／ _seg.png ／ _bubble.png ／
 _gutter.png ／ _cmp.png（三聯：原圖｜成品｜遮罩視覺化）。批次見 nightread_batch.py。
 
@@ -74,6 +78,7 @@ import paths                                                      # noqa: E402  
 import export_dbnet_ncnn as ex                                    # noqa: E402  （來自 yakuyomi-engine/parity）
 from mit_grouping import Quadrilateral, merge_bboxes_text_region  # noqa: E402  （來自 yakuyomi-engine/parity）
 import nightread_bleed                                            # noqa: E402  出血格過濾
+import nightread_ring                                             # noqa: E402  人物外灰圈收細
 import nightread_sep                                              # noqa: E402  任意角度格溝／頁邊
 
 OUT_DEFAULT = os.path.join(paths.OUT, "nightread")
@@ -1672,9 +1677,12 @@ def _edge_seed_fallback(comp, fr, kd, x0, y0, H, W):
 
 
 def paint_sticker(out, g, lab, stats, accept, bubble, core_ids=(), frame=None, seg=None,
-                  charmask=None, keep_dark=False, edge_fb=False):
+                  charmask=None, keep_dark=False, edge_fb=False, ring=None):
     """修法4 合成：W 填深、前景描白邊（dilate(F, r) ∩ W）、W 內孤立小噪點吞掉、
     eaten 聚團區域級保護（不填黑、原樣留 D2）。
+
+    [ring]（灰圈收細，nightread_ring.py）給 dict 就把兩樣累加進去（整頁座標）：`withheld`＝核心填色裡只因人物安全邊
+    （CORE_RELEASE_PAD）而沒填的（扣掉保護區）；`stk_band`＝實際畫上的前景描亮邊。不影響這裡的輸出。
 
     「更多」A2 的兩項繪製（MORE_RULE 的檔才開）：
       keep_dark：前景描亮邊不蓋掉此時已經 ≤ BG 的像素（留白／格溝／前一顆貼紙塗黑的）——P1；
@@ -1729,6 +1737,11 @@ def paint_sticker(out, g, lab, stats, accept, bubble, core_ids=(), frame=None, s
                 kg = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
                                                (CORE_RELEASE_PAD * 2 + 1,) * 2)
                 guard = cv2.dilate(charmask[y0:y1, x0:x1].astype(np.uint8), kg) > 0
+                if ring is not None:                    # 灰圈收細：核心區裡只因人物安全邊（guard）而沒填的
+                    wh = fill & ~strict & guard
+                    if wh.any():
+                        wh &= ~_sticker_protect(_sticker_eaten(sub, comp), comp)
+                        ring["withheld"][y0:y1, x0:x1] |= wh
                 fill = strict | (fill & ~guard)   # 見 CORE_RELEASE_PAD：非人物的核心區照填
             if not fill.any():
                 continue
@@ -1749,6 +1762,8 @@ def paint_sticker(out, g, lab, stats, accept, bubble, core_ids=(), frame=None, s
             band &= ~(o <= BG)                          # P1：描亮邊不蓋掉已經塗黑的（留白／格溝／前一顆貼紙）
         o[(fill | noise) & ~protect] = BG
         o[band] = STROKE_OBJ_V
+        if ring is not None:                            # 灰圈收細：實際畫上的前景描亮邊
+            ring["stk_band"][y0:y1, x0:x1] |= band
     return out
 
 
@@ -1823,8 +1838,8 @@ GT2_CLOSE = 15      # 否決塊閉合半徑（補洞，去斑）
 GT2_BUBCONTENT = 8  # 泡輪廓外擴這麼多 px 不算線稿，且泡當區域隔板
 
 
-def texture_veto2(fill, g, frame, seg, bubble):
-    """把「有線稿」的塊從留白填色裡剔掉。回傳新的 fill。"""
+def texture_veto2(fill, g, frame, seg, bubble, exclude=None):
+    """把「有線稿」的塊從留白填色裡剔掉。回傳新的 fill。[exclude]＝不算線稿的像素（灰圈收細拿人物遮罩重算一次用）。"""
     if not np.any(fill):
         return fill
     H, W = g.shape
@@ -1850,6 +1865,8 @@ def texture_veto2(fill, g, frame, seg, bubble):
     if seg is not None:
         content &= ~(cv2.dilate(seg[ry0:ry1, rx0:rx1].astype(np.uint8),
                                 np.ones((GT2_SEGDIL,) * 2, np.uint8)) > 0)
+    if exclude is not None:
+        content &= ~exclude[ry0:ry1, rx0:rx1]
     barrier = frbs
     if bubble is not None and np.any(bubble):
         # 泡的輪廓線不算線稿：不扣的話它會從泡外 25～40px 的窗裡被看到，把頁邊窄條／泡尾旁的
@@ -2018,14 +2035,21 @@ def harmonize_enclosed_whites(out, g, lab, stats, skip_mask):
 
 def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
             core_ids=(), frame=None, regions=None, charmask=None, char_raw=None,
-            bubble_rest=None, lost_bubble=None, diag=None, bubble_local=None, more_paint=False):
-    """整頁合成：場景曲線 → 留白填深（出血格過濾）→ 格溝／頁邊 → 貼紙式背景 → 氣泡重繪 → 人物還原。
+            bubble_rest=None, lost_bubble=None, diag=None, bubble_local=None, more_paint=False,
+            bubble_rest_pre=None):
+    """整頁合成：場景曲線 → 留白填深（出血格過濾）→ 格溝／頁邊 → 貼紙式背景 → 氣泡重繪 → 灰圈收細 → 人物還原。
 
     [more_paint]＝「更多」A2 的檔：貼紙層開 keep_dark（MORE_KEEP_DARK）與 edge_fb（MORE_EDGE_FB）。
+    [bubble_rest_pre]＝泡外圈在讓開人物之前的範圍（灰圈收細的可認領像素之一；None＝沒有）。
 
-    [diag] 給 dict 就把格溝與出血過濾的中間遮罩、逐塊決策、耗時存進去（parity／除錯用，不影響輸出）。"""
+    [diag] 給 dict 就把格溝與出血過濾的中間遮罩、逐塊決策、耗時存進去（parity／除錯用，不影響輸出）；灰圈收細另存
+    ring_D／ring_seed／ring_claim（與證據 ring_conf／ring_side／ring_paper，有算才有）。"""
     out = scene_final(g, seg).astype(np.float32)
     scene_keep = out.copy()                     # 人物區最終一律還原成場景調
+    # 灰圈收細（nightread_ring.py）：合成途中記下四種「只因人物安全邊而沒黑」的像素，人物還原前認領
+    ring = None
+    if nightread_ring.RING_ON:
+        ring = dict(withheld=np.zeros(g.shape, bool), stk_band=np.zeros(g.shape, bool), gv_wh=np.zeros(g.shape, bool))
     # 任意角度格溝／頁邊（SEP）：先算好——出血過濾要拿它當結構證據，貼紙層之前塗、人物還原跳過它
     t_ = time.perf_counter()
     sep_layer = nightread_sep.build_sep(g, seg, bubble, frame, veto=texture_veto2) if SEP_ON else None
@@ -2064,7 +2088,10 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
             m = lb_ == i
             if bd[m].max() <= lim:
                 keep |= m
-        keep = _bleed(texture_veto2(keep, g, frame, seg, bubble), keep)   # 有線稿的白不是留白；出血格畫面拿掉
+        v1 = texture_veto2(keep, g, frame, seg, bubble)
+        if ring is not None:                            # 灰圈收細：只因人物自己的墨而被線稿否決的留白
+            ring["gv_wh"] = keep & ~v1 & texture_veto2(keep, g, frame, seg, bubble, exclude=charmask)
+        keep = _bleed(v1, keep)   # 有線稿的白不是留白；出血格畫面拿掉
         if keep.any():
             out = paint_gutter(out, g, keep, frame=frame, bubble=bubble)
     elif not frameless and gutter.any():
@@ -2079,7 +2106,10 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
             bd = np.minimum(bd, fd)
         lim = SAFE_GUTTER_DEPTH * min(H2, W2)
         band = gutter_frame_cut(g, gutter) & (bd <= lim)   # 先沿格框線切開再取頁邊帶
-        band = _bleed(texture_veto2(band, g, frame, seg, bubble), band)   # 有線稿的白不是留白；出血格畫面拿掉
+        v1 = texture_veto2(band, g, frame, seg, bubble)
+        if ring is not None:                            # 灰圈收細：只因人物自己的墨而被線稿否決的留白
+            ring["gv_wh"] = band & ~v1 & texture_veto2(band, g, frame, seg, bubble, exclude=charmask)
+        band = _bleed(v1, band)   # 有線稿的白不是留白；出血格畫面拿掉
         if band.any():
             out = paint_gutter(out, g, band, frame=frame, bubble=bubble)
     elif gutter.any():
@@ -2102,7 +2132,9 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
     if sticker:                                         # 貼紙式背景：純白背景填黑＋前景白描邊
         out = paint_sticker(out, g, lab, stats, sticker, bubble,
                             core_ids=core_ids, frame=frame, seg=seg, charmask=charmask,
-                            keep_dark=more_paint and MORE_KEEP_DARK, edge_fb=more_paint and MORE_EDGE_FB)
+                            keep_dark=more_paint and MORE_KEEP_DARK, edge_fb=more_paint and MORE_EDGE_FB, ring=ring)
+    if ring is not None:                                # 灰圈收細：背景填黑（留白／格溝／貼紙）到此為止塗成 BG 的像素
+        ring["bg"] = (out == BG) & (scene_keep != BG)
     # [bubble_local] 封縫救回的泡：只在這裡以後（泡重繪、偽泡、亮島、人物還原）當泡；上面的結構層只看 bubble
     bub_all = bubble if bubble_local is None else (bubble | bubble_local)
     out = paint_bubbles(out, g, bub_all, seg)
@@ -2158,6 +2190,13 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
         kt2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (TEXT_TOP_PAD * 2 + 1,) * 2)
         keep_txt = (cv2.dilate((seg & lost_bubble).astype(np.uint8), kt2) > 0) & lost_bubble
         restore &= ~keep_txt
+    if ring is not None:
+        # 灰圈收細（使用者 2026-10-03 拍板「折衷」）：有畫出來的輪廓線把背景跟人物隔開的地方，已經塗黑的背景長到輪廓線；
+        # 其餘維持現在的寬度。認領的像素填 BG、從還原遮罩拿掉（規則見 nightread_ring.py）。
+        bg_paint = ring["bg"] if bubble_rest is None else (ring["bg"] | bubble_rest)
+        rest_pre = bubble_rest_pre if bubble_rest_pre is not None else np.zeros(g.shape, bool)
+        restore = nightread_ring.apply(out, restore, g, scene_keep, char_raw, charmask, bub_all | pb | lost_bubble, bg_paint,
+                                       ring["withheld"], rest_pre, ring["gv_wh"], ring["stk_band"], diag=diag)
     # 邊界抗鋸齒：遮罩是二值的、又是從 640 解析度放大來的 ⇒ 邊界呈階梯狀。用小半徑高斯
     # 把還原遮罩軟化成 0..1 alpha 做混合，只在 1–2px 內過渡。
     a_e = cv2.GaussianBlur(restore.astype(np.float32), (0, 0), EDGE_FEATHER)
@@ -2279,10 +2318,12 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None, 
             # 限制在泡附近即可兩全。
             kn = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (BUBBLE_REST_NEAR * 2 + 1,) * 2)
             rest &= cv2.dilate(bubble_s0.astype(np.uint8), kn) > 0
+        bubble_rest_pre = rest.copy()   # 灰圈收細：泡外圈在讓開人物之前的範圍
         rest &= ~charmask           # 背景填色一律讓開人物
         bubble_rest = rest
     else:
         bubble_rest = None
+        bubble_rest_pre = None
     bubble_guard = charmask
     # ★★ 圖層優先權的正確實作（使用者 2026-09-17：「要塗黑的泡直接全部塗黑，文字再補上去」）。
     # 難點是分辨「真泡蓋住人物」與「字寫在臉上被誤判成泡」。判準＝**泡內部的非字內容**：
@@ -2356,7 +2397,7 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None, 
     final = compose(g, gutter, bubble & ~local_only, seg, frameless, lab, stats, sticker,
                     core_ids=promoted, frame=(lhm | lvm), regions=regions, charmask=charmask,
                     char_raw=char_raw, bubble_rest=bubble_rest, lost_bubble=lost, diag=diag,
-                    bubble_local=bubble & local_only, more_paint=MORE_RULE)
+                    bubble_local=bubble & local_only, more_paint=MORE_RULE, bubble_rest_pre=bubble_rest_pre)
 
     pref = os.path.join(outdir, name)
     with open(f"{pref}_regions.json", "w", encoding="utf-8") as f:

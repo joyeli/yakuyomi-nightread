@@ -23,6 +23,8 @@ class RulesVersionGuardTest {
     /** 版本 → 五頁兩檔的成品摘要。新版本加一列，舊的不要刪。 */
     private val digests = mapOf(
         1 to "852996dcb2d3dc5b0cf674feee343bfce9e3c115e6d3d2a8db014b5f2294bab0",
+        // 2：人物外灰圈收細（折衷版＋開運算後只留與種子相連）。五頁裡 demo05 沒有認領、成品與版本 1 相同
+        2 to "78a821623962844b53f7ff4c5f395c5dcc514df659a7ed3ef2293bce6dabbec7",
     )
 
     private val pages = listOf("ch34_011", "demo01", "demo02", "demo05", "demo06")

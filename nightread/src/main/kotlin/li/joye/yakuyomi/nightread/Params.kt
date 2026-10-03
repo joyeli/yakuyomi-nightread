@@ -289,6 +289,69 @@ data class NightReadParams(
     val bleedFilter: Boolean = true,
     /** 出血格過濾（[Bleed] ＝ research/nightread_bleed.py）的參數組；同 [sep] 獨立成 data class。 */
     val bleed: BleedParams = BleedParams(),
+    /**
+     * 人物外灰圈收細（[Ring] ＝ research/nightread_ring.py；2026-10-03 使用者拍板「折衷」）的參數組；同 [sep] 獨立成 data class。
+     * 各檔一律開（與檔位無關）。
+     */
+    val ring: RingParams = RingParams(),
+)
+
+/**
+ * 人物外灰圈收細（折衷版；2026-10-03 使用者拍板；研究端 `research/nightread_ring.py` 的 `RING_*`），預設值＝研究端定案值。
+ *
+ * 背景塗黑原本停在人物安全邊外，人物與黑之間留一圈 15–20 px 的灰。只在「真的有畫出來的輪廓線把背景跟人物隔開」的地方，
+ * 讓已經塗黑的背景長到輪廓線；沒有輪廓線的地方維持現在的寬度。規則與數字見 [Ring]、docs/DECISIONS.md「人物外灰圈收細」。
+ */
+data class RingParams(
+    /** 總開關；false＝與加入前逐像素相同（研究端 `NIGHTREAD_RING=0`）。 */
+    val enabled: Boolean = true,
+    /** 可認領的「被線稿否決的留白」只看人物遮罩（收邊後）外擴此 px 內（coreReleasePad 16 ＋ 2）。 */
+    val rOut: Int = 18,
+    /** 種子＝留得下來的背景黑，8 連通塊面積 ≥ 此 px（零星黑點不當種子；8 連通見 [Ring.fillSmallHoles]）。 */
+    val seedMin: Int = 200,
+    /** 「被線稿否決的留白」要夾在黑與人物之間：到種子 ＋ 到人物原輸出（5×5 chamfer）≤ 此 px。 */
+    val gvGap: Int = 24,
+    /** 人物原輸出閉運算（橢圓半徑）多出來的窄凹口不認領（寬 < 2·此 px）。 */
+    val rawClose: Int = 6,
+    /** 從種子最多長幾步（4 連通）。 */
+    val steps: Int = 64,
+    /** 深墨：方窗邊長。 */
+    val inkBox: Int = 5,
+    /** 深墨：窗內 (255 − 灰階) 總和下限＝ceil(0.15·5·5·255)（平均暗度 0.15；模糊與 JPEG 只把墨攤開、總量不變）。 */
+    val inkSum: Int = 957,
+    /** 深墨：中心灰階上限。 */
+    val inkMaxGray: Int = 200,
+    /** 人物原輸出補洞（只給證據用；洞＝不碰頁緣的 8 連通塊）的面積上限：洞的內緣不是人物的外輪廓。 */
+    val holeMax: Int = 256,
+    /** 輪廓：深墨落在人物原輸出內此 px … */
+    val evIn: Int = 8,
+    /** … 或原輸出外此 px 的帶裡，邊界點離它在橢圓半徑 max(evIn, evOut) 內＝有輪廓。 */
+    val evOut: Int = 3,
+    /** 開闊背景：外法向射線從第幾 px 開始看。 */
+    val rayFrom: Int = 3,
+    /** 開闊背景：射線走到第幾 px（又碰到人物原輸出＝口袋／夾縫，不算）。 */
+    val rayTo: Int = 24,
+    /** 外法向：人物原輸出高斯模糊的 σ（float64 逐點算；改了要重新確認核值與研究端逐位元相同）。 */
+    val raySigma: Double = 2.0,
+    /** 連續：有輪廓邊界點的閉運算半徑（補回短缺口）。 */
+    val gapClose: Int = 6,
+    /** 連續：沒輪廓的邊界點外擴半徑，範圍內的邊界點也算沒輪廓。 */
+    val breakPad: Int = 12,
+    /** 空白紙：淡筆觸的灰階上限。 */
+    val faintGray: Int = 225,
+    /** 空白紙：淡筆觸要離深墨 > 此 px（橢圓；深墨的抗鋸齒與模糊裙邊不算）。 */
+    val faintInkPad: Int = 2,
+    /** 空白紙：計數方窗邊長（邊界複製）。 */
+    val faintWin: Int = 21,
+    /** 空白紙：窗內淡筆觸 ≥ 此個的地方不認領（＝ceil(0.015·21·21)）。 */
+    val faintMin: Int = 7,
+    /** 收尾：黑（種子 ∪ 認領）開運算的橢圓半徑，認領裡放不進圓盤的細指頭不要。 */
+    val open: Int = 3,
+    /**
+     * 收尾：開運算後只留經認領像素與種子 4 連通相連的（開運算削斷細頸後剩下的孤立黑塊回到現在的灰）。整合時加的（研究版沒有）：
+     * 47 頁 × 五檔共 14 個不同的孤立黑塊（標準 5 塊 1,065 px、更多 7 塊 1,201 px），守護框不變；研究端 `NIGHTREAD_RING_SEEDCONN`。
+     */
+    val seedConnected: Boolean = true,
 )
 
 /**

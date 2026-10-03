@@ -33,14 +33,16 @@ object NightRead {
      * 歷史：
      *  - 1（2026-10-03）：開始記版本。這之前產生的夜讀頁沒有版本記錄，一律當 0（舊版）。同日提出、還沒進產品的三項規則
      *    修改（第 13 頁雲下、ch34_014 牆面、灰圈縮法）進產品時要加到 2：版本 1 的 APK 已交給使用者。
+     *  - 2（2026-10-03）：人物外灰圈收細（折衷版，[Ring]；標準與更多都套）。研究中的「更多」背景物件修改（雲下、牆面）如果在
+     *    版本 2 的 APK 交給使用者之前進產品，也算在 2；之後才進就加到 3。
      */
-    const val RULES_VERSION: Int = 1
+    const val RULES_VERSION: Int = 2
 
     /**
      * 重繪一頁。
      *
      * 前半是分析（頁型、白元件、氣泡、貼紙計畫、場景曲線、格溝／頁邊），後半是合成（貼紙三檔篩選 → 留白（出血格過濾）→
-     * 格溝／頁邊 → 貼紙 → 氣泡 → 偽泡 → 人頭一致化 → 剩餘填色 → 人物還原（跳過泡與格溝））。
+     * 格溝／頁邊 → 貼紙 → 氣泡 → 偽泡 → 人頭一致化 → 剩餘填色 → 灰圈收細（[Ring]）→ 人物還原（跳過泡與格溝））。
      * 內部就是 [analyze] → [keepFor] → [composeTier]，與 [renderTiers] 同一條程式路徑。
      */
     fun render(
@@ -177,6 +179,11 @@ object NightRead {
         val shared: Boolean,
         /** 每像素彩度（「更多」C3 的留白候選要量安全網的彩度門）。 */
         val chroma: Gray?,
+        /**
+         * 灰圈收細的頁面級證據（[Ring.evidence]，1 bit/px）：只跟灰階與人物原輸出有關，分析最後算一次、各檔共用；灰圈收細關＝null。
+         * 放在分析而不是合成：合成時活著的遮罩多（成品、還原遮罩、灰圈收集的幾張），證據的暫存疊上去會墊高記憶體峰值。
+         */
+        val ringEvidence: LongArray?,
     ) {
         val sep: Mask? get() = layer?.sep
 
@@ -198,8 +205,13 @@ object NightRead {
         /** 留白帶快取的鍵（gutterShow）；帶本身 null＝這組留白元件是空的、不塗。 */
         var gutterKey: Set<Int>? = null
         var gutterBandBits: LongArray? = null
+        /** 留白帶裡「只因人物自己的墨被線稿否決」的像素（灰圈收細用；與 [gutterBandBits] 同一個鍵）；null＝沒有。 */
+        var gutterGvBits: LongArray? = null
         /** 人物還原遮罩（沒有偽泡時與檔位無關；lazy：第一檔合成到這一步才算）。 */
         var restoreBits: LongArray? = null
+        /** 灰圈收細只跟頁面有關的兩張遮罩（[Ring.PageParts]：人物原輸出閉運算、人物遮罩外擴）；lazy。 */
+        var ringClosedBits: LongArray? = null
+        var ringNearBits: LongArray? = null
     }
 
     /**
@@ -309,12 +321,17 @@ object NightRead {
         }
         debug?.invoke("separators", layer?.sep?.count() ?: 0)
 
+        // 灰圈收細的頁面級證據（diag 要有 "ring"＝true 才存中間遮罩與耗時，免得一般的 diag 呼叫多抱幾張整頁遮罩）
+        val ringEvidence = if (p.ring.enabled) packBits(Ring.evidence(g, charRaw, p, ringDiag(diag))) else null
+        debug?.invoke("ringEvidence", 0)
+
         return Analysis(
             g = g, seg = seg, regions = input.regions, charRaw = charRaw, charMask = charMask,
             lh = lh, lv = lv, frame = frame, frameless = frameless, wc = wc,
             bubbleUntrim = bubbleRes.bubble, cored = bubbleRes.cored, sealed = sealedOnly, anySealed = anySealed,
             bubble = bubble, bubbleStruct = bubbleStruct, bubbleLocal = bubbleLocal, lost = lost,
             plan = plan, scene = scene, layer = layer, p = p, shared = shared, chroma = input.chroma,
+            ringEvidence = ringEvidence,
         )
     }
 
@@ -347,25 +364,29 @@ object NightRead {
         // 無框頁的留白層用加「更多」新規則之前的 keep（新收的元件整顆當貼紙塗、留白帶照舊；研究端 P3）
         val gutterShow = if (a.frameless) a.wc.gutterIds - plan.baseAccept else a.wc.gutterIds
         val gutter = maskOfIds(a.wc.cc, gutterShow, w, h)
-        val bubbleRest = bubbleRest(a, plan, p, debug)
-        val out = compose(a, gutter, gutterShow, plan, bubbleRest, p, debug, diag)
+        val rest = bubbleRest(a, plan, p, debug)
+        val out = compose(a, gutter, gutterShow, plan, rest?.rest, rest?.pre, p, debug, diag)
         return NightReadResult(out, gutter, a.bubble, a.charMask, a.frameless, plan.accept, plan.promoted, a.sep)
     }
+
+    /** [bubbleRest] 的結果：要填的剩餘部分，與讓開人物之前的範圍（灰圈收細的可認領像素之一）。 */
+    private class BubbleRest(val rest: Mask, val pre: LongArray?)
 
     /**
      * 剩餘填色：泡元件減掉核心＝泡框外的背景白，沒有別的機制會接手（null＝沒有來源元件）。
      * 獨立成函式：中間的 41px 圈遮罩只活在這裡，不陪著整個合成。
      */
-    private fun bubbleRest(a: Analysis, plan: Sticker.Plan, p: NightReadParams, debug: NightReadDebug?): Mask? {
+    private fun bubbleRest(a: Analysis, plan: Sticker.Plan, p: NightReadParams, debug: NightReadDebug?): BubbleRest? {
         val restIds = a.cored + plan.promoted
         if (restIds.isEmpty()) return null
         var rest = maskOfIds(a.wc.cc, restIds, a.g.w, a.g.h).andNot(a.bubbleUntrim)
         // 只填泡框周圍這一圈：全部取消會吃掉白鬍老人的鬍鬚（「泡附近」只看原本的泡，見 Analysis.bubbleS0）
         val near = restNear(a, p)
         if (near != null) rest = rest and near
-        rest = rest.andNot(a.charMask)          // 背景填色一律讓開人物
+        val pre = if (p.ring.enabled) packBits(rest) else null     // 1 bit/px：合成的峰值時它還用不到
+        rest = rest.andNot(a.charMask)          // 背景填色一律讓開人物（andNot 配新遮罩：pre 保持讓開之前）
         debug?.invoke("bubbleRest", rest.count())
-        return rest
+        return BubbleRest(rest, pre)
     }
 
     /** 泡外 [NightReadParams.bubbleRestNear] 那一圈（泡是空的＝null＝不限）；shared 時快取。 */
@@ -848,7 +869,7 @@ object NightRead {
      */
     private fun paintSticker(
         out: FImg, g: Gray, cc: CC, accept: Set<Int>, bubble: Mask, coreIds: Set<Int>,
-        frame: Mask, seg: Mask, charMask: Mask, p: NightReadParams,
+        frame: Mask, seg: Mask, charMask: Mask, p: NightReadParams, ring: Ring.Collect?,
     ) {
         val r = (p.strokeObjFrac * min(g.h, g.w)).roundToInt().coerceIn(p.strokeObjMin, p.strokeObjMax)
         val k = Cv.ellipse(2 * r + 1)
@@ -861,8 +882,22 @@ object NightRead {
             val sw = win.w
             val sh = win.h
             val fill: Mask
+            var protectEarly: Mask? = null
             if (i in coreIds) {
-                fill = coreFill(win, g, frame, seg, charMask, edgeFb, p)
+                // 灰圈收細：核心區裡只因人物安全邊（coreReleasePad）而沒填的，扣掉保護區後記下（填色本身照舊）
+                val withheld = if (ring != null) Mask(sw, sh) else null
+                fill = coreFill(win, g, frame, seg, charMask, edgeFb, p, withheld)
+                if (withheld != null && withheld.any()) {
+                    val pr = Sticker.protect(Sticker.eaten(win.sub, win.comp, p), win.comp, p)
+                    protectEarly = pr
+                    for (y in 0 until sh) {
+                        val dst = (win.y0 + y) * g.w + win.x0
+                        for (x in 0 until sw) {
+                            val idx = y * sw + x
+                            if (withheld.data[idx] && !pr.data[idx]) Ring.set(ring!!.withheld, dst + x)
+                        }
+                    }
+                }
                 if (!fill.any()) continue
             } else {
                 fill = win.comp
@@ -870,7 +905,7 @@ object NightRead {
 
             // 區域級保護先算：eaten 內部是幾張窗大小的浮點圖，算完只留一張遮罩，之後才配前景的連通元件標號
             // （兩者是各自獨立的純函式，順序不影響結果，只是不讓它們的中間量同時活著）
-            val protect = Sticker.protect(Sticker.eaten(win.sub, win.comp, p), win.comp, p)
+            val protect = protectEarly ?: Sticker.protect(Sticker.eaten(win.sub, win.comp, p), win.comp, p)
             // 前景＝窗內非白且非氣泡的內容；小噪點不描邊、直接併入背景
             val fg = stickerForeground(win, g.w, bubble, p)
             val fMain = fg.first
@@ -886,7 +921,10 @@ object NightRead {
                     if ((fill.data[idx] || noise.data[idx]) && !protect.data[idx]) {
                         out.data[dst + x] = p.bg.toFloat()
                     }
-                    if (band.data[idx] && !wasDark) out.data[dst + x] = p.strokeObjV.toFloat()
+                    if (band.data[idx] && !wasDark) {
+                        out.data[dst + x] = p.strokeObjV.toFloat()
+                        if (ring != null) Ring.set(ring.stkBand, dst + x)      // 灰圈收細：實際畫上的前景描亮邊
+                    }
                 }
             }
         }
@@ -928,6 +966,7 @@ object NightRead {
      */
     private fun coreFill(
         win: Sticker.Window, g: Gray, frame: Mask, seg: Mask, charMask: Mask, edgeFb: Boolean, p: NightReadParams,
+        withheld: Mask? = null,
     ): Mask {
         var fr = subMask(frame, win, g.w)
         val kd = Cv.ellipse(p.frameHugDilate * 2 + 1)
@@ -939,6 +978,8 @@ object NightRead {
         // 語意放行：把人物遮罩外擴當安全邊界，非人物的核心區照填
         val guard = Cv.dilate(subMask(charMask, win, g.w), Cv.ellipse(p.coreReleasePad * 2 + 1))
         for (idx in released.data.indices) {
+            // [withheld]（灰圈收細）：核心區裡只因安全邊（guard）沒填的＝fill ∧ ¬strict ∧ guard（要在放行之前看 strict）
+            if (withheld != null && fill.data[idx] && !released.data[idx] && guard.data[idx]) withheld.data[idx] = true
             released.data[idx] = released.data[idx] || (fill.data[idx] && !guard.data[idx])
         }
         return released
@@ -1018,14 +1059,15 @@ object NightRead {
     // ── 合成 ─────────────────────────────────────────────────────────
 
     /**
-     * 整頁合成（一檔）：[Analysis.scene] 的複本 → 留白填深（出血格過濾）→ 格溝／頁邊 → 貼紙式背景 → 氣泡重繪 → 人物還原。
-     * 檔位相依的只有 [gutterIn]（無框頁＝留白元件扣掉 keep）、[plan]、[bubbleRest]；其餘全讀 [a]、不改寫它。
+     * 整頁合成（一檔）：[Analysis.scene] 的複本 → 留白填深（出血格過濾）→ 格溝／頁邊 → 貼紙式背景 → 氣泡重繪 → 灰圈收細 → 人物還原。
+     * 檔位相依的只有 [gutterIn]（無框頁＝留白元件扣掉 keep）、[plan]、[bubbleRest]／[bubbleRestPre]；其餘全讀 [a]、不改寫它
+     * （灰圈收細的頁面級證據在 [Analysis.ringEvidence]，各檔共用）。
      *
      * 封縫救回的泡（[Analysis.bubbleLocal]）從泡重繪起（泡重繪、偽泡、亮島、人物還原）才當泡，
      * 上面的結構層（格溝、線稿密度否決、出血過濾、貼紙）只看 [Analysis.bubbleStruct]。
      */
     private fun compose(
-        a: Analysis, gutterIn: Mask, gutterShow: Set<Int>, plan: Sticker.Plan, bubbleRest: Mask?,
+        a: Analysis, gutterIn: Mask, gutterShow: Set<Int>, plan: Sticker.Plan, bubbleRest: Mask?, bubbleRestPre: LongArray?,
         p: NightReadParams, debug: NightReadDebug?, diag: MutableMap<String, Any>?,
     ): Gray {
         val g = a.g
@@ -1035,17 +1077,26 @@ object NightRead {
         val out = a.scene.copy()
         val sceneKeep = a.scene                 // 人物區最終一律還原成場景調（各檔共用，不改寫）
         val sep = a.sep
+        // 灰圈收細（[Ring]）：合成途中記下「只因人物安全邊而沒黑」的像素，人物還原前認領
+        val ring = if (p.ring.enabled) Ring.Collect(w, h) else null
 
         // 留白：有框頁只填「深入不超過短邊 12%」的部分；無框頁只填真頁邊帶
-        paintGutterBand(out, a, gutterIn, gutterShow, p, debug, diag)
+        val gvWh = paintGutterBand(out, a, gutterIn, gutterShow, p, debug, diag)
 
         // 任意角度格溝／頁邊：同留白待遇（填 BG、邊界描亮），在貼紙層之前
         if (sep != null && sep.any()) paintGutter(out, g, sep, p)
 
         if (plan.accept.isNotEmpty()) {
-            paintSticker(out, g, a.wc.cc, plan.accept, a.bubbleStruct, plan.promoted, a.frame, seg, a.charMask, p)
+            paintSticker(out, g, a.wc.cc, plan.accept, a.bubbleStruct, plan.promoted, a.frame, seg, a.charMask, p, ring)
         }
         debug?.invoke("paintSticker", 0)
+        // 灰圈收細：背景填黑（留白／格溝／貼紙）到此為止塗成 BG 的像素（1 bit/px，到人物還原前才攤開）
+        val ringBg = if (ring == null) null else {
+            val bgf = p.bg.toFloat()
+            val bits = LongArray((w * h + 63) ushr 6)
+            for (i in 0 until w * h) if (out.data[i] == bgf && sceneKeep.data[i] != bgf) Ring.set(bits, i)
+            bits
+        }
         // 封縫救回的泡從這裡以後（泡重繪、偽泡、亮島、人物還原）才當泡；上面的結構層只看 bubbleStruct
         val bubAll = if (a.bubbleLocal == null) a.bubbleStruct else a.bubbleStruct or a.bubbleLocal
         paintBubbles(out, g, bubAll, seg, p)
@@ -1083,7 +1134,7 @@ object NightRead {
         }
 
         // ── 人物還原（放最後 ⇒ 任何新填色機制自動受保護）──────────────────
-        val alpha = if (pb != null && pb.any()) {
+        var restore = if (pb != null && pb.any()) {
             var restore = restoreBase(a, bubAll, p)
             // 收邊生長出來的邊緣不得壓過偽泡：那些像素是加工長出來的，屬於畫面不屬於人物
             restore = restore.andNot(pb.andNot(a.charRaw))
@@ -1093,10 +1144,19 @@ object NightRead {
                 restore = restore.andNot(Cv.dilate(textOnChar, kb))
             }
             debug?.invoke("restore", restore.count())
-            restoreBlur(restore, p)
+            restore
         } else {
-            restoreAlphaNoPseudo(a, bubAll, p, debug)
+            restoreMaskNoPseudo(a, bubAll, p, debug)
         }
+        if (ring != null && ringBg != null) {
+            // 灰圈收細（使用者 2026-10-03 拍板「折衷」）：有畫出來的輪廓線把背景跟人物隔開的地方，已經塗黑的背景長到輪廓線；
+            // 其餘維持現在的寬度。認領的像素填 BG、從還原遮罩拿掉（規則見 Ring）。
+            val bub = if (pb != null) bubAll or pb or a.lost else bubAll or a.lost
+            val bgPaint = unpackBits(ringBg, w, h)
+            if (bubbleRest != null) bgPaint.orInPlace(bubbleRest)
+            restore = ringClaim(a, out, sceneKeep, restore, bub, bgPaint, ring, bubbleRestPre, gvWh, p, debug, diag)
+        }
+        val alpha = restoreBlur(restore, p)
         for (i in out.data.indices) {
             val al = alpha.data[i]
             out.data[i] = out.data[i] * (1f - al) + sceneKeep.data[i] * al
@@ -1127,10 +1187,10 @@ object NightRead {
             p.edgeFeather)
 
     /**
-     * 沒有偽泡時的人物還原 alpha：遮罩與檔位無關，shared 時第一檔算完就以 1 bit/px 留給後面的檔（lazy）；
-     * 高斯每檔重做（見 [Analysis]：留浮點 alpha 會墊高後面幾檔的峰值）。
+     * 沒有偽泡時的人物還原遮罩：與檔位無關，shared 時第一檔算完就以 1 bit/px 留給後面的檔（lazy）；回傳的是新的遮罩（呼叫端可改）。
+     * 高斯每檔重做（見 [Analysis]：留浮點 alpha 會墊高後面幾檔的峰值；灰圈收細的認領也跟檔位有關）。
      */
-    private fun restoreAlphaNoPseudo(a: Analysis, bubAll: Mask, p: NightReadParams, debug: NightReadDebug?): FImg {
+    private fun restoreMaskNoPseudo(a: Analysis, bubAll: Mask, p: NightReadParams, debug: NightReadDebug?): Mask {
         val cached = a.restoreBits
         val restore = if (cached != null) {
             unpackBits(cached, a.g.w, a.g.h)
@@ -1138,17 +1198,86 @@ object NightRead {
             restoreBase(a, bubAll, p).also { if (a.shared) a.restoreBits = packBits(it) }
         }
         debug?.invoke("restore", restore.count())
-        return restoreBlur(restore, p)
+        return restore
     }
 
-    /** 塗留白帶（獨立成函式：帶遮罩只活在這裡，不陪著後面的貼紙／泡／人物還原）。 */
+    /**
+     * 要存灰圈收細的中間遮罩（`ring_*`）與證據耗時（`t_paper`…）才回傳 [diag]：diag 要有 `"ring"`＝true（再加 `"ring_state"`＝true
+     * 另存合成狀態）。
+     */
+    private fun ringDiag(diag: MutableMap<String, Any>?): MutableMap<String, Any>? = if (diag?.get("ring") == true) diag else null
+
+    /**
+     * 灰圈收細的認領（[Ring]）：可認領像素 D 與種子 → ∧ 頁面級證據（[Analysis.ringEvidence]）→ 生長＋收尾。認領的像素在 [out] 填 BG，
+     * 回傳拿掉認領後的還原遮罩（沒有認領＝原樣）。[diag] 有 `"ring"`＝true 才存 `ring_D`／`ring_seed`／`ring_claim`（[ringDiag]）。
+     */
+    private fun ringClaim(
+        a: Analysis, out: FImg, scene: FImg, restore: Mask, bub: Mask, bgPaint: Mask, ring: Ring.Collect,
+        restPre: LongArray?, gvWh: LongArray?, p: NightReadParams, debug: NightReadDebug?, diag: MutableMap<String, Any>?,
+    ): Mask {
+        val w = a.g.w
+        val h = a.g.h
+        val parts = Ring.PageParts(
+            rawClosed = {
+                a.ringClosedBits?.let { unpackBits(it, w, h) }
+                    ?: Ring.rawClosedOf(a.charRaw, p.ring).also { if (a.shared) a.ringClosedBits = packBits(it) }
+            },
+            near = {
+                a.ringNearBits?.let { unpackBits(it, w, h) }
+                    ?: Ring.nearOf(a.charMask, p.ring).also { if (a.shared) a.ringNearBits = packBits(it) }
+            },
+        )
+        val cl = Ring.claimable(a.g, out, scene, restore, a.charRaw, a.charMask, bub, bgPaint, ring.withheld, restPre, gvWh,
+            ring.stkBand, p, parts)
+        var claim: Mask? = null
+        val rd = ringDiag(diag)
+        val dRaw = if (rd != null) cl.d.copy() else null
+        if (cl.any) {
+            val ev = a.ringEvidence!!
+            val allowed = cl.d
+            for (i in allowed.data.indices) {
+                if (allowed.data[i] && (ev[i ushr 6] ushr (i and 63)) and 1L == 0L) allowed.data[i] = false
+            }
+            claim = Ring.grow(allowed, cl.seed, p.ring)
+        }
+        if (rd != null) {
+            rd["ring_D"] = dRaw!!
+            rd["ring_seed"] = cl.seed
+            rd["ring_claim"] = claim ?: Mask(a.g.w, a.g.h)
+            if (rd["ring_state"] == true) {
+                // 合成狀態（研究端 thin_ring 的 bg_paint／restore／withheld／rest_pre／gv_wh／stk_band），分段 parity 用
+                rd["ring_bg"] = bgPaint
+                rd["ring_restore"] = restore.copy()
+                rd["ring_withheld"] = unpackBits(ring.withheld, w, h)
+                restPre?.let { rd["ring_restpre"] = unpackBits(it, w, h) }
+                gvWh?.let { rd["ring_gv"] = unpackBits(it, w, h) }
+                rd["ring_stk"] = unpackBits(ring.stkBand, w, h)
+            }
+        }
+        if (claim == null) return restore
+        var n = 0
+        val bgf = p.bg.toFloat()
+        for (i in claim.data.indices) if (claim.data[i]) { out.data[i] = bgf; restore.data[i] = false; n++ }
+        debug?.invoke("ringClaim", n)
+        return restore
+    }
+
+    /**
+     * 塗留白帶（獨立成函式：帶遮罩只活在這裡，不陪著後面的貼紙／泡／人物還原）。回傳留白帶裡「只因人物自己的墨被線稿否決」的
+     * 像素（灰圈收細用；關掉或沒有＝null）。
+     */
     private fun paintGutterBand(
         out: FImg, a: Analysis, gutterIn: Mask, gutterShow: Set<Int>, p: NightReadParams,
         debug: NightReadDebug?, diag: MutableMap<String, Any>?,
-    ) {
-        val band = gutterBand(a, gutterIn, gutterShow, p, debug, diag)
+    ): LongArray? {
+        val gb = gutterBand(a, gutterIn, gutterShow, p, debug, diag)
+        val band = gb.band
         if (band != null && band.any()) paintGutter(out, a.g, band, p)
+        return gb.gv
     }
+
+    /** [gutterBand] 的結果：要塗的留白帶（null＝不塗），與只因人物自己的墨被線稿否決的像素（null＝沒算或沒有）。 */
+    private class GutterBand(val band: Mask?, val gv: LongArray?)
 
     /**
      * 要塗的留白帶（[gutterIn] 空＝null）：有框頁沿格框線切開、深度 ≤ 短邊 12%；無框頁只留真頁邊帶；兩條都過線稿密度否決
@@ -1157,25 +1286,47 @@ object NightRead {
     private fun gutterBand(
         a: Analysis, gutterIn: Mask, gutterShow: Set<Int>, p: NightReadParams,
         debug: NightReadDebug?, diag: MutableMap<String, Any>?,
-    ): Mask? {
+    ): GutterBand {
         if (a.shared && a.gutterKey == gutterShow) {
-            val bits = a.gutterBandBits ?: return null
+            val gv = a.gutterGvBits
+            val bits = a.gutterBandBits ?: return GutterBand(null, gv)
             val cached = unpackBits(bits, a.g.w, a.g.h)
             if (!a.frameless) debug?.invoke("gutterBand", cached.count())
-            return cached
+            return GutterBand(cached, gv)
         }
-        val band = computeGutterBand(a, gutterIn, p, debug, diag)
+        val gb = computeGutterBand(a, gutterIn, p, debug, diag)
         if (a.shared) {
             a.gutterKey = gutterShow
-            a.gutterBandBits = band?.let { packBits(it) }
+            a.gutterBandBits = gb.band?.let { packBits(it) }
+            a.gutterGvBits = gb.gv
         }
-        return band
+        return gb
+    }
+
+    /**
+     * 「不把人物遮罩裡的墨算線稿」重算一次的線稿密度否決（灰圈收細關＝null），1 bit/px。要在一般的否決**之前**算：兩次否決的
+     * 暫存不重疊，一般否決（合成的記憶體峰值）旁邊只多這 1 bit/px。
+     */
+    private fun vetoExcludingCharacters(a: Analysis, fill: Mask, p: NightReadParams): LongArray? =
+        if (!p.ring.enabled) null else packBits(Texture.veto(fill, a.g, a.frame, a.seg, a.bubbleStruct, p, exclude = a.charMask))
+
+    /**
+     * 線稿密度否決 [v1] 拿掉、但「不把人物遮罩裡的墨算線稿」重算（[v2]）就不會被拿掉的留白像素（研究端 `gv_wh`；沒有＝null）。
+     */
+    private fun gutterGv(fill: Mask, v1: Mask, v2: LongArray?): LongArray? {
+        if (v2 == null || v1 === fill) return null
+        val gv = LongArray(v2.size)
+        var any = false
+        for (i in fill.data.indices) {
+            if (fill.data[i] && !v1.data[i] && Ring.has(v2, i)) { Ring.set(gv, i); any = true }
+        }
+        return if (any) gv else null
     }
 
     private fun computeGutterBand(
         a: Analysis, gutterIn: Mask, p: NightReadParams, debug: NightReadDebug?, diag: MutableMap<String, Any>?,
-    ): Mask? {
-        if (!gutterIn.any()) return null
+    ): GutterBand {
+        if (!gutterIn.any()) return GutterBand(null, null)
         val g = a.g
         val w = g.w
         val h = g.h
@@ -1209,18 +1360,24 @@ object NightRead {
                 val l = cc.labels[i]
                 if (l > 0 && maxDepth[l] <= lim) keep.data[i] = true
             }
-            // 有線稿的白不是留白；出血格畫面拿掉
-            return bleed(Texture.veto(keep, g, a.frame, a.seg, a.bubbleStruct, p), keep)
+            // 有線稿的白不是留白；出血格畫面拿掉（灰圈收細的 gv 在出血過濾之前取，同研究端）
+            val v2 = vetoExcludingCharacters(a, keep, p)
+            val v1 = Texture.veto(keep, g, a.frame, a.seg, a.bubbleStruct, p)
+            val gv = gutterGv(keep, v1, v2)
+            return GutterBand(bleed(v1, keep), gv)
         }
         val lim = p.safeGutterDepth * min(h, w)
         // 格內背景與頁邊留白在像素層連通 ⇒ 先沿格框線切開，只留真的留白
         val cut = Regions.gutterFrameCut(gutterIn, a.lh, a.lv, p)
         val band = Mask(w, h)
         for (i in band.data.indices) band.data[i] = cut.data[i] && bd[i] <= lim
-        // 有線稿的白不是留白；出血格畫面拿掉
-        val band2 = bleed(Texture.veto(band, g, a.frame, a.seg, a.bubbleStruct, p), band)
+        // 有線稿的白不是留白；出血格畫面拿掉（灰圈收細的 gv 在出血過濾之前取，同研究端）
+        val v2 = vetoExcludingCharacters(a, band, p)
+        val v1 = Texture.veto(band, g, a.frame, a.seg, a.bubbleStruct, p)
+        val gv = gutterGv(band, v1, v2)
+        val band2 = bleed(v1, band)
         debug?.invoke("gutterBand", band2.count())
-        return band2
+        return GutterBand(band2, gv)
     }
 
     /** 每像素到頁邊（有框頁再併入格線）的距離，決定留白填到多深。 */

@@ -16,7 +16,8 @@ default), bubble-leak sealing has its radius there (`NIGHTREAD_BUBBLE_SEAL_R`, 1
 bubble-strip fixes each have a switch (`NIGHTREAD_CLEAN_INK_HOLES`, `NIGHTREAD_GUARD_RAW`, on by default, 0 = old
 behaviour), so does the bubble-leak test (`NIGHTREAD_ELEAK`, on by default; thresholds `NIGHTREAD_ELEAK_*`, see
 `BUBBLE_LEAK`), so does the "More" rule A2 (`NIGHTREAD_MORE`, off by default = the old L3; thresholds `NIGHTREAD_MORE_*`, see
-*"More" rule A2*), and a few research toggles read it too (`NIGHTREAD_EDGE_INK`, `NIGHTREAD_REQUIRE_CLEAN`,
+*"More" rule A2*), so does character ring thinning (`NIGHTREAD_RING`, `NIGHTREAD_RING_SEEDCONN`, both on by default;
+constants at the top of `research/nightread_ring.py`, see *Character ring thinning*), and a few research toggles read it too (`NIGHTREAD_EDGE_INK`, `NIGHTREAD_REQUIRE_CLEAN`,
 `NIGHTREAD_TEXT_*`).
 Everything else is edited in the file, so a run reproduces.
 
@@ -889,6 +890,62 @@ three.
 ### `EDGE_FEATHER` = 0.7
 Antialiasing radius at the figure-restoration boundary, a transition of only 1–2 px. Any wider and you
 introduce a gradient the original artwork never had.
+
+---
+
+## Character ring thinning (`nightread_ring.py`)
+
+Background fill used to stop at the figure's safety margin, leaving a 15–20 px grey ring between the figure and
+the black. The compromise (user decision 2026-10-03, both product tiers): **only where a drawn outline separates
+the background from the figure** does the already-black background grow up to the outline; elsewhere the ring
+keeps its old width. Over 47 pages the median ring width goes from 16.8 px to 3.6 px (standard) and 4.0 px
+(more). Rules and numbers: docs/DECISIONS.md, section on character ring thinning; Kotlin `RingParams`
+(`NightReadParams.ring`) and `Ring`.
+
+### `RING_ON` = 1 (`NIGHTREAD_RING`; Kotlin `enabled`)
+Master switch. 0 = the output before this rule, pixel-identical.
+
+### `RING_R_OUT` = 18 · `RING_GV_GAP` = 24 · `RING_RAW_CLOSE` = 6 · `RING_SEED_MIN` = 200 · `RING_STEPS` = 64
+What may be claimed (research code name F). Margin-band pixels vetoed as line art only because of the figure's own
+ink count only within 18 px of the figure mask, and only when they sit between the black and the figure: 5×5
+chamfer distance to the seed plus to the raw figure output ≤ 24. Narrow notches of the raw output (what a radius-6
+closing adds) are never claimed, so the black does not creep between the fingers of a blob the model painted onto
+blank paper. Seeds are background-black components of at least 200 px (8-connected, see below); growth from them
+is 4-connected and at most 64 steps.
+
+### `RING_INK_SUM` = 957 · `RING_INK_BOX` = 5 · `RING_INK_MAX_GRAY` = 200
+Deep ink: the sum of (255 − grey) over a 5×5 window (border replicated) is at least 957 (mean darkness 0.15) and
+the centre is darker than 200. This measures the amount of ink, which blur and JPEG spread out but do not reduce;
+the 2 px, grey 186–216 faint stroke at the right edge of demo01's shoulder plate stays below it.
+
+### `RING_HOLE_MAX` = 256 · `RING_EV_IN` = 8 · `RING_EV_OUT` = 3
+Holes in the raw figure output smaller than 256 px that do not touch the page edge are filled first (for the
+evidence only). A boundary point has an outline when deep ink lying within 8 px inside or 3 px outside the raw
+output is within radius 8 of it. Holes and seeds are **8-connected components**: the research code calls
+`connectedComponentsWithStats(m, 4)`, but cv2's second positional argument is the labels output, not the
+connectivity, so it actually ran with the default 8; the product follows what the research code actually did.
+
+### `RING_RAY_FROM` = 3 · `RING_RAY_TO` = 24 · `RING_RAY_SIGMA` = 2.0
+Open background in front: an outline point whose outward normal (negative gradient of the raw output after a σ2
+Gaussian) runs into the figure again between 3 and 24 px does not count. This is what keeps the white under the
+chin in c371_015, figure above and below, untouched. The normal is computed per point in float64 with a fixed
+summation order, bit-identical between research and Kotlin.
+
+### `RING_GAP_CLOSE` = 6 · `RING_BREAK_PAD` = 12
+Continuity: a radius-6 closing of the outline points fills short gaps; the remaining outline-less boundary points
+are dilated by 12 px and outline points inside that also count as outline-less.
+
+### `RING_FAINT_GRAY` = 225 · `RING_FAINT_INK_PAD` = 2 · `RING_FAINT_WIN` = 21 · `RING_FAINT_MIN` = 7
+Blank paper: a faint stroke is grey below 225, not deep ink, and more than 2 px from deep ink. Where a 21×21
+window (border replicated) holds 7 or more faint pixels nothing is claimed; the right edge of demo01's shoulder
+plate has only faint strokes and this is the rule that stops it. The background-side rule (the nearest figure edge
+must be an outlined one, an equality test between two exact Euclidean distance maps) has no parameter.
+
+### `RING_OPEN` = 3 · `RING_SEED_CONN` = 1 (`NIGHTREAD_RING_SEEDCONN`; Kotlin `seedConnected`)
+Finish: a radius-3 opening of the black (seed ∪ claim) drops thin fingers, and after the opening only claims
+4-connected to a seed through claimed pixels are kept. The second part was added at integration time: over 47
+pages and five tiers it removes 14 distinct small isolated black specks (standard 5 specks, 1,065 px; more 7
+specks, 1,201 px) and leaves the guard boxes unchanged. 0 = the research prototype zhe.py.
 
 ---
 

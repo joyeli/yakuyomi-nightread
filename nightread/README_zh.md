@@ -174,7 +174,11 @@ val charMask = Mask(w, h, BooleanArray(w * h) { a[it] || b[it] })
 `docs/PARAMETERS_zh.md`「「更多」新規則 A2」），只在舊 L3 上加元件；舊 L3＝同一列但 `more` 留預設（關）。
 
 `TierParityTest` 拿三張 fixture 頁跑 L1、L2、舊 L3 與更多（demo02 只跑更多），對 `fixtures/baseline/tiers/` 比；`MoreRuleParityTest`
-逐元件比 A2 的特徵與判定；`BubbleLeakParityTest` 用 demo04 守漏泡判準（`bubbleLeak`：泡遮罩與研究端逐像素相同）。
+逐元件比 A2 的特徵與判定；`BubbleLeakParityTest` 用 demo04 守漏泡判準（`bubbleLeak`：泡遮罩與研究端逐像素相同）；`RingParityTest`
+守人物外灰圈收細（`ring`／`Ring.kt`，研究端 `nightread_ring.py`）：六頁的頁面級證據與 demo01 的生長＋收尾都與研究端逐像素相同。
+
+人物外灰圈收細（`ring`，預設開、兩檔都套；研究端 `NIGHTREAD_RING`）：只在有畫出來的輪廓線把背景跟人物隔開的地方，讓已經塗黑的
+背景長到輪廓線，其餘維持原本那圈灰。規則與數字見 `docs/PARAMETERS_zh.md`「人物外灰圈收細」與 `docs/DECISIONS.md`。
 
 另有兩個開關，預設都開、三檔也一律開：`separators`（任意角度格溝／頁邊，`Separators.kt`；研究端 `NIGHTREAD_SEP`）與
 `bleedFilter`（出血格過濾，`Bleed.kt`；研究端 `NIGHTREAD_BLEED`）。格溝在貼紙層之前用留白待遇塗，而且壓過人物遮罩（圖層：

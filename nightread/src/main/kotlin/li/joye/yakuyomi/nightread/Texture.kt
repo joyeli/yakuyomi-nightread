@@ -21,7 +21,8 @@ import kotlin.math.min
  */
 internal object Texture {
 
-    fun veto(fill: Mask, g: Gray, frame: Mask, seg: Mask, bubble: Mask, p: NightReadParams): Mask {
+    /** [exclude]＝不算線稿的像素（人物外灰圈收細拿人物遮罩重算一次，看哪些留白只因人物自己的墨被否決）。 */
+    fun veto(fill: Mask, g: Gray, frame: Mask, seg: Mask, bubble: Mask, p: NightReadParams, exclude: Mask? = null): Mask {
         if (!fill.any()) return fill
         val w = g.w
         val h = g.h
@@ -51,6 +52,13 @@ internal object Texture {
         if (seg.any()) {
             val segD = dilateSquare(cropMask(seg, rx0, ry0, rw, rh), p.textureSegDil)
             for (i in content.data.indices) if (segD.data[i]) content.data[i] = false
+        }
+        if (exclude != null) {
+            for (y in 0 until rh) {
+                val src = (ry0 + y) * w + rx0
+                val dst = y * rw
+                for (x in 0 until rw) if (exclude.data[src + x]) content.data[dst + x] = false
+            }
         }
         var barrier = frs
         if (bubble.any()) {
