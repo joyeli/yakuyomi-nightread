@@ -106,6 +106,126 @@ class RingParityTest {
         }
     }
 
+    /**
+     * 寬或高不到 9 px 的頁（外法向的高斯窗半徑 8，要反射不只一次）：研究端 `outward_normals` 在四張小遮罩上的外法向（float.hex）、
+     * `evidence` 在四張小頁上的有輪廓邊界點與可以收細，Kotlin 逐位元相同；整頁 [NightRead.render] 不拋例外（eb78e98 在 8×8、40×6
+     * 越界）。研究端的值用 `research/nightread_ring.py` 的 `_refl`（反覆反射）算。
+     */
+    @Test
+    fun tinyPagesMatchResearch() {
+        val k = Ring.gaussKernel(RingParams().raySigma)
+        fun mask(w: Int, h: Int, bits: String) = Mask(w, h, BooleanArray(w * h) { bits[it] == '1' })
+        fun rect(w: Int, h: Int, on: List<IntArray>, off: List<IntArray> = emptyList()): Mask {
+            val m = Mask(w, h)
+            for (r in on) for (y in r[1] until r[3]) for (x in r[0] until r[2]) m.data[y * w + x] = true
+            for (q in off) m.data[q[1] * w + q[0]] = false
+            return m
+        }
+        // 研究端：每個 raw 像素（逐列）的 x y nx ny
+        val normals = listOf(
+            rect(12, 5, listOf(intArrayOf(4, 1, 10, 4), intArrayOf(10, 2, 11, 3)), listOf(intArrayOf(4, 1), intArrayOf(9, 3))) to """
+                5 1 -0x1.fdf327278e3c2p-1 -0x1.6e2f7afd1fe0bp-4
+                6 1 -0x1.fcfcb0528bea2p-1 -0x1.bbb49f5765911p-4
+                7 1 0x1.ff9fadda754b5p-1 -0x1.39ff9be254695p-5
+                8 1 0x1.fedb4bb4db2dbp-1 0x1.1195aba807895p-4
+                9 1 0x1.fdd8d1813d8b2p-1 0x1.773dae47984c1p-4
+                4 2 -0x1.fdb373aad9526p-1 -0x1.83b963235f77ap-4
+                5 2 -0x1.fdb6baa6cb017p-1 -0x1.82a543e88e8e0p-4
+                6 2 -0x1.fe64859f9b984p-1 -0x1.444dc4644358cp-4
+                7 2 0x1.f595f4d9ea14fp-1 0x1.9af6cab743442p-3
+                8 2 0x1.f9fab9dbb64b0p-1 0x1.3925d7a576b2cp-3
+                9 2 0x1.f8049b8f63449p-1 0x1.68380ddd4eb21p-3
+                10 2 0x1.eac63bec68f97p-1 0x1.23c8cea2c7d49p-2
+                4 3 -0x1.ff503d9521315p-1 -0x1.a8186992e385bp-5
+                5 3 -0x1.ff885fe17358dp-1 -0x1.5dea345fdcd8ep-5
+                6 3 -0x1.fff44071e7e7ep-1 0x1.b6b63fd283b31p-7
+                7 3 0x1.f278e12fc79fdp-1 0x1.d3aa896542ba0p-3
+                8 3 0x1.fa9a8c812a4d5p-1 0x1.288ef97188e2bp-3
+            """,
+            rect(5, 12, listOf(intArrayOf(1, 3, 4, 9), intArrayOf(2, 9, 3, 10)), listOf(intArrayOf(1, 3), intArrayOf(3, 8))) to """
+                2 3 -0x1.93d894eb02a07p-4 -0x1.fd815e10ebf3ap-1
+                3 3 -0x1.bc4bebba5d701p-5 -0x1.ff3f15c3b08cbp-1
+                1 4 -0x1.7384aff3e42e8p-4 -0x1.fde3b90c6ec68p-1
+                2 4 -0x1.895a6ef275941p-4 -0x1.fda232c82c2e8p-1
+                3 4 -0x1.65e16bd6cd2d6p-5 -0x1.ff82dd0b0ce6bp-1
+                1 5 -0x1.ce87c9f1479fcp-4 -0x1.fcb9a3250cba1p-1
+                2 5 -0x1.57b2ae1ff2f12p-4 -0x1.fe31bef0e8d8dp-1
+                3 5 0x1.961742f0332cdp-7 -0x1.fff5ef1336da8p-1
+                1 6 -0x1.077db3d7d309cp-5 0x1.ffbc2e67ff902p-1
+                2 6 0x1.2c44c3ec5a994p-3 0x1.fa7793a392545p-1
+                3 6 0x1.7757a34a0bb0ep-3 0x1.f753eb26b6904p-1
+                1 7 0x1.8cca41e92b253p-5 0x1.ff66283ee8ae2p-1
+                2 7 0x1.dc3f292edb24dp-4 0x1.fc870138a0280p-1
+                3 7 0x1.cff7e567498c7p-4 0x1.fcb46658e3b93p-1
+                1 8 0x1.c4e9635373407p-5 0x1.ff378678655bfp-1
+                2 8 0x1.c370da4dce087p-4 0x1.fce17a72cb376p-1
+                2 9 0x1.d309a99150a93p-4 0x1.fca92a177abc7p-1
+            """,
+            rect(3, 3, listOf(intArrayOf(1, 0, 2, 2))) to """
+                1 0 -0x0.0p+0 -0x0.0p+0
+                1 1 -0x0.0p+0 0x1.fffffdaaefdf7p-1
+            """,
+            rect(7, 1, listOf(intArrayOf(2, 0, 5, 1))) to """
+                2 0 -0x1.ffffffecc0ab6p-1 -0x0.0p+0
+                3 0 -0x0.0p+0 -0x0.0p+0
+                4 0 0x1.ffffffecc0ab6p-1 -0x0.0p+0
+            """,
+        )
+        for ((raw, text) in normals) {
+            val rows = text.trim().lines().map { it.trim().split(" ") }
+            assertEquals("${raw.w}×${raw.h} raw 像素數", rows.size, raw.count())
+            for (r in rows) {
+                val nrm = Ring.normal(raw, r[0].toInt(), r[1].toInt(), k)
+                for (c in 0 until 2) {
+                    val want = java.lang.Double.parseDouble(r[2 + c])
+                    assertEquals(
+                        "${raw.w}×${raw.h} (${r[0]},${r[1]}) 外法向第 $c 分量",
+                        java.lang.Double.doubleToRawLongBits(want), java.lang.Double.doubleToRawLongBits(nrm[c]),
+                    )
+                }
+            }
+        }
+        // 研究端 evidence：灰階（逐像素兩位十六進位）、人物原輸出 → 有輪廓邊界點、可以收細
+        data class Tiny(val w: Int, val h: Int, val g: String, val raw: String, val conf: String, val ev: String)
+        val pages = listOf(
+            Tiny(8, 8,
+                "ffffff00ffffffffffffff0014ffffffffffff0014ffffffffffff0014ffffffffffff0014ffffffffffff0014ffffffffffff0014ffffffffffff00ffffffff",
+                "0000000000001111000011110000111100001111000011110000111100000000",
+                "0000000000001111000010000000100000001000000010000000111100000000",
+                "1111111111111111111110001111100011111000111110001111111111111111"),
+            Tiny(12, 5,
+                "ffffffffff00ffffffffffffffffffffff0014ffffffffffffffffffff0014ffffffffffffffffffff0014ffffffffffffffffffff00ffffffffffff",
+                "000000000000000000111111000000111111000000111111000000000000",
+                "000000000000000000111111000000100000000000111111000000000000",
+                "111111111111111111111111111111100000111111111111111111111111"),
+            Tiny(5, 12,
+                "ffffffffffffffffffffffffffffffffffffffffffffffffff0000000000ff141414ffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                "000000000000000000000000000000011100111001110011100111001110",
+                "000000000000000000000000000000011100101001010010100101001010",
+                "111111111111111111111111111111111111101111011110111101111011"),
+        )
+        val p = NightReadParams()
+        for (t in pages) {
+            val g = Gray(t.w, t.h, IntArray(t.w * t.h) { t.g.substring(2 * it, 2 * it + 2).toInt(16) })
+            val dbg = HashMap<String, Any>()
+            val ev = Ring.evidence(g, mask(t.w, t.h, t.raw), p, dbg)
+            assertEquals("${t.w}×${t.h} 有輪廓邊界點", t.conf, (dbg["ring_conf"] as Mask).data.joinToString("") { if (it) "1" else "0" })
+            assertEquals("${t.w}×${t.h} 可以收細", t.ev, ev.data.joinToString("") { if (it) "1" else "0" })
+        }
+        // 整頁 render：小頁上有輪廓邊界點時不越界（頁內有一條直墨線與一塊人物）
+        for ((w, h) in listOf(40 to 6, 6 to 40, 8 to 8, 12 to 5, 5 to 12, 3 to 3, 9 to 9)) {
+            val gray = Gray(w, h, IntArray(w * h) { 255 })
+            val ch = Mask(w, h)
+            for (y in 0 until h) gray.data[y * w + minOf(2, w - 1)] = 0
+            for (y in h / 4 until 3 * h / 4) for (x in minOf(3, w - 1) until w) ch.data[y * w + x] = true
+            val input = NightReadInput(gray, Mask(w, h), emptyList(), ch, Gray(w, h))
+            for (tier in listOf(NightTier.L2, NightTier.L3)) {
+                val r = NightRead.render(input, tier.apply())
+                assertEquals("${w}×$h ${tier.key} 成品大小", w * h, r.out.data.size)
+            }
+        }
+    }
+
     @Test
     fun growMatchesResearch() {
         val allowed = readMask("demo01_ring_allowed.png")

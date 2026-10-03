@@ -33,8 +33,8 @@ object NightRead {
      * 歷史：
      *  - 1（2026-10-03）：開始記版本。這之前產生的夜讀頁沒有版本記錄，一律當 0（舊版）。同日提出、還沒進產品的三項規則
      *    修改（第 13 頁雲下、ch34_014 牆面、灰圈縮法）進產品時要加到 2：版本 1 的 APK 已交給使用者。
-     *  - 2（2026-10-03）：人物外灰圈收細（折衷版，[Ring]；標準與更多都套）。研究中的「更多」背景物件修改（雲下、牆面）如果在
-     *    版本 2 的 APK 交給使用者之前進產品，也算在 2；之後才進就加到 3。
+     *  - 2（2026-10-03）：人物外灰圈收細（折衷版，[Ring]；標準與更多都套）。版本 2 的 debug APK 同日交給使用者，之後的規則
+     *    修改（含研究中的「更多」背景物件修改：雲下、牆面）一律加到 3。
      */
     const val RULES_VERSION: Int = 2
 
@@ -1233,7 +1233,8 @@ object NightRead {
         val rd = ringDiag(diag)
         val dRaw = if (rd != null) cl.d.copy() else null
         if (cl.any) {
-            val ev = a.ringEvidence!!
+            // 分析時算好的證據；分析的灰圈參數跟這一檔不同（或分析時灰圈關著）就照這一檔的參數現算（render／renderTiers 不會走到）
+            val ev = a.ringEvidence?.takeIf { a.p.ring == p.ring } ?: packBits(Ring.evidence(a.g, a.charRaw, p, null))
             val allowed = cl.d
             for (i in allowed.data.indices) {
                 if (allowed.data[i] && (ev[i ushr 6] ushr (i and 63)) and 1L == 0L) allowed.data[i] = false
@@ -1254,11 +1255,12 @@ object NightRead {
                 rd["ring_stk"] = unpackBits(ring.stkBand, w, h)
             }
         }
-        if (claim == null) return restore
         var n = 0
-        val bgf = p.bg.toFloat()
-        for (i in claim.data.indices) if (claim.data[i]) { out.data[i] = bgf; restore.data[i] = false; n++ }
-        debug?.invoke("ringClaim", n)
+        if (claim != null) {
+            val bgf = p.bg.toFloat()
+            for (i in claim.data.indices) if (claim.data[i]) { out.data[i] = bgf; restore.data[i] = false; n++ }
+        }
+        debug?.invoke("ringClaim", n)          // 沒有認領也送（0）：分段計時才不會把這段算進下一段
         return restore
     }
 

@@ -739,7 +739,14 @@ object Cv {
     const val DIST_SQ_INF: Int = Int.MAX_VALUE
 
     /**
-     * 精確的**平方**歐氏距離：每個前景（true）像素到最近背景（false）像素的距離平方（整數）、背景＝0；整張沒有背景＝[DIST_SQ_INF]。
+     * [distanceSq] 的飽和值：真實距離平方 ≥ 2³¹−1（距離超過 46,340 px，只有寬或高超過這個數的頁才可能）一律存這個，
+     * 不溢位成負數、也不跟 [DIST_SQ_INF] 撞在一起。灰圈收細的背景側只在可認領像素（都在人物遮罩旁）上用到，那裡的距離遠小於此。
+     */
+    const val DIST_SQ_SAT: Long = Int.MAX_VALUE - 1L
+
+    /**
+     * 精確的**平方**歐氏距離：每個前景（true）像素到最近背景（false）像素的距離平方（整數）、背景＝0；整張沒有背景＝[DIST_SQ_INF]；
+     * 超過 [DIST_SQ_SAT] 的存 [DIST_SQ_SAT]。
      * 與 `cv2.distanceTransform(m, DIST_L2, DIST_MASK_PRECISE)`（關掉 IPP）的值是同一個數的平方根（cv2 存 float32 的 √）。
      *
      * 第一趟沿欄算「直向到最近背景」（上下各掃一次，逐列存取、快取友善），第二趟逐列做 Felzenszwalb 下包絡，拋物線交點用
@@ -812,7 +819,8 @@ object Cv {
                 while (zd[j + 1] != 0L && zn[j + 1] < x.toLong() * zd[j + 1]) j++
                 val p = v[j]
                 val dx = (x - p).toLong()
-                out[base + x] = (dx * dx + fx[p] - p.toLong() * p).toInt()
+                val d2 = dx * dx + fx[p] - p.toLong() * p
+                out[base + x] = if (d2 < DIST_SQ_SAT) d2.toInt() else DIST_SQ_SAT.toInt()
             }
         }
         return out
@@ -879,37 +887,6 @@ object Cv {
     fun boxBlur(f: FImg, k: Int): FImg {
         val kern = DoubleArray(k) { 1.0 / k }
         return sepFilter(f, kern)
-    }
-
-    /**
-     * 整數方窗和：`cv2.boxFilter(a, -1, (k, k), normalize=False, borderType=BORDER_REPLICATE)`（k 奇數、錨點置中；窗伸出影像的
-     * 部分取最近的邊緣像素）。整數加總，與 cv2 的 float32 結果逐值相同（窗和遠小於 2²⁴）。先橫後縱、各一趟滑動窗。
-     */
-    fun boxSum(a: IntArray, w: Int, h: Int, k: Int): IntArray {
-        val r = k / 2
-        val mid = IntArray(w * h)
-        for (y in 0 until h) {
-            val base = y * w
-            var s = 0
-            for (d in -r..r) s += a[base + min(max(d, 0), w - 1)]
-            for (x in 0 until w) {
-                mid[base + x] = s
-                s += a[base + min(x + r + 1, w - 1)] - a[base + max(x - r, 0)]
-            }
-        }
-        val out = IntArray(w * h)
-        val s = IntArray(w)
-        for (d in -r..r) {
-            val rb = min(max(d, 0), h - 1) * w
-            for (x in 0 until w) s[x] += mid[rb + x]
-        }
-        for (y in 0 until h) {
-            System.arraycopy(s, 0, out, y * w, w)
-            val add = min(y + r + 1, h - 1) * w
-            val sub = max(y - r, 0) * w
-            for (x in 0 until w) s[x] += mid[add + x] - mid[sub + x]
-        }
-        return out
     }
 
     /** 可分離濾波（先橫後縱），BORDER_REFLECT_101。 */
@@ -980,7 +957,7 @@ object Cv {
     }
 
     /** BORDER_REFLECT_101：`abcd | cba` — 邊界像素不重複。 */
-    private fun reflect101(i: Int, n: Int): Int {
+    internal fun reflect101(i: Int, n: Int): Int {
         if (n == 1) return 0
         var x = i
         while (x < 0 || x >= n) {

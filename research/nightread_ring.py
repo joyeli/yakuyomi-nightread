@@ -37,8 +37,10 @@
 NIGHTREAD_RING_SEEDCONN=0 ＝ zhe.py（47 頁 × 五檔逐像素相同）。
 
 浮點與 Kotlin：深墨與淡筆觸都是整數和；兩種距離變換都關掉 IPP（`_dist_noipp`）：精確歐氏＝整數平方距離開根號（＝Kotlin
-Cv.distanceL2），5×5 chamfer＝OpenCV 自己的定點版（＝Kotlin Cv.distanceChamfer 逐位元）。研究版（zhe.py）在多執行緒下跑，
-cv2 走的正是這兩條；單執行緒時精確歐氏會走 IPP 的浮點近似，背景側的相等比較會翻（c371_015 量到 3,410 px）。
+Cv.distanceSq 的平方根），5×5 chamfer＝OpenCV 自己的定點版（＝Kotlin Cv.distanceChamfer 逐位元）。研究版（zhe.py）在多執行緒下跑，
+cv2 走的正是這兩條；單執行緒時精確歐氏會走 IPP 的浮點近似，背景側的相等比較會翻（c371_015 量到 3,410 px）。zhe.py 本身的輸出
+因此隨 cv2 執行緒數變（複核量到單緒與預設執行緒數的認領五檔各有 36／10／16／24／30 頁不同）；RESULT／VERIFY 的數字與這裡對齊的
+都是多執行緒版，這份程式與執行緒數無關。
 外法向不用 cv2 的 float32 GaussianBlur＋Sobel（SIMD 加總順序不定、Kotlin 對不上），改成這裡寫死順序的 float64 逐點計算
 （`outward_normals`）；47 頁 × 五檔的有輪廓邊界點與研究版（cv2）逐像素相同。
 
@@ -90,7 +92,7 @@ def _dist_noipp(m, mask):
     """cv2.distanceTransform(m, DIST_L2, mask)，關掉 IPP。pip 版 cv2 內建 IPP：5×5 chamfer 的 IPP 版是浮點累加、權重不同；
     精確歐氏（DIST_MASK_PRECISE）的 IPP 版只在單執行緒（cv2.setNumThreads(1)）時走，是浮點近似（47 頁量到差 6e-5，相等比較會翻）。
     關掉 IPP 後 chamfer＝OpenCV 自己的定點版（＝Kotlin Cv.distanceChamfer 逐位元）、精確歐氏＝整數平方距離開根號（＝Kotlin
-    Cv.distanceL2），與執行緒數無關。"""
+    Cv.distanceSq 的平方根），與執行緒數無關。"""
     prev = cv2.ipp.useIPP()
     cv2.ipp.setUseIPP(False)
     try:
@@ -136,9 +138,14 @@ def _gauss_kernel(sigma):
 
 
 def _refl(i, n):
-    """BORDER_REFLECT_101（|i| < n 的範圍內）。"""
-    i = np.abs(i)
-    return np.where(i >= n, 2 * (n - 1) - i, i)
+    """BORDER_REFLECT_101（同 cv2 borderInterpolate：反覆反射，週期 2(n−1)；n＝1 一律 0）。高斯核半徑 8，寬或高不到 9 px 的頁
+    會反射不只一次（Kotlin `Ring.refl` 同一套寫法；舊寫法只管 |i| < n，小頁在這裡靠 numpy 負索引繞回、Kotlin 直接越界）。"""
+    i = np.asarray(i)
+    if n == 1:
+        return np.zeros_like(i)
+    per = 2 * (n - 1)
+    a = np.abs(i) % per
+    return np.where(a >= n, per - a, a)
 
 
 def outward_normals(raw, ys, xs, sigma):

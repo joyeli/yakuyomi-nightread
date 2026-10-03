@@ -219,8 +219,9 @@ internal object Ring {
     }
 
     /**
-     * 方窗和（k 奇數、錨點置中、邊界複製＝`cv2.boxFilter(normalize=False, BORDER_REPLICATE)`，與 [Cv.boxSum] 逐值相同），逐列串流：
-     * [fill] 把第 y 列的值填進 row，[emit] 收第 y 列的窗和。只配 O(w) 的暫存（整頁兩張 IntArray 改成三條列）。
+     * 方窗和（k 奇數、錨點置中、邊界複製＝`cv2.boxFilter(normalize=False, BORDER_REPLICATE)`；整數加總，與 cv2 的 float32
+     * 結果逐值相同：窗和遠小於 2²⁴），逐列串流：[fill] 把第 y 列的值填進 row，[emit] 收第 y 列的窗和。只配 O(w) 的暫存
+     * （整頁兩張 IntArray 改成三條列）。
      */
     private inline fun boxRows(w: Int, h: Int, k: Int, fill: (Int, IntArray) -> Unit, emit: (Int, IntArray) -> Unit) {
         val r = k / 2
@@ -392,12 +393,6 @@ internal object Ring {
         return t
     }
 
-    /** BORDER_REFLECT_101（|i| < n 的範圍內）。 */
-    private fun refl(i: Int, n: Int): Int {
-        val a = if (i < 0) -i else i
-        return if (a >= n) 2 * (n - 1) - a else a
-    }
-
     /** 高斯模糊後的 raw 在 (x, y)（研究端 `outward_normals` 的 B：先橫後縱、各從 0.0 依序加）。 */
     private fun blurAt(raw: Mask, x: Int, y: Int, k: DoubleArray): Double {
         val w = raw.w
@@ -405,9 +400,9 @@ internal object Ring {
         val r = k.size / 2
         var b = 0.0
         for (i in k.indices) {
-            val row = refl(y + i - r, h) * w
+            val row = Cv.reflect101(y + i - r, h) * w
             var hs = 0.0
-            for (j in k.indices) hs += k[j] * (if (raw.data[row + refl(x + j - r, w)]) 1.0 else 0.0)
+            for (j in k.indices) hs += k[j] * (if (raw.data[row + Cv.reflect101(x + j - r, w)]) 1.0 else 0.0)
             b += k[i] * hs
         }
         return b
@@ -416,13 +411,14 @@ internal object Ring {
     /**
      * 外法向（單位向量）＝ −Sobel(高斯(raw))，逐點（研究端 `outward_normals`，加總順序一字不差）：
      * gx = (hx(y−1) + 2·hx(y)) + hx(y+1)，hx(y') = B(y', x+1) − B(y', x−1)；gy = s(y+1) − s(y−1)，s(y') = (B(y', x−1) + 2·B(y', x)) + B(y', x+1)；
-     * 鄰點反射 101；n = (−gx, −gy) / (√(gx²+gy²) + 1e-9)。回傳 [nx, ny]。
+     * 鄰點與高斯窗都反射 101（[Cv.reflect101]：反覆反射，寬或高不到 9 px 的頁也不越界）；n = (−gx, −gy) / (√(gx²+gy²) + 1e-9)。
+     * 回傳 [nx, ny]。
      */
     fun normal(raw: Mask, x: Int, y: Int, k: DoubleArray): DoubleArray {
         val w = raw.w
         val h = raw.h
-        val ys = intArrayOf(refl(y - 1, h), y, refl(y + 1, h))
-        val xs = intArrayOf(refl(x - 1, w), x, refl(x + 1, w))
+        val ys = intArrayOf(Cv.reflect101(y - 1, h), y, Cv.reflect101(y + 1, h))
+        val xs = intArrayOf(Cv.reflect101(x - 1, w), x, Cv.reflect101(x + 1, w))
         val v = DoubleArray(9)
         for (a in 0 until 3) for (c in 0 until 3) {
             if (a == 1 && c == 1) continue                     // 中心點兩個 Sobel 都用不到
