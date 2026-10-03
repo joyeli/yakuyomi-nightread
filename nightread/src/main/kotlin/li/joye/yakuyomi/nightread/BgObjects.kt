@@ -17,6 +17,13 @@ import kotlin.math.sqrt
  * - **L（[lightFill]）**：亮背景區（σ5 亮度 ≥ 門檻，白與淺色調一樣）整區判有沒有物件；過門的從核心（離證據夠遠）塗起，長到
  *   線邊為止；拿掉夾在物件之間的白塊、灰海裡的孤島、貼著人物的小塊。塗法同貼紙（BG、描亮邊、字畫亮）。
  *
+ * 效果線與閃光（2026-10-03 使用者裁定 2；[ObjectRuleParams.fxLines]／[ObjectRuleParams.fxSparks]）：
+ * - **A 效果線**（整頁的效果線族＝[EffectLines.field]）：否決的例外（超區證據扣掉效果墨後 ≤ 門檻、碰到夠多成員線 ⇒ 不否決）；
+ *   整區門沒過、但區內的墨絕大多數是效果墨、扣掉效果墨後調子邊與殘差照樣過的區＝效果線區，同一片場（地盤被格框線與已塗黑切開）
+ *   裡有一區沒過就整片不塗；效果線區另走一條塗法（[fxPaint]：紙白 → BG、墨 → 最亮 [EffectLineParams.lineV]）。
+ * - **C 閃光**：亮記號裡四周沒有暗墨、大小合適的＝閃光：不算證據、不算調子邊、「孤立亮記號多就整區留灰」關掉；塗黑區裡的閃光
+ *   畫成淺灰。尺畫的直線不給長線帶。
+ *
  * **確定性寫法**：高斯＝整數核（[Cv.gaussW]）兩趟卷積到 Q16；blackhat／tophat、線核平均、亮度門檻都在 Q16 整數上比；Canny 吃
  * Q16 整數部分；調子邊緣＝Q16 的 3×3 Sobel 平方和比門檻平方；距離＝5×5 chamfer（非 IPP）；‰／平均／中位都用整數比；
  * 二次曲面殘差＝正規方程（numpy 的分段成對加總，[npSumChunked]）＋固定順序高斯消去；字的亮度＝256 格查表。與原型（浮點）的差
@@ -48,6 +55,10 @@ internal object BgObjects {
         val light: LongArray,
         /** 長線帶。 */
         val longz: LongArray,
+        /** 閃光（C；沒開或沒有＝null）。 */
+        val spark: LongArray?,
+        /** 效果線場（A；沒開或沒有收下的族＝null）。 */
+        val fx: EffectLines.Field?,
     )
 
     private fun has(b: LongArray, i: Int): Boolean = (b[i ushr 6] ushr (i and 63)) and 1L != 0L
@@ -136,9 +147,23 @@ internal object BgObjects {
         val qv = Q.toLong()
         val ell11 = Cv.ellipse(11)
         val keepDiag = diag != null && diag["obj"] == true
+        val sH = min(2.0, max(0.5, h / 1920.0))
+        // 交代過（只看遮罩，先算：效果線場要在 blackhat 還活著時算）；存 1 bit/px、用的時候攤開
+        val xB: LongArray
+        val x3B: LongArray
+        run {
+            val x = charMask or charRaw
+            x.orInPlace(dil(bubble, 6)).orInPlace(dil(seg, 3)).orInPlace(dil(frame, 2))
+            xB = Ring.packBits(x)
+            val x3 = dil(x, 3)
+            for (yy in 0 until h) for (xx in 0 until w) {
+                if (yy < 6 || yy >= h - 6 || xx < 6 || xx >= w - 6) x3.data[yy * w + xx] = true
+            }
+            x3B = Ring.packBits(x3)
+        }
         // 記憶體：整頁的 Q16 影像一次最多三張活著，算完的遮罩立刻壓成 1 bit/px（研究端的計算順序無關結果）
         // σ2：Canny（否決證據）→ blackhat（細暗線）
-        val bh: Gray
+        var bh: Gray?
         val can: Mask
         run {
             val gb2 = Cv.gaussQ16(g, 2.0)
@@ -147,9 +172,13 @@ internal object BgObjects {
             for (i in 0 until n) cl.data[i] -= gb2.data[i]
             bh = cl
         }
-        val bhOn = Mask(w, h, BooleanArray(n) { bh.data[it] > p.bhTh * Q })
-        val ink = noDots(lineMeanGt(bh, off17, p.lineR * qv, 1L, bhOn), p.dot)
+        val bhOn = Mask(w, h, BooleanArray(n) { bh!!.data[it] > p.bhTh * Q })
+        val ink = noDots(lineMeanGt(bh!!, off17, p.lineR * qv, 1L, bhOn), p.dot)
         val inkB = Ring.packBits(ink)
+        // 效果線場（A）：細暗線＋blackhat（結構張量）；算完 blackhat 就不要了
+        val fxInfo = if (keepDiag) ArrayList<String>() else null
+        val fx = if (p.fxLines) EffectLines.field(g, ink, unpack(x3B, w, h), bh!!, sH, p.fx, fxInfo) else null
+        bh = null
         // 否決證據的細暗線（不經線核）
         val ev2Raw = noDots(bhOn, p.dot).orInPlace(can)
         // 亮記號：σ1.5 tophat ＞ brightTh 且線核平均 > 7.2
@@ -160,7 +189,13 @@ internal object BgObjects {
             val cand = Mask(w, h, BooleanArray(n) { op.data[it] > p.brightTh * Q })
             noDots(lineMeanGt(op, off11, p.brightLrNum * qv, p.brightLrDen.toLong(), cand), p.dotBright)
         }
+        // 閃光（C）：亮記號裡四周 sparkIso px 沒有暗（< 128）、沒有細暗線，外接框長邊在 sparkMin–sparkMax（×sH）的連通塊
+        val spark = if (p.fxSparks) sparks(g, bright, ink, sH, p.fx) else null
         val toneE = Cv.canny(Cv.gaussQ16(g, 4.0).data, w, h, 16, p.canny4Lo, p.canny4Hi)
+        if (spark != null) {
+            val sd = dil(spark, p.fx.sparkDil)
+            for (i in 0 until n) if (sd.data[i]) toneE.data[i] = false
+        }
         val light = run {
             val gb5 = Cv.gaussQ16(g, 5.0).data
             val t = p.lightTh * Q
@@ -169,7 +204,6 @@ internal object BgObjects {
         // 調子邊緣：中值 7 → σ3（Q16）→ 3×3 Sobel（REFLECT_101）平方和 > 門檻²
         val tone = run {
             val gm = Cv.gaussQ16(Cv.medianBlur8(g, 7), 3.0).data
-            val sH = min(2.0, max(0.5, h / 1920.0))
             val tg = p.toneGrad / sH * 8.0 * Q
             val tg2 = tg * tg
             val out = Mask(w, h)
@@ -187,14 +221,10 @@ internal object BgObjects {
             }
             out
         }
-        // 交代過
-        val x = charMask or charRaw
-        x.orInPlace(dil(bubble, 6)).orInPlace(dil(seg, 3)).orInPlace(dil(frame, 2))
-        val x3 = dil(x, 3)
-        for (yy in 0 until h) for (xx in 0 until w) {
-            if (yy < 6 || yy >= h - 6 || xx < 6 || xx >= w - 6) x3.data[yy * w + xx] = true
-        }
-        val e = minArea(Mask(w, h, BooleanArray(n) { (ink.data[it] || toneE.data[it] || bright.data[it]) && !x3.data[it] }), p.evMinArea)
+        val x3 = unpack(x3B, w, h)
+        val e = minArea(Mask(w, h, BooleanArray(n) {
+            (ink.data[it] || toneE.data[it] || (bright.data[it] && (spark == null || !spark.data[it]))) && !x3.data[it]
+        }), p.evMinArea)
         for (i in 0 until n) if (x3.data[i]) ev2Raw.data[i] = false
         val ev2 = minArea(ev2Raw, p.evMinArea)
         // 長線帶
@@ -202,17 +232,98 @@ internal object BgObjects {
             for (i in 0 until n) if (x3.data[i]) ink.data[i] = false     // ink 已存成位元，這裡就地改成 ink ∧ ¬X3
             val cc = Cv.ccStats(ink, 8)
             val keep = BooleanArray(cc.n) { it > 0 && max(cc.width[it], cc.height[it]) >= p.longLen }
+            if (p.fxSparks) straightLines(cc, w, keep, p.fx.longStraight)
             dil(Mask(w, h, BooleanArray(n) { keep[cc.labels[it]] }), p.longR)
         }
         if (keepDiag) {
             diag!!["obj_ink"] = unpack(inkB, w, h); diag["obj_bright"] = bright; diag["obj_can"] = can; diag["obj_can4"] = toneE
             diag["obj_tone"] = tone; diag["obj_light"] = unpack(light, w, h); diag["obj_E"] = e; diag["obj_Ev2"] = ev2
-            diag["obj_longz"] = longz; diag["obj_X3"] = x3
+            diag["obj_longz"] = longz; diag["obj_X3"] = x3; diag["obj_spark"] = spark ?: Mask(w, h)
+            diag["obj_fx_info"] = fxInfo!!
+            if (fx != null) {
+                diag["obj_fxe"] = unpack(fx.fxe, w, h); diag["obj_fxe_t"] = unpack(fx.fxeT, w, h)
+                diag["obj_terr"] = unpack(fx.terr, w, h)
+                diag["obj_memline"] = Mask(w, h).also { m -> for (i in fx.memIdx) m.data[i] = true }
+            }
         }
         return Context(
-            w, h, Ring.packBits(x), Ring.packBits(x3), Ring.packBits(e), Ring.packBits(ev2), inkB,
+            w, h, xB, x3B, Ring.packBits(e), Ring.packBits(ev2), inkB,
             Ring.packBits(bright), Ring.packBits(tone), Ring.packBits(toneE), light, Ring.packBits(longz),
+            spark?.let { Ring.packBits(it) }, fx,
         )
+    }
+
+    /**
+     * 閃光＝研究端 context 的 `spark`：[bright] 的 8 連通塊（逐塊 BFS）裡，沒有一點落在「(灰階 < 128 ∨ 細暗線) 橢圓外擴
+     * [EffectLineParams.sparkIso]」、外接框長邊在 [EffectLineParams.sparkMin]·sH 到 [EffectLineParams.sparkMax]·sH 的。沒有＝null。
+     */
+    private fun sparks(g: Gray, bright: Mask, ink: Mask, sH: Double, p: EffectLineParams): Mask? {
+        val w = g.w
+        val h = g.h
+        val near = dil(Mask(w, h, BooleanArray(w * h) { g.data[it] < 128 || ink.data[it] }), p.sparkIso)
+        val out = Mask(w, h)
+        val seen = BooleanArray(w * h)
+        var q = IntArray(64)
+        var any = false
+        for (s0 in 0 until w * h) {
+            if (!bright.data[s0] || seen[s0]) continue
+            var qe = 0
+            q[qe++] = s0
+            seen[s0] = true
+            var qs = 0
+            var bad = false
+            var x0 = s0 % w; var x1 = x0; var y0 = s0 / w; var y1 = y0
+            while (qs < qe) {
+                val i = q[qs++]
+                if (near.data[i]) bad = true
+                val x = i % w
+                val y = i / w
+                if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y
+                for (yy in max(0, y - 1)..min(h - 1, y + 1)) for (xx in max(0, x - 1)..min(w - 1, x + 1)) {
+                    val j = yy * w + xx
+                    if (bright.data[j] && !seen[j]) {
+                        seen[j] = true
+                        if (qe == q.size) q = q.copyOf(q.size * 2)
+                        q[qe++] = j
+                    }
+                }
+            }
+            val ext = max(x1 - x0 + 1, y1 - y0 + 1)
+            if (!bad && ext >= p.sparkMin * sH && ext <= p.sparkMax * sH) {
+                for (k in 0 until qe) out.data[q[k]] = true
+                any = true
+            }
+        }
+        return if (any) out else null
+    }
+
+    /**
+     * 尺畫的直線不給長線帶＝研究端 `_straight`：[keep] 裡的連通塊，像素座標（減外接框左上）的整數動差 → 共變異（double）→
+     * 次特徵值 λ₂；√max(λ₂, 0) ≤ [lim] 的從 [keep] 拿掉。
+     */
+    private fun straightLines(cc: CC, pw: Int, keep: BooleanArray, lim: Double) {
+        if (keep.none { it }) return
+        val n = cc.n
+        val sx = LongArray(n); val sy = LongArray(n); val sxx = LongArray(n); val syy = LongArray(n); val sxy = LongArray(n)
+        for (i in cc.labels.indices) {
+            val l = cc.labels[i]
+            if (l == 0 || !keep[l]) continue
+            val lx = (i % pw - cc.left[l]).toLong()
+            val ly = (i / pw - cc.top[l]).toLong()
+            sx[l] += lx; sy[l] += ly; sxx[l] += lx * lx; syy[l] += ly * ly; sxy[l] += lx * ly
+        }
+        for (l in 1 until n) {
+            if (!keep[l]) continue
+            val c = cc.area[l].toDouble()
+            val mx = sx[l].toDouble() / c
+            val my = sy[l].toDouble() / c
+            val cxx = sxx[l].toDouble() / c - mx * mx
+            val cyy = syy[l].toDouble() / c - my * my
+            val cxy = sxy[l].toDouble() / c - mx * my
+            val tr = cxx + cyy
+            val l2 = tr / 2.0 - sqrt(max(tr * tr / 4.0 - (cxx * cyy - cxy * cxy), 0.0))
+            if (sqrt(max(l2, 0.0)) <= lim) keep[l] = false
+        }
     }
 
     // ── 整數／確定性的小工具 ─────────────────────────────────────────────
@@ -350,6 +461,15 @@ internal object BgObjects {
         floor(bg + a3 * (ink - bg)).toFloat()
     }
 
+    /**
+     * 效果線區（inv＝true：BG ＋ ((255−g)/255)^1.4 ×(top − BG)）與閃光（inv＝false：BG ＋ (g/255)^1.4 ×(top − BG)）的查表＝研究端
+     * `ink_lut`，向下取整。
+     */
+    internal fun inkLut(bg: Int, top: Int, inv: Boolean): FloatArray = FloatArray(256) {
+        val a = if (inv) ((255.0 - it) / 255.0).pow(1.4) else (it / 255.0).pow(1.4)
+        floor(bg + a * (top - bg)).toFloat()
+    }
+
     /** 「已經黑」＝研究端 `blackish`：已經塗成 bg 的像素 ∪ 原圖灰階 ≤ [ObjectRuleParams.darkG]。 */
     fun blackish(out: FImg, g: Gray, p: ObjectRuleParams, np: NightReadParams): Mask {
         val bgf = np.bg.toFloat()
@@ -460,7 +580,23 @@ internal object BgObjects {
                     if (cx in 0 until mw && cy in 0 until mh && mf.data[cy * mw + cx]) { v = false; break }
                 }
             }
-            info?.add("[$mx0,$my0,$mw,$mh] area=$np sarea=$sa ev=$e veto=$v")
+            var e2 = -1
+            var nmem = -1
+            val fx = ctx.fx
+            if (v && fx != null) {
+                // 效果線不算物件（A）：超區證據扣掉效果墨（外擴 excl）後 ≤ 門檻、且碰到 ≥ nMem 條成員線 ⇒ 不否決
+                e2 = 0
+                val labs = HashSet<Int>()
+                for (yy in y0 until y1) for (xx in x0 until x1) {
+                    if (!sdl.data[(yy - y0) * sw + xx - x0]) continue
+                    val i = yy * w + xx
+                    if (has(ctx.ev2, i) && !sdd.data[i] && !has(fx.fxeD, i)) e2++
+                    if (has(fx.memline, i)) labs.add(fx.memLabel(i))
+                }
+                nmem = labs.size
+                if (1000.0 * e2 <= p.vetoEpm * max(1, sa) && nmem >= p.fx.nMem) v = false
+            }
+            info?.add("[$mx0,$my0,$mw,$mh] area=$np sarea=$sa ev=$e evfx=$e2 nmem=$nmem veto=$v")
             if (v) for (k in 0 until np) out.data[px[k]] = true
         }
         if (diag != null) diag["obj_veto"] = info!!
@@ -507,7 +643,7 @@ internal object BgObjects {
     }
 
     /** 整數高斯（[Cv.gaussQ16]）在單一像素 (x, y) 的值（同一套整數運算：先橫後直、REFLECT_101、Q16 四捨五入）。 */
-    private fun gaussAt(g: Gray, k: IntArray, x: Int, y: Int): Int {
+    internal fun gaussAt(g: Gray, k: IntArray, x: Int, y: Int): Int {
         val w = g.w
         val h = g.h
         val c = k.size / 2
@@ -544,7 +680,19 @@ internal object BgObjects {
             val l0 = Mask(w, h, BooleanArray(n) { has(ctx.light, it) && !has(ctx.x, it) && !dark.data[it] })
             l0B = Ring.packBits(l0)
         }
-        val passed = regionsPassed(g, ctx, Cv.openPacked(unpack(l0B, w, h), Cv.ellipse(5)), chroma, p, diag)
+        val fx = ctx.fx
+        // 效果線場的標號：地盤被格框線與已經黑（格溝）切開的連通塊（一致性以「格內的一片場」為單位）
+        val tcomp = if (fx == null) null else fieldLabels(fx, unpack(darkB, w, h), frame, w, h)
+        val rp = regionsPassed(g, ctx, Cv.openPacked(unpack(l0B, w, h), Cv.ellipse(5)), chroma, p, tcomp, diag)
+        val passed = rp.passed
+        // 效果線區（A）：在核心塗法之前另走一條；之後「已經黑」加上它塗到 ≤ 40 的像素（原型重算成品 ≤ 40；查表後確定）
+        val fxpf = rp.fxpf
+        val fxp = if (fx != null && fxpf != null && fxpf.any()) fxPaint(out, g, ctx, fx, fxpf, unpack(darkB, w, h), p, np) else null
+        if (diag != null) diag["obj_fxpaint"] = fxp ?: Mask(w, h)
+        if (fxp != null) {
+            val lut = inkLut(np.bg, p.fx.lineV, true)
+            for (i in 0 until n) if (fxp.data[i] && lut[g.data[i]] <= 40f) Ring.set(darkB, i)
+        }
         if (!passed.any()) return
         val passedB = Ring.packBits(passed)
         val b: Mask
@@ -599,6 +747,12 @@ internal object BgObjects {
         }
         val sv = np.strokeObjV.toFloat()
         for (i in 0 until n) if (band.data[i]) out.data[i] = sv
+        // 閃光（C）：塗黑區裡的閃光（外擴 1）畫成淺灰（亮度依原圖）
+        if (ctx.spark != null) {
+            val sp = dil(unpack(ctx.spark, w, h), 1)
+            val lut = inkLut(np.bg, p.fx.sparkV, false)
+            for (i in 0 until n) if (sp.data[i] && fill.data[i]) out.data[i] = max(out.data[i], lut[g.data[i]])
+        }
         // 字（DBNet 筆畫）四周大多被塗黑的：筆畫畫亮、字縫填黑（同泡裡的字）
         val sd = dil(seg, 3)
         for (i in 0 until n) sd.data[i] = sd.data[i] && !bubble.data[i] && !charMask.data[i]
@@ -638,6 +792,119 @@ internal object BgObjects {
         if (diag != null) { diag["obj_band"] = band; diag["obj_txt"] = txt ?: Mask(w, h) }
     }
 
+    /** 效果線場的 8 連通標號（研究端 light_fill 的 `tcomp`）：地盤 ∧ ¬[dark] ∧ ¬格框線⊕2，只在地盤外接框裡（標號掃描首見序）。 */
+    private fun fieldLabels(fx: EffectLines.Field, dark: Mask, frame: Mask, w: Int, h: Int): FieldLabels {
+        val x0 = fx.terrX0; val y0 = fx.terrY0
+        val bw = fx.terrX1 - x0; val bh = fx.terrY1 - y0
+        val fr = dil(frame, 2)
+        val m = BooleanArray(bw * bh)
+        for (yy in 0 until bh) for (xx in 0 until bw) {
+            val i = (yy + y0) * w + xx + x0
+            m[yy * bw + xx] = has(fx.terr, i) && !dark.data[i] && !fr.data[i]
+        }
+        val lab = IntArray(bw * bh)
+        var nl = 0
+        var q = IntArray(1024)
+        for (s0 in 0 until bw * bh) {
+            if (!m[s0] || lab[s0] != 0) continue
+            nl++
+            var qe = 0
+            q[qe++] = s0
+            lab[s0] = nl
+            var qs = 0
+            while (qs < qe) {
+                val j = q[qs++]
+                val x = j % bw
+                val y = j / bw
+                for (yy in max(0, y - 1)..min(bh - 1, y + 1)) for (xx in max(0, x - 1)..min(bw - 1, x + 1)) {
+                    val k = yy * bw + xx
+                    if (m[k] && lab[k] == 0) {
+                        lab[k] = nl
+                        if (qe == q.size) q = q.copyOf(q.size * 2)
+                        q[qe++] = k
+                    }
+                }
+            }
+        }
+        return FieldLabels(x0, y0, bw, bh, lab)
+    }
+
+    /**
+     * 效果線區的塗法＝研究端 `_fx_paint`：區（補洞，[fxpf]）沿「效果墨外擴 exclT 或亮區」往外長最多 grow px，扣掉交代過、已經黑、
+     * 殘量證據（非效果的細線與調子邊，連通塊 ≥ erMin px）橢圓外擴 halo；拿掉 < minPart px 的塊；剩下的依原圖墨度反著畫
+     * （[inkLut]：紙白 → BG、墨 → 最亮 lineV）。就地改 [out]；回傳塗的範圍（沒有＝null）。
+     * 只在 [fxpf] 外接框外擴 grow＋1 的窗裡做（長不出這個窗）；殘量證據的連通塊面積照整頁算（從窗外擴 halo 的像素起 BFS）。
+     */
+    private fun fxPaint(
+        out: FImg, g: Gray, ctx: Context, fx: EffectLines.Field, fxpf: Mask, dark: Mask, p: ObjectRuleParams, np: NightReadParams,
+    ): Mask? {
+        val w = g.w
+        val h = g.h
+        val q = p.fx
+        var fx0 = w; var fy0 = h; var fx1 = -1; var fy1 = -1
+        for (y in 0 until h) for (x in 0 until w) if (fxpf.data[y * w + x]) {
+            if (x < fx0) fx0 = x; if (x > fx1) fx1 = x; if (y < fy0) fy0 = y; if (y > fy1) fy1 = y
+        }
+        val pad = q.grow + 1
+        val wx0 = max(0, fx0 - pad); val wy0 = max(0, fy0 - pad); val wx1 = min(w, fx1 + 1 + pad); val wy1 = min(h, fy1 + 1 + pad)
+        // 殘量證據：窗外擴 halo 的範圍裡、所在連通塊（整頁 8 連通）面積 ≥ erMin 的
+        val ex0 = max(0, wx0 - q.halo); val ey0 = max(0, wy0 - q.halo); val ex1 = min(w, wx1 + q.halo); val ey1 = min(h, wy1 + q.halo)
+        val ew = ex1 - ex0; val eh = ey1 - ey0
+        fun er(i: Int) = (has(ctx.e, i) || has(ctx.toneE, i)) && !has(fx.fxeT, i) && !has(ctx.x3, i)
+        val erW = Mask(ew, eh)
+        val seen = LongArray((w * h + 63) ushr 6)
+        var qq = IntArray(256)
+        for (yy in ey0 until ey1) for (xx in ex0 until ex1) {
+            val s0 = yy * w + xx
+            if (Ring.has(seen, s0) || !er(s0)) continue
+            var qe = 0
+            qq[qe++] = s0
+            Ring.set(seen, s0)
+            var qs = 0
+            while (qs < qe) {
+                val i = qq[qs++]
+                val x = i % w
+                val y = i / w
+                for (y2 in max(0, y - 1)..min(h - 1, y + 1)) for (x2 in max(0, x - 1)..min(w - 1, x + 1)) {
+                    val j = y2 * w + x2
+                    if (!Ring.has(seen, j) && er(j)) {
+                        Ring.set(seen, j)
+                        if (qe == qq.size) qq = qq.copyOf(qq.size * 2)
+                        qq[qe++] = j
+                    }
+                }
+            }
+            if (qe < q.erMin) continue
+            for (k in 0 until qe) {
+                val x = qq[k] % w
+                val y = qq[k] / w
+                if (x in ex0 until ex1 && y in ey0 until ey1) erW.data[(y - ey0) * ew + x - ex0] = true
+            }
+        }
+        val halo = dil(erW, q.halo)
+        val sw = wx1 - wx0; val sh = wy1 - wy0
+        val allow = Mask(sw, sh)
+        val seed = Mask(sw, sh)
+        for (yy in 0 until sh) for (xx in 0 until sw) {
+            val i = (yy + wy0) * w + xx + wx0
+            val a = !has(ctx.x, i) && !dark.data[i] && !halo.data[(yy + wy0 - ey0) * ew + xx + wx0 - ex0] &&
+                (has(fx.fxeT, i) || has(ctx.light, i))
+            allow.data[yy * sw + xx] = a
+            seed.data[yy * sw + xx] = a && fxpf.data[i]
+        }
+        val pw = minArea(growCropped(seed, allow, q.grow), q.minPart)
+        if (!pw.any()) return null
+        val lut = inkLut(np.bg, q.lineV, true)
+        val pm = Mask(w, h)
+        for (yy in 0 until sh) for (xx in 0 until sw) {
+            if (!pw.data[yy * sw + xx]) continue
+            val i = (yy + wy0) * w + xx + wx0
+            pm.data[i] = true
+            out.data[i] = lut[g.data[i]]
+        }
+        return pm
+    }
+
     /**
      * 研究端 `_grow`（＝[Cv.geodesicGrow] step 4）裁到 [within] 的外接框做（迭代版）：長不出 within，框外的像素既不是種子也不會被
      * 留下，結果與整頁逐位元相同，暫存只有框大小。
@@ -665,11 +932,22 @@ internal object BgObjects {
         return out
     }
 
+    /** 效果線場的標號（[lightFill] 算：地盤 ∧ ¬已經黑 ∧ ¬格框線⊕2 的 8 連通塊；只在地盤外接框裡存）。 */
+    private class FieldLabels(val x0: Int, val y0: Int, val bw: Int, val bh: Int, val lab: IntArray) {
+        fun at(x: Int, y: Int): Int = if (x < x0 || y < y0 || x >= x0 + bw || y >= y0 + bh) 0 else lab[(y - y0) * bw + x - x0]
+    }
+
+    /** [regionsPassed] 的結果：過門的區、效果線區（補洞後，過了場一致性；沒有＝null）。 */
+    private class Passed(val passed: Mask, val fxpf: Mask?)
+
     /**
-     * 研究端 `region_rows`：L 的每個連通塊（≥ 整頁 [ObjectRuleParams.areaMin]）量特徵、判過門；回傳過門的區。整頁標號只用來挑區與
-     * 記種子，σ2.5 亮度在丟掉標號之後才算；每區的像素從種子沿 L（8 連通）在外接框裡灌回來（與標號相同）。
+     * 研究端 `region_rows`：L 的每個連通塊（≥ 整頁 [ObjectRuleParams.areaMin]）量特徵、判過門；回傳過門的區與效果線區。整頁標號
+     * 只用來挑區與記種子，σ2.5 亮度在丟掉標號之後才算；每區的像素從種子沿 L（8 連通）在外接框裡灌回來（與標號相同）。
+     * 整區門沒過、效果線場在（[Context.fx]）的區另判效果線區（研究端 `_fx_region`）；同一片場裡有一區沒過，整片的區都不算。
      */
-    private fun regionsPassed(g: Gray, ctx: Context, l: Mask, chroma: Gray?, p: ObjectRuleParams, diag: MutableMap<String, Any>?): Mask {
+    private fun regionsPassed(
+        g: Gray, ctx: Context, l: Mask, chroma: Gray?, p: ObjectRuleParams, tcomp: FieldLabels?, diag: MutableMap<String, Any>?,
+    ): Passed {
         val w = g.w
         val h = g.h
         val amin = p.areaMin * h * w
@@ -686,6 +964,11 @@ internal object BgObjects {
         val k25 = Cv.gaussW(2.5)
         val e5 = Cv.ellipse(5)
         val e7 = Cv.ellipse(7)
+        val fx = ctx.fx
+        val q = p.fx
+        // 效果線：場標號 → 這片場裡的區都過了（false＝有一區沒過）；過了的效果線區（窗、補洞後的遮罩、場標號）
+        val fieldOk = HashMap<Int, Boolean>()
+        val fxRegs = ArrayList<Triple<IntArray, Mask, Set<Int>>>()
         for (rg in regs) {
             val x = rg[1]; val y = rg[2]; val bw = rg[3]; val bh = rg[4]
             val x0 = max(0, x - 8); val y0 = max(0, y - 8)
@@ -693,7 +976,8 @@ internal object BgObjects {
             val sw = x1 - x0; val sh = y1 - y0
             val m = floodWindow(l, rg[0], x0, y0, x1, y1)
             val x3 = subBits(ctx.x3, w, x0, y0, x1, y1)
-            val mm = fillHoles(m).andNot(x3)
+            val mf = fillHoles(m)
+            val mm = mf.andNot(x3)
             val me = Cv.erodePacked(mm, e5)
             val ae = max(1, me.count())
             var mi = Cv.erodePacked(m, e7)
@@ -712,7 +996,8 @@ internal object BgObjects {
                 val j = yy * sw + xx
                 val i = (yy + y0) * w + xx + x0
                 if (me.data[j]) {
-                    if (inkW.data[j] || brW.data[j]) nl++
+                    // 閃光（C）不算細線
+                    if (inkW.data[j] || (brW.data[j] && !Ring.has(ctx.spark, i))) nl++
                     if (has(ctx.toneE, i)) nc++
                     if (has(ctx.tone, i)) nt++
                 }
@@ -728,17 +1013,82 @@ internal object BgObjects {
                 val dk = Mask(sw, sh, BooleanArray(sw * sh) { g.data[(it / sw + y0) * w + it % sw + x0] < 128 || inkW.data[it] })
                 isolatedMarks(bm, dk)
             }
-            val okMarks = !(marks >= p.marks && 1e5 * marks >= p.marksDen * area)
+            // 閃光（C）開著：孤立亮記號多不再整區留灰
+            val okMarks = p.fxSparks || !(marks >= p.marks && 1e5 * marks >= p.marksDen * area)
+            val chromaOk = csum <= p.chromaMax * area
             val okRest = 1000.0 * nl <= p.lineMax * ae && 1000.0 * nc <= p.can4Max * ae && fit <= p.fitMax &&
-                1000.0 * nt <= p.toneMax * ae && csum <= p.chromaMax * area && okMarks
-            // 最大內切半徑只影響過不過門：其餘先不過就不算（窗大小的距離表）；除錯紀錄要的時候照算
-            val thick = if (okRest || rows != null) thickness(m) else 0f
+                1000.0 * nt <= p.toneMax * ae && chromaOk && okMarks
+            val fxCand = fx != null && chromaOk && okMarks
+            // 最大內切半徑只影響過不過門（與效果線區）：用不到就不算（窗大小的距離表）；除錯紀錄要的時候照算
+            val thick = if (okRest || fxCand || rows != null) thickness(m) else 0f
             val ok = okRest && thick >= p.thickMin
-            rows?.add("[$x,$y,$bw,$bh] area=${rg[5]} nl=$nl nc=$nc nt=$nt ae=$ae fit=$fit thick=$thick csum=$csum marks=$marks ok=$ok")
-            if (ok) for (yy in 0 until sh) for (xx in 0 until sw) if (m.data[yy * sw + xx]) passed.data[(yy + y0) * w + xx + x0] = true
+            var fxNote = ""
+            if (ok) {
+                for (yy in 0 until sh) for (xx in 0 until sw) if (m.data[yy * sw + xx]) passed.data[(yy + y0) * w + xx + x0] = true
+            } else if (fxCand && thick >= p.thickMin) {
+                // 效果線區（研究端 `_fx_region`）
+                var inkR = 0; var feR = 0
+                val labs = HashSet<Int>()
+                val pairs = HashSet<Long>()
+                for (yy in 0 until sh) for (xx in 0 until sw) {
+                    val j = yy * sw + xx
+                    val i = (yy + y0) * w + xx + x0
+                    if (me.data[j]) {
+                        if (inkW.data[j]) inkR++
+                        if (has(fx!!.fxe, i)) feR++
+                    }
+                    if (mf.data[j] && has(fx!!.memline, i)) {
+                        val lb = fx.memLabel(i)
+                        labs.add(lb)
+                        pairs.add((lb.toLong() shl 32) or tcomp!!.at(xx + x0, yy + y0).toLong())
+                    }
+                }
+                val cnt = HashMap<Int, Int>()
+                for (pr in pairs) { val t = (pr and 0xffffffffL).toInt(); if (t > 0) cnt[t] = (cnt[t] ?: 0) + 1 }
+                val fams = cnt.filterValues { it >= q.nMem }.keys
+                val nmem = labs.size
+                var fxa = false
+                if (feR.toDouble() / max(1, inkR) >= q.agree && 1000.0 * (inkR - feR) <= q.resid * ae && nmem >= q.nMem) {
+                    val fzt = subBits(fx!!.fxeT, w, x0, y0, x1, y1)
+                    val me3 = me.andNot(fzt)
+                    val ae3 = max(1, me3.count())
+                    var nc3 = 0
+                    for (yy in 0 until sh) for (xx in 0 until sw) {
+                        if (me3.data[yy * sw + xx] && has(ctx.toneE, (yy + y0) * w + xx + x0)) nc3++
+                    }
+                    var mi2 = mi.andNot(fzt)
+                    if (mi2.count() < 200) mi2 = mi
+                    val nMi2 = mi2.count()
+                    val step2 = max(1, nMi2 / 20000)
+                    val ns2 = (nMi2 + step2 - 1) / step2
+                    val gq2 = IntArray(ns2); val ys2 = IntArray(ns2); val xs2 = IntArray(ns2)
+                    var k2 = 0
+                    var kk2 = 0
+                    for (yy in 0 until sh) for (xx in 0 until sw) {
+                        if (!mi2.data[yy * sw + xx]) continue
+                        if (kk2 % step2 == 0) { gq2[k2] = gaussAt(g, k25, xx + x0, yy + y0); ys2[k2] = yy; xs2[k2] = xx; k2++ }
+                        kk2++
+                    }
+                    val fit2 = quadfit(gq2, ys2, xs2, nMi2, step2)
+                    fxa = 1000.0 * nc3 <= p.can4Max * ae3 && fit2 <= p.fitMax
+                    fxNote = " fxnc=$nc3 fxae=$ae3 fxfit=$fit2"
+                }
+                for (t in fams) fieldOk[t] = (fieldOk[t] ?: true) && fxa
+                if (fxa) fxRegs.add(Triple(intArrayOf(x0, y0, sw, sh), mf, fams))
+                fxNote = " fxink=$inkR fxfe=$feR fxnmem=$nmem fams=${fams.sorted()} fxa=$fxa$fxNote"
+            }
+            rows?.add("[$x,$y,$bw,$bh] area=${rg[5]} nl=$nl nc=$nc nt=$nt ae=$ae fit=$fit thick=$thick csum=$csum marks=$marks ok=$ok$fxNote")
         }
         if (diag != null) diag["obj_rows"] = rows!!
-        return passed
+        if (fxRegs.isEmpty()) return Passed(passed, null)
+        // 場一致性：同一片效果線場裡只要有一區沒過，整片場的區都不塗
+        val fxpf = Mask(w, h)
+        for ((win, mf, fams) in fxRegs) {
+            if (fams.any { fieldOk[it] == false }) continue
+            val x0 = win[0]; val y0 = win[1]; val sw = win[2]; val sh = win[3]
+            for (yy in 0 until sh) for (xx in 0 until sw) if (mf.data[yy * sw + xx]) fxpf.data[(yy + y0) * w + xx + x0] = true
+        }
+        return Passed(passed, fxpf)
     }
 
     /** [l] 裡含 [seed] 的 8 連通塊，在窗 [x0,x1)×[y0,y1)（含整塊）裡的遮罩。 */

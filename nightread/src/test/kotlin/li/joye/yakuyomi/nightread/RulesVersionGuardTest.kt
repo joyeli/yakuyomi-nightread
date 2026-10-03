@@ -8,7 +8,9 @@ import javax.imageio.ImageIO
 
 /**
  * 規則版本的守門（[NightRead.RULES_VERSION]，docs/DECISIONS.md「規則版本」）：產品兩檔（標準＝[NightTier.L2]、更多＝
- * [NightTier.L3]，產品路徑 [NightRead.renderTiers]、預設亮度）在五頁 fixture 上的成品摘要（SHA-256），每個版本記一個值。
+ * [NightTier.L3]，產品路徑 [NightRead.renderTiers]、預設亮度）在 fixture 頁上的成品摘要（SHA-256），每個版本記一個值。
+ * 頁：版本 1–2 是五頁（ch34_011、demo01、demo02、demo05、demo06）；版本 3 起加 ch34_015（五頁都沒有效果線族，「更多」的效果線
+ * 只動得到這頁）。舊版本的摘要是當時那幾頁的，只當歷史。
  *
  * 這個測試失敗＝產品輸出變了。是刻意的規則改動：把 RULES_VERSION 加 1、DECISIONS 歷史補一列，再把失敗訊息裡的新摘要記成
  * 新版本的值（舊版本的值留著當歷史）。版本交給使用者（含 debug APK）時把它記進 [delivered]，之後它的摘要就不能再改。不是刻意的：就是改壞了。少了這一道，已經交給使用者的 APK 產生的夜讀頁會跟新規則
@@ -29,10 +31,10 @@ class RulesVersionGuardTest {
         1 to "852996dcb2d3dc5b0cf674feee343bfce9e3c115e6d3d2a8db014b5f2294bab0",
         // 2：人物外灰圈收細（折衷版＋開運算後只留與種子相連）。五頁裡 demo05 沒有認領、成品與版本 1 相同
         2 to "78a821623962844b53f7ff4c5f395c5dcc514df659a7ed3ef2293bce6dabbec7",
-        // 3：「更多」背景物件規則（BgObjects；只動更多、標準不變）。五頁裡 demo06 多了亮背景區塗黑（沒有否決）；demo05 的「更多」
-        // 以前與標準同一個合成鍵、不合成（摘要記 "="），現在規則開著就照樣合成（成品與標準相同）。還沒交出：效果線 A／C 若在這版
-        // APK 交出前做完，直接更新這一列（DECISIONS 歷史那一列跟著改）
-        3 to "70ad1ca1c02ab4da1129c8673ce9f65f2e95604d6bf4a1b2b8d91d53ce1ef73a",
+        // 3：「更多」背景物件規則（BgObjects；只動更多、標準不變）＋效果線與閃光（EffectLines；裁定 2 A／C）。五頁裡 demo06 多了
+        // 亮背景區塗黑（沒有否決）；demo05 的「更多」以前與標準同一個合成鍵、不合成（摘要記 "="），現在規則開著就照樣合成（成品與標準
+        // 相同）。效果線與閃光不動那五頁（五頁的摘要仍是 70ad1ca1…），所以這版起加 ch34_015（集中線塗黑）。還沒交出
+        3 to "368d3580002ba4de20e99de4472c664bb997303bf90b9336c842c399088892de",
     )
 
     /**
@@ -44,7 +46,7 @@ class RulesVersionGuardTest {
         2 to "78a821623962844b53f7ff4c5f395c5dcc514df659a7ed3ef2293bce6dabbec7",     // 2026-10-03 debug APK（灰圈收細）
     )
 
-    private val pages = listOf("ch34_011", "demo01", "demo02", "demo05", "demo06")
+    private val pages = listOf("ch34_011", "demo01", "demo02", "demo05", "demo06", "ch34_015")
 
     /** 版本表本身：從 1 連續編到 [NightRead.RULES_VERSION]、各版本摘要互不相同、已交出的版本摘要沒被改。 */
     @Test

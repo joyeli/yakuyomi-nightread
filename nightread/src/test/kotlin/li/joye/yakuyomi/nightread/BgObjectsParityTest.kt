@@ -13,11 +13,13 @@ import javax.imageio.ImageIO
  * 「更多」背景物件規則（[BgObjects]，規則版本 3）與研究端 `research/nightread_obj.py` 逐位元相同。fixture 由
  * `research/make_obj_fixture.py` 產：
  *
- * - **原語**（resources/obj/）：整數高斯核與 Q16 模糊、8 方向線核位置、字筆畫亮度查表、cv2.Canny（關 IPP）、cv2.medianBlur 7、
- *   5×5 chamfer（關 IPP）、二次曲面殘差（正規方程＋固定順序消去，取樣步長 1 與 2）。
+ * - **原語**（resources/obj/）：整數高斯核與 Q16 模糊、8 方向線核位置、字筆畫／效果線區／閃光的亮度查表、cv2.Canny（關 IPP）、
+ *   cv2.medianBlur 7、5×5 chamfer（關 IPP）、二次曲面殘差（正規方程＋固定順序消去，取樣步長 1 與 2）；效果線（[EffectLines]）的
+ *   半角方向、Zhang–Suen 細化與直分支（ch34_015 一塊）。
  * - **整頁 ch34_010**（resources/page/ch34_010_*）：這頁同時有亮背景區塗黑（裁定 3 的 A3 白地板維持黑）與否決（A4 牆板窄條、
- *   A1 牆回灰）。整頁量測只吃分析的遮罩（人物、泡、字、格框線），與研究端逐像素比；否決與亮背景區是**函式層**：餵研究端那一邊
- *   的輸入（多塗的塊與只塗標準時的「已經黑」、亮背景區的「已經黑」）——兩邊的貼紙層本來就有已知差異（核心填色的距離；
+ *   A1 牆回灰）；有閃光、沒有效果線族。**整頁 ch34_015**：有效果線族（裁定 2 A：上排右格頂的集中線塗黑、線留亮），否決（A1 壁燈）
+ *   走效果線的例外判斷。整頁量測只吃分析的遮罩（人物、泡、字、格框線），與研究端逐像素比；否決與亮背景區是**函式層**：餵研究端
+ *   那一邊的輸入（多塗的塊與只塗標準時的「已經黑」、亮背景區的「已經黑」）——兩邊的貼紙層本來就有已知差異（核心填色的距離；
  *   版本 2 起就有），47 頁裡只有 c371_015 一頁因此差 20 px（見 docs/DECISIONS.md「「更多」背景物件規則」）。
  *
  * 47 頁（含真機頁）的整頁 parity 在研究端 scratch harness 跑（同 DECISIONS）。
@@ -88,6 +90,32 @@ class BgObjectsParityTest {
     }
 
     @Test
+    fun effectLutsAndHalfDir() {
+        for ((file, lut) in listOf("obj/fx_lut.txt" to BgObjects.inkLut(16, 170, true), "obj/spark_lut.txt" to BgObjects.inkLut(16, 170, false))) {
+            val want = text(file).trim().split(" ").map(String::toDouble)
+            for (v in 0 until 256) assertEquals("$file g=$v", want[v], lut[v].toDouble(), 0.0)
+        }
+        for (line in text("obj/fx_half_dir.txt").lines().filter { it.isNotBlank() }) {
+            val f = line.trim().split(" ").map(String::toDouble)
+            val u = EffectLines.halfDir(f[0], f[1])
+            assertEquals("half_dir(${f[0]}, ${f[1]}) x", f[2].toRawBits(), u[0].toRawBits())
+            assertEquals("half_dir(${f[0]}, ${f[1]}) y", f[3].toRawBits(), u[1].toRawBits())
+        }
+    }
+
+    /** Zhang–Suen 細化與直分支（研究端 nightread_fx.thin／segments）在 ch34_015 細暗線一塊上逐位元相同。 */
+    @Test
+    fun effectLineThinAndSegments() {
+        val inkx = readMask("obj/fx_thin_in.png")
+        assertMask("Zhang–Suen 細化", readMask("obj/fx_thin.png"), EffectLines.thin(inkx))
+        val want = text("obj/fx_segs.txt").lines().filter { it.isNotBlank() }.map { l -> l.trim().split(" ").map(String::toDouble) }
+        val got = EffectLines.segments(inkx, EffectLineParams())
+        assertEquals("直分支段數", want.size, got.size)
+        for ((k, w) in want.withIndex()) for (c in 0 until 5) assertEquals("第 $k 段欄 $c", w[c].toRawBits(), got[k][c].toRawBits())
+        assertTrue("要有直分支", got.isNotEmpty())
+    }
+
+    @Test
     fun cannyMedianChamferMatchOpenCv() {
         val g = readGray("obj/prim_gray.png")
         for ((lo, hi) in listOf(15 to 40, 10 to 25)) {
@@ -151,39 +179,57 @@ class BgObjectsParityTest {
         )
     }
 
-    /** ch34_010「更多」：整頁量測逐像素、否決與亮背景區函式層逐像素、逐區特徵逐值。 */
+    /** ch34_010「更多」：整頁量測逐像素、否決與亮背景區函式層逐像素、逐區特徵逐值（有閃光、沒有效果線族）。 */
     @Test
     fun pageCh34010() {
-        val page = "ch34_010"
+        val (veto, fill, fx) = checkPage("ch34_010", expectFx = false)
+        assertTrue("ch34_010 要有否決（A4 牆板窄條、A1 牆）", veto.any())
+        assertTrue("ch34_010 要有亮背景區塗黑（A3 白地板）", fill.any())
+        assertTrue("ch34_010 沒有效果線區", !fx.any())
+    }
+
+    /** ch34_015「更多」：效果線族（上排右格頂的集中線）→ 效果墨、地盤、成員線、效果線區塗法逐像素；否決走效果線的例外判斷。 */
+    @Test
+    fun pageCh34015EffectLines() {
+        val (veto, _, fx) = checkPage("ch34_015", expectFx = true)
+        assertTrue("ch34_015 要有否決（A1 壁燈）", veto.any())
+        assertTrue("ch34_015 要有效果線區塗黑", fx.any())
+    }
+
+    /** 回傳（否決、亮背景區塗黑、效果線區）。 */
+    private fun checkPage(page: String, expectFx: Boolean): Triple<Mask, Mask, Mask> {
         val p = NightTier.L3.apply()
         val a = NightRead.analyze(input(page), p, null, null, shared = false)
         val diag = HashMap<String, Any>()
         diag["obj"] = true
         val ctx = BgObjects.context(a.g, a.charMask, a.charRaw, a.bubbleUntrim, a.seg, a.frame, p.obj, diag)
-        for ((key, file) in listOf("obj_ink" to "ink", "obj_bright" to "bright", "obj_can4" to "can4", "obj_tone" to "tone",
-            "obj_light" to "light", "obj_E" to "E", "obj_Ev2" to "Ev2", "obj_longz" to "longz", "obj_X3" to "X3")) {
-            assertMask("$page 量測 $file", readMask("page/${page}_obj_$file.png"), diag[key] as Mask)
-        }
+        val keys = mutableListOf("obj_ink" to "ink", "obj_bright" to "bright", "obj_can4" to "can4", "obj_tone" to "tone",
+            "obj_light" to "light", "obj_E" to "E", "obj_Ev2" to "Ev2", "obj_longz" to "longz", "obj_X3" to "X3", "obj_spark" to "spark")
+        if (expectFx) keys += listOf("obj_fxe" to "fxe", "obj_fxe_t" to "fxe_t", "obj_terr" to "terr", "obj_memline" to "memline")
+        for ((key, file) in keys) assertMask("$page 量測 $file", readMask("page/${page}_obj_$file.png"), diag[key] as Mask)
+        assertEquals("$page 效果線場", expectFx, ctx.fx != null)
         // 否決（函式層）
         val veto = BgObjects.vetoBlocks(a.g, readMask("page/${page}_obj_extra.png"), readMask("page/${page}_obj_stddark.png"),
             ctx, a.charMask, a.charRaw, a.bubbleUntrim, a.frame, a.regions, p.obj, null)
         assertMask("$page 否決", readMask("page/${page}_obj_veto.png"), veto)
-        assertTrue("$page 要有否決（A4 牆板窄條、A1 牆）", veto.any())
         // 亮背景區（函式層：餵研究端的「已經黑」）
         val out = FImg(a.g.w, a.g.h, FloatArray(a.g.data.size) { 128f })
         val d2 = HashMap<String, Any>()
         BgObjects.lightFill(out, a.g, ctx, a.charMask, a.charRaw, a.bubbleUntrim, a.frame, a.seg, a.chroma, p.obj, p, d2,
             darkOverride = readMask("page/${page}_obj_dark.png"))
-        assertMask("$page 亮背景區塗黑", readMask("page/${page}_obj_fill.png"), d2["obj_fill"] as Mask)
-        assertMask("$page 描亮邊", readMask("page/${page}_obj_band.png"), d2["obj_band"] as Mask)
-        assertMask("$page 字", readMask("page/${page}_obj_txt.png"), d2["obj_txt"] as Mask)
-        assertTrue("$page 要有亮背景區塗黑（A3 白地板）", (d2["obj_fill"] as Mask).any())
+        val empty = Mask(a.g.w, a.g.h)
+        val fill = d2["obj_fill"] as Mask? ?: empty
+        assertMask("$page 亮背景區塗黑", readMask("page/${page}_obj_fill.png"), fill)
+        assertMask("$page 描亮邊", readMask("page/${page}_obj_band.png"), d2["obj_band"] as Mask? ?: empty)
+        assertMask("$page 字", readMask("page/${page}_obj_txt.png"), d2["obj_txt"] as Mask? ?: empty)
+        val fxp = d2["obj_fxpaint"] as Mask
+        assertMask("$page 效果線區", readMask("page/${page}_obj_fxpaint.png"), fxp)
         // 逐區特徵（研究端 raw：nl nc nt ae fit thick csum marks ok）
         @Suppress("UNCHECKED_CAST")
         val rows = d2["obj_rows"] as List<String>
         val want = text("page/${page}_obj_rows.txt").lines().filter { it.isNotBlank() }
         assertEquals("$page 區數", want.size, rows.size)
-        val re = Regex("""\[(\d+),(\d+),(\d+),(\d+)] area=(\d+) nl=(\d+) nc=(\d+) nt=(\d+) ae=(\d+) fit=(\S+) thick=(\S+) csum=(\d+) marks=(\d+) ok=(\w+)""")
+        val re = Regex("""\[(\d+),(\d+),(\d+),(\d+)] area=(\d+) nl=(\d+) nc=(\d+) nt=(\d+) ae=(\d+) fit=(\S+) thick=(\S+) csum=(\d+) marks=(\d+) ok=(\w+)(.*)""")
         val got = rows.map { re.matchEntire(it)!!.groupValues.drop(1) }.associateBy { it.take(4).joinToString(" ") }
         for (line in want) {
             val f = line.trim().split(" ")
@@ -192,5 +238,24 @@ class BgObjectsParityTest {
             assertEquals("$page 區 ${f.take(4)} fit 逐位元", f[9].toDouble().toRawBits(), k[9].toDouble().toRawBits())
             assertEquals("$page 區 ${f.take(4)} thick", f[10].toDouble().toFloat(), k[10].toFloat(), 0f)
         }
+        // 效果線區的判定（研究端 _fx_region：ink fe nmem 場數 fxa nc ae fit）
+        val fxRe = Regex(""" fxink=(\d+) fxfe=(\d+) fxnmem=(\d+) fams=\[([^\]]*)] fxa=(\w+)(?: fxnc=(\d+) fxae=(\d+) fxfit=(\S+))?""")
+        val gotFx = got.mapNotNull { (key, g) -> fxRe.matchEntire(g[14])?.let { key to it.groupValues.drop(1) } }.toMap()
+        val wantFx = if (expectFx) text("page/${page}_obj_fxrows.txt").lines().filter { it.isNotBlank() } else emptyList()
+        assertEquals("$page 效果線區判定的區數", wantFx.size, gotFx.size)
+        for (line in wantFx) {
+            val f = line.trim().split(" ")
+            val k = gotFx[f.take(4).joinToString(" ")] ?: error("$page 少了效果線區判定 ${f.take(4)}")
+            assertEquals("$page 區 ${f.take(4)} 效果墨", listOf(f[4], f[5], f[6]), listOf(k[0], k[1], k[2]))
+            assertEquals("$page 區 ${f.take(4)} 場數", f[7].toInt(), if (k[3].isBlank()) 0 else k[3].split(",").size)
+            assertEquals("$page 區 ${f.take(4)} fxa", f[8], k[4])
+            if (f[9] != "-1") {
+                assertEquals("$page 區 ${f.take(4)} 調子邊", listOf(f[9], f[10]), listOf(k[5], k[6]))
+                assertEquals("$page 區 ${f.take(4)} fit 逐位元", f[11].toDouble().toRawBits(), k[7].toDouble().toRawBits())
+            } else {
+                assertEquals("$page 區 ${f.take(4)} 沒過效果墨門就不量調子邊", "", k[5])
+            }
+        }
+        return Triple(veto, fill, fxp)
     }
 }

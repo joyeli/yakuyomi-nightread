@@ -309,6 +309,9 @@ data class NightReadParams(
  * - V（[veto]）：「更多」比只塗標準（L2）多塗黑的塊，白跨細線閉合成超區、超區證據 ‰ > [vetoEpm] ＝夾在物件之間的白 ⇒ 還原；
  * - L（[lightFill]）：亮背景區（白與淺色調）整區判有沒有物件，過門的從核心塗起、長回線邊。
  *
+ * 效果線與閃光（2026-10-03 使用者裁定 2；[fxLines]／[fxSparks]，參數在 [fx]）：A 集中線不算物件、C 閃光不算物件，見 [EffectLines]、
+ * [EffectLineParams]、docs/DECISIONS.md「「更多」效果線與閃光」。
+ *
  * 生效條件＝[enabled] ∧ [MoreRuleParams.enabled]（研究端 `NIGHTREAD_OBJ`（預設 1）只在 `NIGHTREAD_MORE=1` 時有作用）。
  */
 data class ObjectRuleParams(
@@ -318,6 +321,12 @@ data class ObjectRuleParams(
     val veto: Boolean = true,
     /** L 開關（研究端 NIGHTREAD_OBJ_LT；消融用）。 */
     val lightFill: Boolean = true,
+    /** 效果線 A（集中線不算物件；研究端 NIGHTREAD_OBJ_FXA）。[fxLines] 與 [fxSparks] 都關＝效果線之前的規則版本 3（逐像素相同）。 */
+    val fxLines: Boolean = true,
+    /** 閃光 C（孤立亮記號不算物件、尺畫直線不給長線帶；研究端 NIGHTREAD_OBJ_FXC）。 */
+    val fxSparks: Boolean = true,
+    /** 效果線與閃光的參數組（獨立成 data class：建構子參數槽）。 */
+    val fx: EffectLineParams = EffectLineParams(),
     /** V：超區證據 ‰ 上限（原型 15；查核改 25：救回無物件的紙白與字幕框，有物件的 b 類最低 26.7）。 */
     val vetoEpm: Double = 25.0,
     /** V／L 脈絡：白跨細線閉合的橢圓半徑。 */
@@ -395,6 +404,99 @@ data class ObjectRuleParams(
     /** σ4 Canny（調子邊界）。 */
     val canny4Lo: Int = 10,
     val canny4Hi: Int = 25,
+)
+
+/**
+ * 「更多」效果線（A）與閃光（C）的參數（2026-10-03 使用者裁定 2；研究端 `research/nightread_fx.py` 與 `research/nightread_obj.py`
+ * 的 `FX_*`／`FXC_*`／`LONG_STRAIGHT`），預設值＝研究端定案值（原型 FX.md）。規則見 [EffectLines]、docs/DECISIONS.md。
+ * 角度門檻存成 cos 值的字面值（研究端同一個 double；不在執行時算三角函數）。
+ */
+data class EffectLineParams(
+    // ── A1 整頁找效果線族（[EffectLines.field]）──
+    /** 直分支：骨架點到主軸的均方根距離上限（px）。 */
+    val segSd: Double = 1.2,
+    /** 分支至少幾個骨架點。 */
+    val segMin: Int = 8,
+    /** 串接：方向差上限（cos 6°）。 */
+    val cosJoin: Double = 0.9945218953682733,
+    /** 串接：互相垂距上限（px）。 */
+    val perp: Double = 2.5,
+    /** 串接：沿線間隙上限（px）。 */
+    val gap: Double = 20.0,
+    /** 長線（px，×頁面尺度）。 */
+    val lineMin: Double = 30.0,
+    /** 線族：線方向與「中點→匯聚點」夾角上限（cos 3°）。 */
+    val cosVp: Double = 0.9986295347545738,
+    /** 候選交點只用最長的這麼多條線。 */
+    val vpTop: Int = 120,
+    /** 最多找幾族。 */
+    val maxFamilies: Int = 4,
+    /** 效果線族成員下限。 */
+    val minMembers: Int = 8,
+    /** 角展下限（cos 30°）：只收放射狀；平行族（牆板、欄杆）這一輪不收。 */
+    val cosSpread: Double = 0.8660254037844387,
+    /** 漸細比（外 40% ÷ 內 40% 帶內墨量）中位數下限。 */
+    val taper: Double = 1.3,
+    /** 漸細比 > 1.3 的成員佔比下限。 */
+    val taperFrac: Double = 0.45,
+    /** 自由端（線尾消失在紙白裡）至少幾個… */
+    val freeMin: Int = 2,
+    /** …且佔（自由＋擋住）的比例下限。 */
+    val freeFrac: Double = 0.1,
+    /** 自由端：沿線往外看 t＝[ray0]..[ray1] px。 */
+    val ray0: Int = 4,
+    val ray1: Int = 16,
+    /** 自由端：σ1 灰階 < 此＝擋住。 */
+    val rayG: Int = 215,
+    /** 地盤：成員線橢圓外擴（px，×頁面尺度）。 */
+    val terr: Int = 48,
+    /** 效果墨：線方向對匯聚點夾角 ≤ 10°（二倍角 cos 20°）。 */
+    val cosAtol2: Double = 0.9396926207859084,
+    /** 效果墨：結構張量一致度下限。 */
+    val coh: Double = 0.5,
+    /** 一致度分母的 1e−6（灰階²）換到張量單位（×65536）。 */
+    val epsJ: Double = 0.065536,
+    /** 結構張量積分 σ。 */
+    val si: Double = 4.0,
+    /** 離匯聚點這麼近（px）的墨方向不可靠，不算效果墨。 */
+    val vpNear: Int = 24,
+    /** 小記號：墨連通塊外接框長邊 ≤ 此（px，×頁面尺度）。 */
+    val mark: Double = 16.0,
+    /** 成員線外擴這麼多 px 內的墨算效果墨。 */
+    val lineR: Int = 3,
+    // ── A2–A4（[BgObjects]）──
+    /** 效果墨外擴：否決的超區證據扣掉這圈。 */
+    val excl: Int = 4,
+    /** 效果墨外擴：區的調子邊／擬合殘差量測、塗法的殘量證據扣掉這圈。 */
+    val exclT: Int = 14,
+    /** 區內墨裡效果墨的比例下限。 */
+    val agree: Double = 0.85,
+    /** 區內非效果墨 ‰ 上限。 */
+    val resid: Double = 25.0,
+    /** 區（補洞後）裡至少幾條成員線；否決的例外也用。 */
+    val nMem: Int = 4,
+    /** 效果線區的畫法：BG ＋ ((255−g)/255)^1.4 ×(此 − BG)。 */
+    val lineV: Int = 170,
+    /** 效果線區往外長最多幾 px。 */
+    val grow: Int = 120,
+    /** 殘量證據外擴：這圈不塗。 */
+    val halo: Int = 8,
+    /** 殘量證據連通塊至少這麼大才留灰圈。 */
+    val erMin: Int = 30,
+    /** 塗的塊至少這麼大。 */
+    val minPart: Int = 400,
+    // ── C 閃光 ──
+    /** 孤立：亮記號橢圓外擴此 px 碰不到暗（< 128）或細暗線。 */
+    val sparkIso: Int = 4,
+    /** 閃光大小（外接框長邊 px，×頁面尺度）下限與上限。 */
+    val sparkMin: Double = 5.0,
+    val sparkMax: Double = 60.0,
+    /** 閃光外擴此 px：調子邊（σ4 Canny）不算。 */
+    val sparkDil: Int = 3,
+    /** 塗黑區裡的閃光（外擴 1）畫成 max(現值, BG ＋ (g/255)^1.4 ×(此 − BG))。 */
+    val sparkV: Int = 170,
+    /** 長線帶不給「直的長線」（PCA 垂距均方根 ≤ 此 px）。 */
+    val longStraight: Double = 2.0,
 )
 
 /**
