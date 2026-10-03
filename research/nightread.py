@@ -15,8 +15,8 @@
       ├ 氣泡      白元件 ∩ 文字區 → 面積與局部性守門 → 文字種子核心填色
       ├ 格溝      任意角度框線 → 兩線夾白＝分鏡溝、頁緣到框線＝頁邊（nightread_sep.py）
       └ 合成      場景曲線 → 留白填深（出血格過濾，nightread_bleed.py）→ 格溝／頁邊
-                  → 貼紙式背景 → 氣泡 → 偽泡 → 人頭一致化 → 剩餘填色
-                  → 灰圈收細（nightread_ring.py）→ 人物還原（跳過泡與格溝）
+                  → 貼紙式背景 →（只有「更多」）背景物件規則（nightread_obj.py）→ 氣泡 → 偽泡 → 人頭一致化
+                  → 剩餘填色 → 灰圈收細（nightread_ring.py）→ 人物還原（跳過泡與格溝）
     暗色頁
 
 分區的待遇：
@@ -49,7 +49,10 @@ detect-20241225.ckpt）torch 前向 ＋ m-i-t `SegDetectorRepresenter` 後處理
     L2  NIGHTREAD_STICKER_MODE=simple NIGHTREAD_STICKER_ROUGH=10 NIGHTREAD_STICKER_MINFRAC=0.005 NIGHTREAD_PB=0 NIGHTREAD_HM=0
     L3  NIGHTREAD_STICKER_MODE=simple NIGHTREAD_STICKER_ROUGH=20 NIGHTREAD_STICKER_MINFRAC=0     NIGHTREAD_PB=0 NIGHTREAD_HM=0
     更多 L3 的環境變數 ＋ NIGHTREAD_MORE=1（產品「更多」＝L3＋新規則 A2，2026-10-02；不設＝舊 L3，研究對照用；門檻 NIGHTREAD_MORE_*）
-    產品兩檔＝「標準」L2、「更多」L3＋A2（Kotlin NightTier.L3 已含 A2）。
+    產品兩檔＝「標準」L2、「更多」L3＋A2＋背景物件規則（Kotlin NightTier.L3 已含）。
+「更多」背景物件規則（規則版本 3，預設開、只在 NIGHTREAD_MORE=1 時有作用；0＝版本 2 的「更多」，逐像素相同）：
+    NIGHTREAD_OBJ=0    整個關掉（常數在 nightread_obj.py 檔頭；見 docs/DECISIONS.md「「更多」背景物件規則」）
+    NIGHTREAD_OBJ_VETO=0 ／ NIGHTREAD_OBJ_LT=0   只關否決／只關亮背景區塗黑（消融用）
 格溝與出血格過濾各有開關（預設都開；兩個都關＝加入前 d3cfa92 的輸出，逐像素相同）：
     NIGHTREAD_SEP=0     不偵測任意角度格溝／頁邊（nightread_sep.py）
     NIGHTREAD_BLEED=0   不做出血格過濾（nightread_bleed.py）
@@ -78,6 +81,7 @@ import paths                                                      # noqa: E402  
 import export_dbnet_ncnn as ex                                    # noqa: E402  （來自 yakuyomi-engine/parity）
 from mit_grouping import Quadrilateral, merge_bboxes_text_region  # noqa: E402  （來自 yakuyomi-engine/parity）
 import nightread_bleed                                            # noqa: E402  出血格過濾
+import nightread_obj                                              # noqa: E402  「更多」背景物件規則
 import nightread_ring                                             # noqa: E402  人物外灰圈收細
 import nightread_sep                                              # noqa: E402  任意角度格溝／頁邊
 
@@ -1385,7 +1389,8 @@ def sticker_plan(g, img_bgr, lab, stats, gutter_ids, panel_ids, frameless, regio
     return accept, audit, promoted
 
 
-def filter_sticker_plan(g, lab, stats, accept, audit, promoted, char_raw, frame):
+def filter_sticker_plan(g, lab, stats, accept, audit, promoted, char_raw, frame, mode=None, rough_max=None,
+                        min_frac=None, mark_audit=True):
     """背景填黑三檔（STICKER_MODE）：在 sticker_plan 的安全網之後再挑一次，決定哪些白元件真的填黑。
     回傳 (accept, promoted)；promoted 只留仍在 accept 內的（擢升元件落選＝連核心填色也不做）。
 
@@ -1401,7 +1406,10 @@ def filter_sticker_plan(g, lab, stats, accept, audit, promoted, char_raw, frame)
     audit 每筆加 keep 欄（accept 是安全網的判定、keep 是檔位的最終決定）。
     """
     accept = set(accept)
-    if STICKER_MODE == "all":
+    mode = STICKER_MODE if mode is None else mode
+    rough_max = STICKER_ROUGH_MAX if rough_max is None else rough_max
+    min_frac = STICKER_SIMPLE_MIN_FRAC if min_frac is None else min_frac
+    if mode == "all":
         keep = accept
     else:
         met = {int(a["comp"]): a for a in audit}
@@ -1421,12 +1429,13 @@ def filter_sticker_plan(g, lab, stats, accept, audit, promoted, char_raw, frame)
                         and float(faint[ring].mean()) < STICKER_PLAIN_FAINT_MAX):
                     keep.add(i)                             # plain：外圈只碰格線／頁邊（暗墨、淡線稿都沒碰）
                     continue
-            if STICKER_MODE == "simple":
+            if mode == "simple":
                 a = met.get(int(i))
-                if a is not None and a["rough"] <= STICKER_ROUGH_MAX and a["areaFrac"] >= STICKER_SIMPLE_MIN_FRAC:
+                if a is not None and a["rough"] <= rough_max and a["areaFrac"] >= min_frac:
                     keep.add(i)
-    for a in audit:
-        a["keep"] = int(a["comp"]) in keep
+    if mark_audit:
+        for a in audit:
+            a["keep"] = int(a["comp"]) in keep
     return keep, set(promoted) & keep
 
 
@@ -2036,10 +2045,12 @@ def harmonize_enclosed_whites(out, g, lab, stats, skip_mask):
 def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
             core_ids=(), frame=None, regions=None, charmask=None, char_raw=None,
             bubble_rest=None, lost_bubble=None, diag=None, bubble_local=None, more_paint=False,
-            bubble_rest_pre=None):
-    """整頁合成：場景曲線 → 留白填深（出血格過濾）→ 格溝／頁邊 → 貼紙式背景 → 氣泡重繪 → 灰圈收細 → 人物還原。
+            bubble_rest_pre=None, obj_ctx=None):
+    """整頁合成：場景曲線 → 留白填深（出血格過濾）→ 格溝／頁邊 → 貼紙式背景 →（[obj_ctx]）背景物件規則 → 氣泡重繪 → 灰圈收細
+    → 人物還原。
 
     [more_paint]＝「更多」A2 的檔：貼紙層開 keep_dark（MORE_KEEP_DARK）與 edge_fb（MORE_EDGE_FB）。
+    [obj_ctx]＝「更多」背景物件規則的整頁量測（nightread_obj.context ＋ std_keep；None＝不跑）。
     [bubble_rest_pre]＝泡外圈在讓開人物之前的範圍（灰圈收細的可認領像素之一；None＝沒有）。
 
     [diag] 給 dict 就把格溝與出血過濾的中間遮罩、逐塊決策、耗時存進去（parity／除錯用，不影響輸出）；灰圈收細另存
@@ -2129,11 +2140,47 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
             out = paint_gutter(out, g, keep, frame=frame if frame is not None else np.zeros_like(gutter, np.uint8), bubble=bubble)
     if sepm is not None and sepm.any():                 # 任意角度格溝／頁邊：同留白待遇（填 BG、邊界描亮）
         out = paint_gutter(out, g, sepm, frame=frame, bubble=bubble)
-    if sticker:                                         # 貼紙式背景：純白背景填黑＋前景白描邊
+    if sticker and obj_ctx is not None and nightread_obj.OBJ_VETO:
+        # 「更多」背景物件規則 V（nightread_obj.py）：先只塗標準的那幾顆、再塗全部；多塗的連通塊逐塊看超區物件證據，
+        # 否決的塊還原成只塗標準的樣子。灰圈收細的收集在否決元件上改用只塗標準那一趟的。
+        sk = obj_ctx["std_keep"]
+        ring_std = None if ring is None else dict(withheld=np.zeros(g.shape, bool), stk_band=np.zeros(g.shape, bool))
+        out_std = paint_sticker(out.copy(), g, lab, stats, sk, bubble,
+                                core_ids=set(core_ids) & sk, frame=frame, seg=seg, charmask=charmask,
+                                keep_dark=more_paint and MORE_KEEP_DARK, edge_fb=more_paint and MORE_EDGE_FB, ring=ring_std)
         out = paint_sticker(out, g, lab, stats, sticker, bubble,
                             core_ids=core_ids, frame=frame, seg=seg, charmask=charmask,
                             keep_dark=more_paint and MORE_KEEP_DARK, edge_fb=more_paint and MORE_EDGE_FB, ring=ring)
-    if ring is not None:                                # 灰圈收細：背景填黑（留白／格溝／貼紙）到此為止塗成 BG 的像素
+        std_dark = nightread_obj.blackish(out_std, g)
+        vet = nightread_obj.veto_blocks(g, nightread_obj.blackish(out, g) & ~std_dark, std_dark, obj_ctx, diag)
+        if vet.any():
+            r_ = int(np.clip(round(STROKE_OBJ_FRAC * min(g.shape)), STROKE_OBJ_MIN, STROKE_OBJ_MAX)) + 2
+            back = cv2.dilate(vet.astype(np.uint8), np.ones((2 * r_ + 1,) * 2, np.uint8)) > 0
+            back &= out != out_std
+            out[back] = out_std[back]
+            vids = set(int(v) for v in np.unique(lab[vet])) - set(sk) - {0}
+            if vids:
+                vz = np.isin(lab, sorted(vids))
+                if bubble_rest is not None:
+                    bubble_rest = bubble_rest & ~vz
+                if bubble_rest_pre is not None:
+                    bubble_rest_pre = bubble_rest_pre & ~vz
+                if ring is not None:
+                    for k_ in ("withheld", "stk_band"):
+                        ring[k_] = (ring[k_] & ~vz) | (ring_std[k_] & vz)
+        if diag is not None:
+            diag["obj_vetomask"] = vet
+        del out_std
+    elif sticker:                                       # 貼紙式背景：純白背景填黑＋前景白描邊
+        out = paint_sticker(out, g, lab, stats, sticker, bubble,
+                            core_ids=core_ids, frame=frame, seg=seg, charmask=charmask,
+                            keep_dark=more_paint and MORE_KEEP_DARK, edge_fb=more_paint and MORE_EDGE_FB, ring=ring)
+    if obj_ctx is not None and nightread_obj.OBJ_LT:  # 「更多」背景物件規則 L：無物件的亮背景（白與淺色調）塗黑
+        t_ = time.perf_counter()
+        out = nightread_obj.light_fill(out, g, obj_ctx, diag)
+        if diag is not None:
+            diag["t_obj_lt"] = time.perf_counter() - t_
+    if ring is not None:                                # 灰圈收細：背景填黑（留白／格溝／貼紙／亮背景區）到此為止塗成 BG 的像素
         ring["bg"] = (out == BG) & (scene_keep != BG)
     # [bubble_local] 封縫救回的泡：只在這裡以後（泡重繪、偽泡、亮島、人物還原）當泡；上面的結構層只看 bubble
     bub_all = bubble if bubble_local is None else (bubble | bubble_local)
@@ -2293,6 +2340,17 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None, 
                                       bubble, seg, (lhm | lvm) > 0, frameless, regions, gutter_ids, panel_ids)
         for a in audit:
             a["keep"] = int(a["comp"]) in sticker
+    obj_ctx = None
+    if MORE_RULE and nightread_obj.OBJ_ON:
+        # 「更多」背景物件規則（nightread_obj.py）：整頁量測一次；否決要「只塗標準（L2）」的 keep（∩ 這一檔的 keep）
+        t_obj = time.perf_counter()
+        obj_ctx = nightread_obj.context(g, (img.max(axis=2).astype(np.int16) - img.min(axis=2).astype(np.int16)).astype(np.uint8),
+                                        charmask, char_raw, bubble, seg, (lhm | lvm) > 0, regions)
+        std_keep, _ = filter_sticker_plan(g, lab, stats, accept0, audit, promoted0, char_raw, (lhm | lvm) > 0,
+                                          mode="simple", rough_max=10.0, min_frac=0.005, mark_audit=False)
+        obj_ctx["std_keep"] = set(std_keep) & set(sticker)
+        if diag is not None:
+            diag["t_obj_ctx"] = time.perf_counter() - t_obj
     # 無框頁的留白層用加規則前的 keep（P3）：新收的元件整顆當貼紙塗，留白帶照舊
     gutter_show = gutter_ids - base_keep if frameless else gutter_ids
     gutter = np.isin(lab, sorted(gutter_show)) if gutter_show else np.zeros((H, W), bool)
@@ -2397,7 +2455,8 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None, 
     final = compose(g, gutter, bubble & ~local_only, seg, frameless, lab, stats, sticker,
                     core_ids=promoted, frame=(lhm | lvm), regions=regions, charmask=charmask,
                     char_raw=char_raw, bubble_rest=bubble_rest, lost_bubble=lost, diag=diag,
-                    bubble_local=bubble & local_only, more_paint=MORE_RULE, bubble_rest_pre=bubble_rest_pre)
+                    bubble_local=bubble & local_only, more_paint=MORE_RULE, bubble_rest_pre=bubble_rest_pre,
+                    obj_ctx=obj_ctx)
 
     pref = os.path.join(outdir, name)
     with open(f"{pref}_regions.json", "w", encoding="utf-8") as f:
