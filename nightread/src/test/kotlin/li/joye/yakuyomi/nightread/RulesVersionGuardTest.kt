@@ -36,7 +36,7 @@ class RulesVersionGuardTest {
         // 亮背景區塗黑（沒有否決）；demo05 的「更多」以前與標準同一個合成鍵、不合成（摘要記 "="），現在規則開著就照樣合成（成品與標準
         // 相同）。效果線與閃光不動那五頁（五頁的摘要仍是 70ad1ca1…），所以這版起加 ch34_015（集中線塗黑）；複核（2026-10-04）
         // 加人物旁淡線的外圈、字畫亮只限有字框的字塊，再加合成頁 syn_more（閃光、淡線的手、沒有字框的樹叢；六頁的摘要不受這三條影響）。
-        // 還沒交出
+        // 2026-10-04 交出
         3 to "4aa60a1bb49a7c0a46380e1ca4140ed801a66a06fe3f701e1c433eccc3c446a7",
     )
 
@@ -47,6 +47,7 @@ class RulesVersionGuardTest {
     private val delivered = mapOf(
         1 to "852996dcb2d3dc5b0cf674feee343bfce9e3c115e6d3d2a8db014b5f2294bab0",     // 2026-10-03 debug APK
         2 to "78a821623962844b53f7ff4c5f395c5dcc514df659a7ed3ef2293bce6dabbec7",     // 2026-10-03 debug APK（灰圈收細）
+        3 to "4aa60a1bb49a7c0a46380e1ca4140ed801a66a06fe3f701e1c433eccc3c446a7",     // 2026-10-04 debug APK（「更多」背景物件規則）
     )
 
     private val pages = listOf("ch34_011", "demo01", "demo02", "demo05", "demo06", "ch34_015", "syn_more")
