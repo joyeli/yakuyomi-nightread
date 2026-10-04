@@ -204,7 +204,8 @@ class BgObjectsParityTest {
         diag["obj"] = true
         val ctx = BgObjects.context(a.g, a.charMask, a.charRaw, a.bubbleUntrim, a.seg, a.frame, p.obj, diag)
         val keys = mutableListOf("obj_ink" to "ink", "obj_bright" to "bright", "obj_can4" to "can4", "obj_tone" to "tone",
-            "obj_light" to "light", "obj_E" to "E", "obj_Ev2" to "Ev2", "obj_longz" to "longz", "obj_X3" to "X3", "obj_spark" to "spark")
+            "obj_light" to "light", "obj_E" to "E", "obj_Ev2" to "Ev2", "obj_longz" to "longz", "obj_X3" to "X3", "obj_spark" to "spark",
+            "obj_phalo" to "phalo")
         if (expectFx) keys += listOf("obj_fxe" to "fxe", "obj_fxe_t" to "fxe_t", "obj_terr" to "terr", "obj_memline" to "memline")
         for ((key, file) in keys) assertMask("$page 量測 $file", readMask("page/${page}_obj_$file.png"), diag[key] as Mask)
         assertEquals("$page 效果線場", expectFx, ctx.fx != null)
@@ -215,7 +216,7 @@ class BgObjectsParityTest {
         // 亮背景區（函式層：餵研究端的「已經黑」）
         val out = FImg(a.g.w, a.g.h, FloatArray(a.g.data.size) { 128f })
         val d2 = HashMap<String, Any>()
-        BgObjects.lightFill(out, a.g, ctx, a.charMask, a.charRaw, a.bubbleUntrim, a.frame, a.seg, a.chroma, p.obj, p, d2,
+        BgObjects.lightFill(out, a.g, ctx, a.charMask, a.charRaw, a.bubbleUntrim, a.frame, a.seg, a.chroma, a.regions, p.obj, p, d2,
             darkOverride = readMask("page/${page}_obj_dark.png"))
         val empty = Mask(a.g.w, a.g.h)
         val fill = d2["obj_fill"] as Mask? ?: empty

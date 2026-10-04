@@ -327,6 +327,18 @@ data class ObjectRuleParams(
     val fxSparks: Boolean = true,
     /** 效果線與閃光的參數組（獨立成 data class：建構子參數槽）。 */
     val fx: EffectLineParams = EffectLineParams(),
+    /**
+     * 人物旁的淡線外圈不塗（2026-10-04 複核 1；研究端 NIGHTREAD_OBJ_PF）：人物模型漏掉的手、筆多半是淡的點狀線，不算物件證據，
+     * 亮背景區塗黑會蓋過去。從離人物 [pfTouch] px 內的淡線起、沿外擴 [pfBridge] 的淡線測地長 [pfReach] px，長到的再外擴 [pfHalo]
+     * ＝不塗的圈。
+     */
+    val personFaint: Boolean = true,
+    val pfTouch: Int = 5,
+    val pfBridge: Int = 2,
+    val pfReach: Int = 64,
+    val pfHalo: Int = 10,
+    /** 字畫亮只限碰到字框（[TextRegion]）的字塊（2026-10-04 複核 2；研究端 NIGHTREAD_OBJ_TXTREG）：DBNet 誤當字的樹叢不反相。 */
+    val textNeedsRegion: Boolean = true,
     /** V：超區證據 ‰ 上限（原型 15；查核改 25：救回無物件的紙白與字幕框，有物件的 b 類最低 26.7）。 */
     val vetoEpm: Double = 25.0,
     /** V／L 脈絡：白跨細線閉合的橢圓半徑。 */

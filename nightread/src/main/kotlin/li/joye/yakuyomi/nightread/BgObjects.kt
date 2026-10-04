@@ -24,6 +24,9 @@ import kotlin.math.sqrt
  * - **C 閃光**：亮記號裡四周沒有暗墨、大小合適的＝閃光：不算證據、不算調子邊、「孤立亮記號多就整區留灰」關掉；塗黑區裡的閃光
  *   畫成淺灰。尺畫的直線不給長線帶。
  *
+ * 複核收尾（2026-10-04）：人物旁的淡線（人物模型漏掉、用點狀淡線畫的手、筆）外圈不塗（[ObjectRuleParams.personFaint]，
+ * [Context.phalo]）；字畫亮只限碰到字框的字塊（[ObjectRuleParams.textNeedsRegion]）。
+ *
  * **確定性寫法**：高斯＝整數核（[Cv.gaussW]）兩趟卷積到 Q16；blackhat／tophat、線核平均、亮度門檻都在 Q16 整數上比；Canny 吃
  * Q16 整數部分；調子邊緣＝Q16 的 3×3 Sobel 平方和比門檻平方；距離＝5×5 chamfer（非 IPP）；‰／平均／中位都用整數比；
  * 二次曲面殘差＝正規方程（numpy 的分段成對加總，[npSumChunked]）＋固定順序高斯消去；字的亮度＝256 格查表。與原型（浮點）的差
@@ -59,6 +62,8 @@ internal object BgObjects {
         val spark: LongArray?,
         /** 效果線場（A；沒開或沒有收下的族＝null）。 */
         val fx: EffectLines.Field?,
+        /** 人物旁的淡線外圈（複核 1：亮背景區塗黑扣掉；沒開或沒有＝null）。 */
+        val phalo: LongArray? = null,
     )
 
     private fun has(b: LongArray, i: Int): Boolean = (b[i ushr 6] ushr (i and 63)) and 1L != 0L
@@ -226,6 +231,15 @@ internal object BgObjects {
             (ink.data[it] || toneE.data[it] || (bright.data[it] && (spark == null || !spark.data[it]))) && !x3.data[it]
         }), p.evMinArea)
         for (i in 0 until n) if (x3.data[i]) ev2Raw.data[i] = false
+        // 人物旁的淡線（複核 1）：人物模型漏掉的手、筆多半是淡的點狀線，不算物件證據 E ⇒ 亮背景區塗黑會蓋過去。從離人物 pfTouch px
+        // 內的淡線（[ev2Raw]＝細暗線不經線核｜σ2 Canny，扣 X3）起，沿外擴 pfBridge 的淡線測地長 pfReach px，長到的再外擴 pfHalo
+        val phalo: LongArray? = if (!p.personFaint) null else run {
+            val fb = dil(ev2Raw, p.pfBridge)
+            val cmd = dil(charMask or charRaw, p.pfTouch)
+            var any = false
+            for (i in 0 until n) { cmd.data[i] = cmd.data[i] && fb.data[i]; if (cmd.data[i]) any = true }
+            if (!any) null else Ring.packBits(dil(growCropped(cmd, fb, p.pfReach, bfs = null), p.pfHalo))
+        }
         val ev2 = minArea(ev2Raw, p.evMinArea)
         // 長線帶
         val longz = run {
@@ -240,6 +254,7 @@ internal object BgObjects {
             diag["obj_tone"] = tone; diag["obj_light"] = unpack(light, w, h); diag["obj_E"] = e; diag["obj_Ev2"] = ev2
             diag["obj_longz"] = longz; diag["obj_X3"] = x3; diag["obj_spark"] = spark ?: Mask(w, h)
             diag["obj_fx_info"] = fxInfo!!
+            diag["obj_phalo"] = if (phalo != null) unpack(phalo, w, h) else Mask(w, h)
             if (fx != null) {
                 diag["obj_fxe"] = unpack(fx.fxe, w, h); diag["obj_fxe_t"] = unpack(fx.fxeT, w, h)
                 diag["obj_terr"] = unpack(fx.terr, w, h)
@@ -249,7 +264,7 @@ internal object BgObjects {
         return Context(
             w, h, xB, x3B, Ring.packBits(e), Ring.packBits(ev2), inkB,
             Ring.packBits(bright), Ring.packBits(tone), Ring.packBits(toneE), light, Ring.packBits(longz),
-            spark?.let { Ring.packBits(it) }, fx,
+            spark?.let { Ring.packBits(it) }, fx, phalo,
         )
     }
 
@@ -661,11 +676,13 @@ internal object BgObjects {
 
     /**
      * 研究端 `light_fill`：在貼紙層（含否決）之後的 [out] 上把無物件的亮背景塗黑（就地改）。[chroma] 可 null（當 0）；[bubble]＝修剪前的泡。
-     * [darkOverride]＝「已經黑」的覆寫（函式層 parity 用：餵研究端那一邊的；null＝[blackish]）。
+     * [darkOverride]＝「已經黑」的覆寫（函式層 parity 用：餵研究端那一邊的；null＝[blackish]）。[regions]＝字區外接框（字畫亮只限
+     * 碰到字框的字塊，[ObjectRuleParams.textNeedsRegion]）。fill 生長完先扣人物旁的淡線外圈（[Context.phalo]）。
      */
     fun lightFill(
         out: FImg, g: Gray, ctx: Context, charMask: Mask, charRaw: Mask, bubble: Mask, frame: Mask, seg: Mask, chroma: Gray?,
-        p: ObjectRuleParams, np: NightReadParams, diag: MutableMap<String, Any>?, darkOverride: Mask? = null,
+        regions: List<TextRegion>, p: ObjectRuleParams, np: NightReadParams, diag: MutableMap<String, Any>?,
+        darkOverride: Mask? = null,
     ) {
         val w = g.w
         val h = g.h
@@ -727,6 +744,8 @@ internal object BgObjects {
         }
         fill = growCropped(fill, b, p.rLoc + 6)
         fill = growCropped(fill, Mask(w, h, BooleanArray(n) { has(passedB, it) && !has(dEvB, it) }), p.seal + 3)
+        val ph = ctx.phalo
+        if (ph != null) for (i in 0 until n) if (has(ph, i)) fill.data[i] = false     // 人物旁的淡線外圈不塗（複核 1）
         val dark = unpack(darkB, w, h)
         if (fill.any()) fill = dropContext(g, fill, l0B, dark, ctx, charMask, charRaw, bubble, frame, p, diag)
         if (fill.any()) fill = dropIslands(g, fill, dark, charMask, charRaw, bubble, p, diag)
@@ -782,6 +801,17 @@ internal object BgObjects {
                 if (fill.data[i]) hit[mx]++
             }
             val okt = BooleanArray(ccT.n) { it > 0 && 2 * hit[it] >= max(tot[it], 1) }
+            if (p.textNeedsRegion) {
+                // 複核 2：只畫亮碰到字框的字塊；只有字遮罩、沒有字框的（樹叢、星形記號被 DBNet 誤當字）不當字（留原樣）
+                val hasR = BooleanArray(ccT.n)
+                for (rg in regions) {
+                    for (y in max(0, rg.y0) until min(h, max(0, rg.y1))) {
+                        val b = y * w
+                        for (x in max(0, rg.x0) until min(w, max(0, rg.x1))) { val v = lb[b + x]; if (v > 0) hasR[v] = true }
+                    }
+                }
+                for (k in 1 until ccT.n) if (!hasR[k]) okt[k] = false
+            }
             val t = Mask(w, h, BooleanArray(n) { okt[ccT.labels[it]] })
             if (t.any()) {
                 val lut = textLut(np.bg, np.ink)
@@ -906,10 +936,10 @@ internal object BgObjects {
     }
 
     /**
-     * 研究端 `_grow`（＝[Cv.geodesicGrow] step 4）裁到 [within] 的外接框做（迭代版）：長不出 within，框外的像素既不是種子也不會被
-     * 留下，結果與整頁逐位元相同，暫存只有框大小。
+     * 研究端 `_grow`（＝[Cv.geodesicGrow] step 4）裁到 [within] 的外接框做：長不出 within，框外的像素既不是種子也不會被
+     * 留下，結果與整頁逐位元相同，暫存只有框大小。[bfs]＝false 用迭代版（預設）；null＝依成本選（長距離的淡線外圈用，兩種逐位元相同）。
      */
-    private fun growCropped(seed: Mask, within: Mask, iters: Int): Mask {
+    private fun growCropped(seed: Mask, within: Mask, iters: Int, bfs: Boolean? = false): Mask {
         val w = seed.w
         val h = seed.h
         var x0 = w; var y0 = h; var x1 = -1; var y1 = -1
@@ -927,7 +957,7 @@ internal object BgObjects {
             cw.data[y * sw + x] = within.data[i]
             cs.data[y * sw + x] = seed.data[i] && within.data[i]
         }
-        val gr = Cv.geodesicGrow(cs, cw, iters, step = 4, bfs = false)
+        val gr = Cv.geodesicGrow(cs, cw, iters, step = 4, bfs = bfs)
         for (y in 0 until sh) for (x in 0 until sw) if (gr.data[y * sw + x]) out.data[(y + y0) * w + x + x0] = true
         return out
     }

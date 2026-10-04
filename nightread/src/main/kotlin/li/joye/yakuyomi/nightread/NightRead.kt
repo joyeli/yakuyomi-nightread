@@ -1118,7 +1118,7 @@ object NightRead {
         }
         debug?.invoke("paintSticker", 0)
         if (objCtx != null && p.obj.lightFill) {
-            BgObjects.lightFill(out, g, objCtx, a.charMask, a.charRaw, a.bubbleUntrim, a.frame, seg, a.chroma, p.obj, p, diag)
+            BgObjects.lightFill(out, g, objCtx, a.charMask, a.charRaw, a.bubbleUntrim, a.frame, seg, a.chroma, a.regions, p.obj, p, diag)
             debug?.invoke("objLightFill", 0)
         }
         objHolder.ctx = null                    // 量測到此用完：不陪著後面的泡重繪／灰圈收細（那裡是合成的峰值）
