@@ -1015,6 +1015,25 @@ For blocks under 1.5% of the page: fewer than 20 painted-black pixels (originall
 it a black hole in a grey sea, not painted; more than 60% of its rim hugging the character mask (dilated 4) is not painted
 either (hair and clothing the mask missed tend to sit there).
 
+### `OBJ_PF` = 1 · `PF_TOUCH` = 5 · `PF_BRIDGE` = 2 · `PF_REACH` = 64 · `PF_HALO` = 10 (`NIGHTREAD_OBJ_PF`; Kotlin `personFaint` / `pfTouch` / `pfBridge` / `pfReach` / `pfHalo`)
+No paint around faint lines next to a character (2026-10-04 review). Hands and pencils the character model misses are often
+drawn in faint dotted lines: the dots are disconnected, so they fail the 17 px line kernel, and the short ones are dropped by
+the screentone-dot gate. They are not object evidence, so the light-background fill used to paint over them (the raised hand in
+the c371_005 top cell, the hand reaching behind the bubble on c371_003). Faint ink = σ2 blackhat > 20 ∪ σ2 Canny (each without
+screentone dots, minus the explained mask dilated 3 and the 6 px page margin). The faint ink is dilated by an ellipse of 2 px to
+join the dots; starting from faint ink within 5 px of the character (trimmed mask ∪ raw output) it grows geodesically along that
+for 64 px (3×3 dilations, intersected every 4), and what it reaches, dilated by an ellipse of 10 px, is a ring that is never
+painted: the light-background fill drops it after its two growth steps and before the context and island checks. The effect-line
+painting is not affected. Cost: a rounded grey patch next to lines that touch a character (hair strands, clothing edges, table
+edges).
+
+### `OBJ_TXTREG` = 1 (`NIGHTREAD_OBJ_TXTREG`; Kotlin `textNeedsRegion`)
+"Brighten text strokes whose surroundings are mostly painted" only applies to text components that touch a text box (the
+bounding box of a text region after DBNet line grouping; on translated pages the product also merges the translation boxes).
+Components that DBNet only marked in its text mask, without a box, are not treated as text and keep their pixels: the tree clumps
+on c371_013, the star mark on c371_014 and the sweat-drop marks used to be inverted to white. Cost: handwritten text without a box
+(the 「44…」 on c362_001) is no longer brightened either; it stays grey like an object.
+
 ### Effect lines (A) and sparkles (C) (`nightread_fx.py`, `nightread_obj.py`; Kotlin `EffectLines`, `ObjectRuleParams.fx` = `EffectLineParams`)
 The user's ruling 2 of 2026-10-03: concentration lines / speed lines / "井" cross-hatching are not objects (black between the
 lines, the lines stay light), sparkles / star dots are not objects (the region is painted, sparkles stay light grey), magic

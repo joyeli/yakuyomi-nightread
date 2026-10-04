@@ -159,7 +159,10 @@ evidence, grown back to the line edges, so narrow pockets enclosed by lines stay
 not objects (`nightread_fx.py` / `EffectLines.kt`): radial concentration-line families are found on the whole page, and a
 region that is clean once the ink running along a family is set aside is painted black with the lines kept light; isolated
 bright marks with no dark ink around them are sparkles — the region is painted and the sparkles drawn light grey.
-Cross-hatching and parallel speed lines still count as objects this round. "Standard" skips this layer.
+Cross-hatching and parallel speed lines still count as objects this round. A ring around faint lines next to a
+character (hands or pencils the character model missed, drawn in faint dotted lines) is never painted, and painted-around
+text is brightened only when it touches a text box (tree clumps and marks that only DBNet's text mask caught keep their
+pixels). "Standard" skips this layer.
 
 **Semantic release for core fill.** Core fill has two geometric protections: a geodesic-ratio veto (background
 reaches the panel border in a straight line, cloth has to detour) and a thick-ink aura (no fill around a mass

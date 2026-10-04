@@ -234,7 +234,8 @@ must match the research side pixel for pixel; `RingParityTest` pins character ri
 must match the research side pixel for pixel; `BgObjectsParityTest` pins the "More" background-object rule (`obj` /
 `BgObjects.kt`, `nightread_obj.py` on the research side): the primitives (integer Gaussian, Canny, median, chamfer,
 quadratic-surface residual), the effect-line thinning and straight branches (`EffectLines.kt`, `nightread_fx.py`) and,
-on ch34_010 and ch34_015, the page-level measurements (sparkles, effect ink, territory and member lines included), the veto,
+on ch34_010 and ch34_015, the page-level measurements (sparkles, effect ink, territory and member lines, the ring around
+faint lines next to a character included), the veto,
 the light-background fill and the effect-line regions must match the research side pixel for pixel (bit for bit).
 
 Character ring thinning (`ring`, on by default and in both product levels; `NIGHTREAD_RING` on the research side):
@@ -245,8 +246,9 @@ the outline; elsewhere the old grey ring stays. Rules and numbers: *Character ri
 The "More" background-object rule (`obj`, on by default but only effective in levels with `more` on, i.e. product
 "More"; `NIGHTREAD_OBJ` on the research side): in "More", background blackening asks whether there is an object —
 white the sticker layer painted between objects goes back to its "Standard" look, and object-free light background
-(white or light tone) is blackened. "Standard" is unaffected. Rules and numbers: *"More" background-object rule* in
-`docs/PARAMETERS.md` and `docs/DECISIONS.md`.
+(white or light tone) is blackened, except a ring around faint lines next to a character (hands the character model
+missed); painted-around text is brightened only when it touches a text box. "Standard" is unaffected. Rules and
+numbers: *"More" background-object rule* in `docs/PARAMETERS.md` and `docs/DECISIONS.md`.
 
 Two more switches default to on, and stay on in all three levels: `separators` (any-angle gutters and page
 margins, `Separators.kt`; `NIGHTREAD_SEP` on the research side) and `bleedFilter` (the bleed-panel filter,
