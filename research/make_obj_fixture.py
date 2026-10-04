@@ -19,7 +19,7 @@
     ch34_010：同時有亮背景區塗黑（裁定 3 的 A3 白地板）與否決（A4 牆板窄條、A1 牆），也有字幕塊；沒有效果線族。
     ch34_015：有效果線族（裁定 2 A：上排右格頂的集中線塗黑、線留亮），否決（A1 壁燈）走效果線的例外判斷。
     輸入＝研究端 47 頁 parity 用的同一份（原圖灰階、DBNet 字遮罩、字區、人物遮罩、彩度）；期望＝研究端「更多」
-    （MORE=1）跑 run_page 時 nightread_obj 的整頁量測遮罩（含閃光、效果墨、地盤、成員線）、否決的輸入（extra／std_dark）與
+    （MORE=1）跑 run_page 時 nightread_obj 的整頁量測遮罩（含閃光、效果墨、地盤、成員線、人物旁淡線的外圈 phalo）、否決的輸入（extra／std_dark）與
     輸出、亮背景區的輸入（dark）與輸出（fill／band／txt／效果線區 fxpaint），加上逐區特徵（obj_rows.txt，fit 以 repr 存；
     效果線區的量測另存 obj_fxrows.txt）。
 
@@ -191,7 +191,8 @@ def page(name, PO, N, ob):
     masks = dict(ink=c["ink"], bright=c["bright"], can4=c["tone_e"], tone=c["tone"], light=c["light"], E=c["E"],
                  Ev2=c["Ev2"], longz=c["longz"], X3=c["X3"], extra=CAP["extra"], stddark=CAP["std_dark"],
                  veto=CAP["veto"], dark=CAP["dark"], fill=diag.get("obj_fill", empty), band=diag.get("obj_band", empty),
-                 txt=diag.get("obj_txt", empty), spark=c["spark"], fxpaint=diag["obj_fxpaint"])
+                 txt=diag.get("obj_txt", empty), spark=c["spark"], fxpaint=diag["obj_fxpaint"],
+                 phalo=c["phalo"] if c.get("phalo") is not None else empty)
     if fx is not None:
         masks.update(fxe=fx["fxe"], fxe_t=fx["fxe_t"], terr=fx["terr"], memline=fx["memline"])
     for k, m in masks.items():

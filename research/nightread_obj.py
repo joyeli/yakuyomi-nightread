@@ -13,6 +13,8 @@ decide/）＝V1 ＋ 否決門檻 25 ‰ ＋ 拿掉漸層暗端斜坡。兩個機
      白的塊跨細線閉合後超區證據 > CTX_EPM、灰海裡的孤島（小於 ISLAND_MAX 又 ISLAND_TOUCH px 內碰不到塗黑的）、貼著人物的
      小塊（外緣 > HUG_MAX 貼人物）。塗法同貼紙：塗 BG、緊鄰線／人物／格框線的帶描亮（STROKE_OBJ_V）、四周大多被塗黑的字
      筆畫畫亮（墨度 1.4 次方，同泡裡的字）。
+  複核收尾（2026-10-04）：人物旁的淡線（人物模型漏掉、用點狀淡線畫的手、筆）外圈 PF_* 不塗（context 算 phalo、light_fill
+     在生長之後扣掉）；字畫亮只限碰到字框（ctx["regions"] 的外接框）的字塊，只有字遮罩的（DBNet 誤當字的樹叢、記號）留原樣。
 
 **確定性寫法（Kotlin `BgObjects.kt` 逐像素照這份）**：原型的浮點運算全部換成整數或固定順序：
   - 高斯模糊＝整數核（exp 權重 ×65536 四捨五入、中心補足和＝65536；核長同 cv2 浮點版 round(8σ+1)|1）的兩趟可分離卷積
@@ -34,7 +36,8 @@ decide/）＝V1 ＋ 否決門檻 25 ‰ ＋ 拿掉漸層暗端斜坡。兩個機
 
 開關（預設開；只在 NIGHTREAD_MORE=1 時有作用）：NIGHTREAD_OBJ=0 ＝ 規則版本 2 的「更多」（逐像素相同）；
 NIGHTREAD_OBJ_VETO=0 ／ NIGHTREAD_OBJ_LT=0 只關 V ／ L（消融用）；NIGHTREAD_OBJ_FXA=0 ／ NIGHTREAD_OBJ_FXC=0 只關效果線 A ／
-閃光 C（兩個都關＝效果線之前的規則版本 3，逐像素相同）。
+閃光 C（兩個都關＝效果線之前的規則版本 3，逐像素相同）；NIGHTREAD_OBJ_PF=0 ／ NIGHTREAD_OBJ_TXTREG=0 只關人物旁淡線外圈 ／
+字框條件（兩個都關＝複核收尾之前，逐像素相同）。
 """
 import math
 import os
@@ -50,6 +53,8 @@ OBJ_VETO = os.environ.get("NIGHTREAD_OBJ_VETO", "1") == "1"
 OBJ_LT = os.environ.get("NIGHTREAD_OBJ_LT", "1") == "1"
 OBJ_FXA = os.environ.get("NIGHTREAD_OBJ_FXA", "1") == "1"      # 效果線 A（裁定 2）
 OBJ_FXC = os.environ.get("NIGHTREAD_OBJ_FXC", "1") == "1"      # 閃光 C（裁定 2）
+OBJ_PF = os.environ.get("NIGHTREAD_OBJ_PF", "1") == "1"        # 人物旁的淡線外圈不塗（複核 1：人物模型漏掉的手）
+OBJ_TXTREG = os.environ.get("NIGHTREAD_OBJ_TXTREG", "1") == "1"  # 字畫亮只限有字框的字塊（複核 2：DBNet 誤當字的樹叢）
 
 # ── V：否決 ──
 VETO_EPM = 25.0         # 超區證據 ‰ 上限（原型 15；VERIFY 改 25：c362_009 男孩背後紙白 21.6、字幕框 21.3 救回，b 類最低 26.7）
@@ -107,6 +112,12 @@ FX_GROW = 120           # 效果線區往外長（進線密處）最多幾 px
 FX_HALO = 8             # 殘量證據外擴：這圈不塗（物件旁留灰）
 FX_ER_MIN = 30          # 殘量證據連通塊至少這麼大才留灰圈（碎點不留）
 FX_MIN_PART = 400       # 塗的塊至少這麼大
+
+# ── 人物旁的淡線（複核 1）──
+PF_TOUCH = 5            # 淡線（細暗線不經線核｜σ2 Canny，扣 X3）離人物（收邊後 ∪ 原輸出）≤ 此 px 的當起點
+PF_BRIDGE = 2           # 淡線橢圓外擴此 px 再連（點狀的淡線斷成一顆顆）
+PF_REACH = 64           # 從起點沿外擴後的淡線最多長幾 px（測地；人物模型漏掉的手、筆離人物不遠）
+PF_HALO = 10            # 長到的淡線（已外擴 PF_BRIDGE）再橢圓外擴此 px：這圈不塗（亮背景區塗黑扣掉）
 
 DARK_G = 63             # 「已經黑」＝塗成 BG 的像素 ∪ 原圖灰階 ≤ 此（預設場景曲線 ≤ 40 的上限；與亮度偏好、墨線增亮無關）
 
@@ -364,7 +375,18 @@ def context(g, chroma, charmask, char_raw, bubble, seg, frame, regions):
     pe[:, :6] = pe[:, -6:] = True
     X3 = dil(X, 3) | pe
     E = _min_area((ink | can4 | (bright & ~spark)) & ~X3, EV_MIN_AREA)
-    Ev2 = _min_area((_nodots(bh_on) | can) & ~X3, EV_MIN_AREA)
+    faint = (_nodots(bh_on) | can) & ~X3
+    Ev2 = _min_area(faint, EV_MIN_AREA)
+    phalo = None
+    if OBJ_PF:
+        # 人物旁的淡線（複核 1）：人物模型漏掉的手、筆多半是淡的點狀線，不算物件證據 E ⇒ 亮背景區塗黑會蓋過去。從離人物
+        # PF_TOUCH px 內的淡線起，沿外擴 PF_BRIDGE 的淡線測地長 PF_REACH px，長到的再外擴 PF_HALO＝不塗的圈
+        fb = dil(faint, PF_BRIDGE)
+        seed = fb & dil(charmask | char_raw, PF_TOUCH)
+        if seed.any():
+            phalo = dil(_grow(seed, fb, PF_REACH), PF_HALO)
+        del fb, seed
+    del faint
     n3, lb3, st3, _ = cv2.connectedComponentsWithStats((ink & ~X3).astype(np.uint8), 8)
     lg = np.zeros(n3, bool)
     lg[1:] = np.maximum(st3[1:, cv2.CC_STAT_WIDTH], st3[1:, cv2.CC_STAT_HEIGHT]) >= LONG_LEN
@@ -388,7 +410,7 @@ def context(g, chroma, charmask, char_raw, bubble, seg, frame, regions):
         fx_info = None
     return dict(regions=regions, longz=longz, X=X, X3=X3, E=E, Ev2=Ev2, bright=bright, ink=ink, tone=tone,
                 tone_e=can4, gb25=gb25, light=light, chroma=chroma, seg=seg, frame=frame, charmask=charmask,
-                char_raw=char_raw, bubble=bubble, spark=spark, sH=sH, fx=fx, fx_info=fx_info)
+                char_raw=char_raw, bubble=bubble, spark=spark, sH=sH, fx=fx, fx_info=fx_info, phalo=phalo)
 
 
 def _straight(lb, st, n):
@@ -656,6 +678,8 @@ def light_fill(out, g, ctx, diag=None, dark=None):
     fill = has[lbb] & core
     fill = _grow(fill, B, RLOC + 6)
     fill = _grow(fill, passed & ~dEv, SEAL + 3)
+    if ctx.get("phalo") is not None:
+        fill &= ~ctx["phalo"]                          # 人物旁的淡線外圈不塗（複核 1）
     # 脈絡：白的塊連同「跨細線閉合」的亮區算超區；超區證據 ‰ 高＝夾在物件之間的空白
     if fill.any():
         Xs = dil(ctx["charmask"] | ctx["char_raw"], 3) | dil(ctx["bubble"], 7) | dil(ctx["frame"], 3) | dark
@@ -741,6 +765,17 @@ def light_fill(out, g, ctx, diag=None, dark=None):
         hit = np.bincount(lt_d[ringm & fill], minlength=nt)
         okt = np.zeros(nt, bool)
         okt[1:] = 2 * hit[1:] >= np.maximum(tot[1:], 1)
+        if OBJ_TXTREG:
+            # 複核 2：只畫亮碰到字框（DBNet 字行分群後的字區外接框）的字塊；只有字遮罩、沒有字框的（樹叢、星形記號被誤當字）
+            # 不當字（留原樣，跟物件一樣）
+            rm = np.zeros((H, W_), bool)
+            for r_ in ctx["regions"]:
+                bx0, by0, bx1, by1 = [int(q) for q in r_["bbox"]]
+                rm[max(0, by0):max(0, by1), max(0, bx0):max(0, bx1)] = True
+            hasr = np.zeros(nt, bool)
+            hasr[np.unique(lt[rm & sd])] = True
+            hasr[0] = False
+            okt &= hasr
         txt = okt[lt]
         if txt.any():
             out[txt] = _TEXT_LUT[g[txt]]
