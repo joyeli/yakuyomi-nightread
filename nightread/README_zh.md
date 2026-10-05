@@ -77,7 +77,7 @@ fun render(
 
 ## 輸入
 
-`NightReadInput` 四樣必要素材加一個選用欄位：
+`NightReadInput` 四樣必要素材加兩個選用欄位：
 
 | 欄位 | 型別 | 說明 |
 |---|---|---|
@@ -86,6 +86,7 @@ fun render(
 | `regions` | `List<TextRegion>` | 文字區的 bbox（`x0, y0, x1, y1`，原圖像素） |
 | `charMask` | `Mask(w, h)` | 人物遮罩，模型原輸出，**必要** |
 | `chroma` | `Gray(w, h)?` | 每像素彩度（max−min 通道），彩頁判定用；純灰階頁可傳 `null` |
+| `inpaintMask` | `Mask(w, h)?` | 只有譯後頁：翻譯素材的去字遮罩（`.yakuyomi/<頁>.mask.png`，與頁同尺寸，`true`＝去字區）。給「更多」（規則版本 4）用：去字後留在譯文旁的乾淨白小塊不塗。日文頁傳 `null`（全空的遮罩等於 `null`） |
 
 ### 文字偵測不在這個 repo 裡
 
@@ -178,13 +179,16 @@ val charMask = Mask(w, h, BooleanArray(w * h) { a[it] || b[it] })
 守人物外灰圈收細（`ring`／`Ring.kt`，研究端 `nightread_ring.py`）：六頁的頁面級證據與 demo01 的生長＋收尾都與研究端逐像素相同；
 `BgObjectsParityTest` 守「更多」背景物件規則（`obj`／`BgObjects.kt`，研究端 `nightread_obj.py`）：整數高斯、Canny、中值、chamfer、
 二次曲面殘差這些原語、效果線（`EffectLines.kt`，研究端 `nightread_fx.py`）的細化與直分支，與 ch34_010、ch34_015 兩頁的整頁量測
-（含閃光、效果墨、地盤、成員線）、否決、亮背景區塗黑、效果線區都與研究端逐像素（逐位元）相同。
+（含閃光、效果墨、地盤、成員線）、否決、亮背景區塗黑、效果線區都與研究端逐像素（逐位元）相同；合成頁 syn_v4（帶去字遮罩）守規則
+版本 4 的四項（補縫、手寫字、淡線外圈貼線形與淡小記號、去字區旁的小塊）。
 
 人物外灰圈收細（`ring`，預設開、兩檔都套；研究端 `NIGHTREAD_RING`）：只在有畫出來的輪廓線把背景跟人物隔開的地方，讓已經塗黑的
 背景長到輪廓線，其餘維持原本那圈灰。規則與數字見 `docs/PARAMETERS_zh.md`「人物外灰圈收細」與 `docs/DECISIONS.md`。
 
 「更多」背景物件規則（`obj`，預設開、只在開了 `more` 的檔生效＝產品「更多」；研究端 `NIGHTREAD_OBJ`）：「更多」的背景塗黑看有沒有
-物件——貼紙多塗、夾在物件之間的白還原成「標準」的樣子，無物件的亮背景（白或淺色調）塗黑。「標準」不受影響。規則與數字見
+物件——貼紙多塗、夾在物件之間的白還原成「標準」的樣子，無物件的亮背景（白或淺色調）塗黑。規則版本 4（開關 `seam`、`textStroke`、
+`pfShape`、`inpaintIslands`）：灰虛線補黑、沒有字框但像粗墨筆畫的手寫字畫亮、一條淡線只留 3 像素外圈、譯文去字遮罩
+（`NightReadInput.inpaintMask`）旁的小塊不塗。「標準」不受影響。規則與數字見
 `docs/PARAMETERS_zh.md`「「更多」背景物件規則」與 `docs/DECISIONS.md`。
 
 另有兩個開關，預設都開、三檔也一律開：`separators`（任意角度格溝／頁邊，`Separators.kt`；研究端 `NIGHTREAD_SEP`）與
@@ -203,7 +207,7 @@ val charMask = Mask(w, h, BooleanArray(w * h) { a[it] || b[it] })
 
 ## Python 端
 
-`research/nightread.py` 是同一條管線的 Python 版，也是 Kotlin 移植的規格本。進入點是 `run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None, diag=None)`：`regions` 與 `seg` 傳進去就跳過偵測，形狀與 `NightReadInput` 相同。
+`research/nightread.py` 是同一條管線的 Python 版，也是 Kotlin 移植的規格本。進入點是 `run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None, diag=None, inpaint=None)`：`regions` 與 `seg` 傳進去就跳過偵測，形狀與 `NightReadInput` 相同；譯後頁另傳 `inpaint=`（與頁同尺寸的布林），對應 `inpaintMask`。
 
 研究腳本會 import yakuyomi-engine 的 parity 工具做偵測，靠 `YAKU_ENGINE_CLONE` 環境變數指路。那是研究腳本的便利，不是管線本身的要求。
 

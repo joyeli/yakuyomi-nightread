@@ -1034,6 +1034,45 @@ Components that DBNet only marked in its text mask, without a box, are not treat
 on c371_013, the star mark on c371_014 and the sweat-drop marks used to be inverted to white. Cost: handwritten text without a box
 (the 「44…」 on c362_001) is no longer brightened either; it stays grey like an object.
 
+### Rules version 4: four additions to「更多」(2026-10-05, the user's decisions q1–q4)
+Only「更多」changes; the standard tier is pixel-identical to version 3. Each addition has its own switch, all four off =
+version 3 pixel for pixel. Not done, by the user's decision: extending screentone gradients to their dark end (q5) and the
+stippled concentration lines on c362_016 (q6); the structural veto is closed (q7). After version 4 is delivered,「更多」is
+frozen except for red-line fixes (see DECISIONS, *「更多」規則版本 4*).
+
+### `OBJ_SEAM` = 1 · `SEAM_R` = 3 · `SEAM_SPARK` = 4 · `SEAM_G` = 200 (`NIGHTREAD_OBJ_SEAM`; Kotlin `seam` / `seamR` / `seamSpark` / `seamG`)
+q1, grey dashed seams in painted areas become black. Where two light tones meet, σ4 Canny marks the boundary as a tone edge and
+the fill stops on both sides, leaving a grey dashed line inside the black. After the island check, the fill is closed with an
+ellipse of radius 3; the pixels the closing adds (not explained, not already dark, not in the faint-line ring) are labelled
+8-connected, and a component is painted only if none of its pixels is thin dark ink, a bright mark, a valley (σ2 blackhat > 20),
+darker than 200 in the page, or within 4 px of a sparkle.
+
+### `OBJ_TXTSTROKE` = 1 · `TS_INK` = 128 · `TS_MIN` = 5 · `TS_G` = 30 · `TS_ROUGH` = 12 · `TS_BANDCLEAN` = 1 (`NIGHTREAD_OBJ_TXTSTROKE`; Kotlin `textStroke` / `tsInk` / `tsMin` / `tsG` / `tsRough` / `tsBandClean`)
+q2, bright handwritten text without a text box. A text component whose surroundings are mostly painted but which touches no
+text box is brightened anyway when it looks like thick ink strokes: its ink (page grey < 128, at least 5 px) is mostly very dark
+(more than half ≤ 30) and its outline is smooth and not thin (ink padded with 2 px of zeros, 3×3 open then 3×3 close; changed
+pixels × 100 ≤ boundary pixels × 12). Tree clumps (texture, ragged outline), stars and sweat drops (thin, grey) do not qualify
+and keep their pixels. The highlight band that only these newly brightened strokes cause is painted back to BG; the band next to
+text that has a box stays as in version 3 (integration fix b). The「…」on c362_001 sits only 1–8 percentage points above the
+50% very-dark share — known and accepted.
+
+### `OBJ_PFSHAPE` = 1 · `PF_CLOSE` = 10 · `PF_MARGIN` = 3 · `PF_HOLE` = 2500 · `PF_LINE_PCT` = 104 · `PF_MARK` = 3 (`NIGHTREAD_OBJ_PFSHAPE`; Kotlin `pfShape` / `pfClose` / `pfMargin` / `pfHole` / `pfLinePct` / `pfMark`)
+q3, the faint-line ring next to a character follows the line. Each 8-connected component of the grown faint ink is closed with an
+ellipse of radius 10 inside its bounding box padded by 11; if the closed area × 100 ≤ the area × 104 it is a single line and keeps
+only a 3 px margin, otherwise (hands, screentone, several strokes bunched together) it keeps the version-3 ring of 10 px. Blocks
+of the complement of (faint ink closed with radius 10 ∪ explained mask), 8-connected, that touch the closed ink and are small
+(area × 1920² ≤ 2500 × clamp(page height, 960, 3840)²) or do not touch the explained mask are also kept inside the version-3
+ring (palms, the gaps between fingers). Faint small marks — thin dark ink before the line kernel or σ2 Canny, before the dot
+filter, minus X⊕3, bounding-box long side < 10 — that touch the version-3 ring keep a 3 px margin too, so emotion marks and short
+strokes stay grey (integration fix a). The result is always inside the version-3 ring.
+
+### `OBJ_INPAINT` = 1 · `ISLAND_INP_D` = 6 · `ISLAND_INP_PCT` = 30 (`NIGHTREAD_OBJ_INPAINT`; Kotlin `inpaintIslands` / `islandInpD` / `islandInpPct`)
+q4, translated pages: a small painted block (under 1.5% of the page) with at least 30% of its pixels within 6 px of the inpaint
+mask is not painted. Those blocks are clean white that only appeared after the Japanese text was inpainted (the black wedge
+between the bubble and the translation on c362_014). The mask is the translation material `.yakuyomi/<page>.mask.png`, same
+size as the page, passed as `NightReadInput.inpaintMask` (research: `run_page(..., inpaint=)`); without it (Japanese pages) the
+rule does nothing.
+
 ### Effect lines (A) and sparkles (C) (`nightread_fx.py`, `nightread_obj.py`; Kotlin `EffectLines`, `ObjectRuleParams.fx` = `EffectLineParams`)
 The user's ruling 2 of 2026-10-03: concentration lines / speed lines / "井" cross-hatching are not objects (black between the
 lines, the lines stay light), sparkles / star dots are not objects (the region is painted, sparkles stay light grey), magic

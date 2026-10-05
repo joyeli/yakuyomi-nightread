@@ -162,7 +162,12 @@ bright marks with no dark ink around them are sparkles — the region is painted
 Cross-hatching and parallel speed lines still count as objects this round. A ring around faint lines next to a
 character (hands or pencils the character model missed, drawn in faint dotted lines) is never painted, and painted-around
 text is brightened only when it touches a text box (tree clumps and marks that only DBNet's text mask caught keep their
-pixels). "Standard" skips this layer.
+pixels). Rules version 4 adds four things: grey dashed seams left inside painted areas where two light tones meet are filled
+black; handwritten text without a box is brightened when it looks like thick ink strokes; the faint-line ring keeps only 3 px
+around a single line (hands and screentone keep the old 10 px, small faint marks keep 3 px); and on translated pages small
+blocks that mostly sit next to the inpaint mask of the translation material are not painted — the inpaint mask is an
+optional input (`NightReadInput.inpaintMask`, research `run_page(inpaint=)`), absent on Japanese pages.
+"Standard" skips this layer.
 
 **Semantic release for core fill.** Core fill has two geometric protections: a geodesic-ratio veto (background
 reaches the panel border in a straight line, cloth has to detour) and a thick-ink aura (no fill around a mass
@@ -341,7 +346,8 @@ out of `ncnn2int8` producing zero instances (a toolchain failure, not calibratio
 DBNet, so it costs nothing extra.
 
 The API is aligned too: `run_page` in `research/nightread.py` takes `regions` and `seg` parameters, and
-supplying them from outside skips detection, the same shape as `NightReadInput` on the Kotlin side. Recipe C
+supplying them from outside skips detection, the same shape as `NightReadInput` on the Kotlin side. On translated pages both
+also take the translation material's inpaint mask (`inpaint=` / `inpaintMask`, same size as the page; optional). Recipe C
 being rejected does not make that interface useless; on the device it is still what decouples detection from
 the rebuild.
 

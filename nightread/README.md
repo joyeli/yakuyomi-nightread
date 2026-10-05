@@ -96,7 +96,7 @@ fun render(
 
 ## Inputs
 
-`NightReadInput` carries four required fields plus one optional one:
+`NightReadInput` carries four required fields plus two optional ones:
 
 | Field | Type | What |
 |---|---|---|
@@ -105,6 +105,7 @@ fun render(
 | `regions` | `List<TextRegion>` | text-region boxes, `x0, y0, x1, y1` in original-image pixels |
 | `charMask` | `Mask(w, h)` | character mask, the model's raw output. Required |
 | `chroma` | `Gray(w, h)?` | per-pixel chroma (max channel minus min channel), used for colour-page judgements. A pure-greyscale page can pass `null` |
+| `inpaintMask` | `Mask(w, h)?` | translated pages only: the inpaint mask from the translation material (`.yakuyomi/<page>.mask.png`, same size as the page, `true` = inpainted). Used by「更多」(rules version 4) so that small blocks of clean white left by inpainting next to the translation are not painted. Japanese pages pass `null` (an all-empty mask is the same) |
 
 ### Text detection is not in this repo
 
@@ -236,7 +237,9 @@ must match the research side pixel for pixel; `BgObjectsParityTest` pins the "Mo
 quadratic-surface residual), the effect-line thinning and straight branches (`EffectLines.kt`, `nightread_fx.py`) and,
 on ch34_010 and ch34_015, the page-level measurements (sparkles, effect ink, territory and member lines, the ring around
 faint lines next to a character included), the veto,
-the light-background fill and the effect-line regions must match the research side pixel for pixel (bit for bit).
+the light-background fill and the effect-line regions must match the research side pixel for pixel (bit for bit); the
+synthetic page syn_v4 (with an inpaint mask) does the same for the four rules-version-4 additions (seam fill, handwritten text,
+the line-shaped faint-line ring with small faint marks, small blocks next to the inpaint mask).
 
 Character ring thinning (`ring`, on by default and in both product levels; `NIGHTREAD_RING` on the research side):
 only where a drawn outline separates the background from the figure does the already-black background grow up to
@@ -247,8 +250,11 @@ The "More" background-object rule (`obj`, on by default but only effective in le
 "More"; `NIGHTREAD_OBJ` on the research side): in "More", background blackening asks whether there is an object —
 white the sticker layer painted between objects goes back to its "Standard" look, and object-free light background
 (white or light tone) is blackened, except a ring around faint lines next to a character (hands the character model
-missed); painted-around text is brightened only when it touches a text box. "Standard" is unaffected. Rules and
-numbers: *"More" background-object rule* in `docs/PARAMETERS.md` and `docs/DECISIONS.md`.
+missed); painted-around text is brightened only when it touches a text box. Rules version 4 (switches `seam`,
+`textStroke`, `pfShape`, `inpaintIslands`) fills grey dashed seams, brightens box-less handwritten text that looks like thick
+ink, keeps only 3 px of ring around a single faint line, and leaves small blocks next to the translation's inpaint mask
+(`NightReadInput.inpaintMask`) unpainted. "Standard" is unaffected. Rules and numbers: *"More" background-object rule* in
+`docs/PARAMETERS.md` and `docs/DECISIONS.md`.
 
 Two more switches default to on, and stay on in all three levels: `separators` (any-angle gutters and page
 margins, `Separators.kt`; `NIGHTREAD_SEP` on the research side) and `bleedFilter` (the bleed-panel filter,
@@ -279,8 +285,9 @@ percentage points of light area to get there.
 ## The Python reference
 
 `research/nightread.py` is the same pipeline in Python and is the spec the Kotlin port is written against.
-Its entry point is `run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None, diag=None)`: pass
-`regions` and `seg` and detection is skipped, which is the same shape as `NightReadInput`.
+Its entry point is `run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None, diag=None, inpaint=None)`: pass
+`regions` and `seg` and detection is skipped, which is the same shape as `NightReadInput`; on translated pages pass `inpaint=`
+(boolean, page-sized) as well, the counterpart of `inpaintMask`.
 
 The research scripts import yakuyomi-engine's parity tools to do detection, and find them through the
 `YAKU_ENGINE_CLONE` environment variable. That is a convenience of the scripts, not a requirement of the
