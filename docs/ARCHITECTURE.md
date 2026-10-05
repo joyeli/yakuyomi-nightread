@@ -164,7 +164,8 @@ character (hands or pencils the character model missed, drawn in faint dotted li
 text is brightened only when it touches a text box (tree clumps and marks that only DBNet's text mask caught keep their
 pixels). Rules version 4 adds four things: grey dashed seams left inside painted areas where two light tones meet are filled
 black; handwritten text without a box is brightened when it looks like thick ink strokes; the faint-line ring keeps only 3 px
-around a single line (hands and screentone keep the old 10 px, small faint marks keep 3 px); and on translated pages small
+around a single line (hands and screentone keep the old 10 px, small faint marks keep 3 px; short stubs under 16 px keep 10 px
+and the space between two faint lines stays unpainted); and on translated pages small
 blocks that mostly sit next to the inpaint mask of the translation material are not painted — the inpaint mask is an
 optional input (`NightReadInput.inpaintMask`, research `run_page(inpaint=)`), absent on Japanese pages.
 "Standard" skips this layer.

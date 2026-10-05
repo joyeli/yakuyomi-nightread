@@ -353,8 +353,10 @@ internal object Bleed {
             fun neu(r: Int, tt: Int): Boolean = has(neutral, nw, px(r, tt), py(r, tt))
             var nts = 0
             val ts = IntArray(len)
+            // python 的 m[0:3] 切片在深度不到 3 px 的頁會自己截短；這裡照截（1–2 px 寬或高的小頁原本越界）
+            val edgeRows = min(EDGE_ROWS, depthN)
             for (tt in 0 until len) {
-                for (r in 0 until EDGE_ROWS) {
+                for (r in 0 until edgeRows) {
                     if (lab[at(r, tt)] == id) { ts[nts++] = tt; break }
                 }
             }

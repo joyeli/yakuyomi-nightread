@@ -345,6 +345,8 @@ data class ObjectRuleParams(
      * [pfMargin]，不是線（手、網點、擠在一起的好幾筆）照版本 3 外擴 [pfHalo]；被淡線（閉合後）與交代過的遮罩圍住的小塊
      * （面積 ×1920² ≤ [pfHole] ×clamp(頁高, 960, 3840)²）或只被淡線自己圍住的塊，在版本 3 外圈之內的部分也不塗；碰到版本 3
      * 外圈的淡小記號（細暗線不經線核｜σ2 Canny 在去網點之前、外接框長邊 < [dot]）外擴 [pfMark] 也不塗。結果 ⊆ 版本 3 的外圈。
+     * 交出前複核的修法 c（c362_001 揮手女孩袖口下方的前臂）：外接框長邊 < [pfStub] 的短截不算線、照版本 3 外擴 [pfHalo]；
+     * 兩塊淡線之間（一塊外擴 [pfHalo] ∩ 另一塊外擴 [pfPair]）也不塗。
      * 只在 [personFaint] 開著時有作用。
      */
     val pfShape: Boolean = true,
@@ -354,6 +356,10 @@ data class ObjectRuleParams(
     val pfLinePct: Int = 104,
     /** 淡小記號（P 類：情緒記號、短畫）的保護半徑；0＝不保護（＝合併研究的原樣）。 */
     val pfMark: Int = 3,
+    /** 外接框長邊 < 此 px 的淡線塊（髮梢、從人物伸出來的一小截）不算一條線、照版本 3 外擴 [pfHalo]；0＝不做。 */
+    val pfStub: Int = 16,
+    /** 一塊淡線的版本 3 外圈裡、離別的淡線塊 ≤ 此 px（橢圓外擴）的也不塗（兩塊之間）；0＝不做。 */
+    val pfPair: Int = 20,
     /**
      * 規則版本 4 q2（研究端 NIGHTREAD_OBJ_TXTSTROKE）：四周大多被塗黑、碰不到字框的字塊，像粗墨筆畫的照樣畫亮（手寫字）：
      * 墨（灰階 < [tsInk]）≥ [tsMin] px、灰階 ≤ [tsG] 的過半、輪廓平滑又不細（墨在外接框外補 2 px 0、3×3 方核開再閉，變動的 px

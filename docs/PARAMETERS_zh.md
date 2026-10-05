@@ -781,12 +781,13 @@ q2，沒有字框的手寫字畫亮。四周大多被塗黑、碰不到字框的
 汗滴（細、灰）不像，留原樣。只由這些新畫亮的字引起的描亮邊塗回 BG；有字框的字旁的描亮邊照版本 3（整合時的修法 b）。c362_001 的
 「…」很黑的比例只比 50% 門檻高 1–8 個百分點，已知、接受。
 
-### `OBJ_PFSHAPE` = 1 · `PF_CLOSE` = 10 · `PF_MARGIN` = 3 · `PF_HOLE` = 2500 · `PF_LINE_PCT` = 104 · `PF_MARK` = 3（`NIGHTREAD_OBJ_PFSHAPE`；Kotlin `pfShape`／`pfClose`／`pfMargin`／`pfHole`／`pfLinePct`／`pfMark`）
+### `OBJ_PFSHAPE` = 1 · `PF_CLOSE` = 10 · `PF_MARGIN` = 3 · `PF_HOLE` = 2500 · `PF_LINE_PCT` = 104 · `PF_MARK` = 3 · `PF_STUB` = 16 · `PF_PAIR` = 20（`NIGHTREAD_OBJ_PFSHAPE`；Kotlin `pfShape`／`pfClose`／`pfMargin`／`pfHole`／`pfLinePct`／`pfMark`／`pfStub`／`pfPair`）
 q3，人物旁淡線外圈貼線形。長到的淡線逐個 8 連通塊，在外接框外擴 11 的窗裡橢圓閉合半徑 10：閉合後面積 ×100 ≤ 原面積 ×104＝一條線，
 只留 3 像素；不是線（手、網點、好幾筆擠在一起）照版本 3 留 10 像素。（淡線閉合半徑 10 ∪ 交代過）的補集 8 連通分塊，碰到閉合後的線、
 又小（面積 ×1920² ≤ 2500 ×clamp(頁高, 960, 3840)²）或不碰交代過的，在版本 3 外圈之內也不塗（手心、指縫）。碰到版本 3 外圈的淡小記號
-（細暗線不經線核｜σ2 Canny，去網點之前、扣 X⊕3，外接框長邊 < 10）也留 3 像素，情緒記號、短畫留灰（整合時的修法 a）。結果一定在
-版本 3 的外圈之內。
+（細暗線不經線核｜σ2 Canny，去網點之前、扣 X⊕3，外接框長邊 < 10）也留 3 像素，情緒記號、短畫留灰（整合時的修法 a）。交出前
+複核的修法 c（c362_001 揮手女孩袖口下方的前臂）：外接框長邊 < 16 的淡線塊（髮梢、從人物伸出來的一小截，看不出是不是線）照版本 3
+留 10 像素；一塊的版本 3 外圈裡、離別的淡線塊 ≤ 20 像素（橢圓外擴）的也不塗（兩條淡線之間）。結果一定在版本 3 的外圈之內。
 
 ### `OBJ_INPAINT` = 1 · `ISLAND_INP_D` = 6 · `ISLAND_INP_PCT` = 30（`NIGHTREAD_OBJ_INPAINT`；Kotlin `inpaintIslands`／`islandInpD`／`islandInpPct`）
 q4，譯後頁：小塊（< 整頁 1.5%）有 ≥ 30% 的像素在去字遮罩外擴 6 像素內就不塗——那是日文字去字後才出現的乾淨白（c362_014 泡與譯文

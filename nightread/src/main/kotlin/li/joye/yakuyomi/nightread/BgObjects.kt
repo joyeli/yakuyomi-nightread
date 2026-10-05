@@ -84,6 +84,11 @@ internal object BgObjects {
     private fun unpack(b: LongArray, w: Int, h: Int): Mask = Mask(w, h, BooleanArray(w * h) { has(b, it) })
     private fun dil(m: Mask, r: Int): Mask = if (r <= 0) m.copy() else Cv.dilatePacked(m, Cv.ellipse(2 * r + 1))
 
+    /** 像素索引 → 是／否（[pfShape] 的淡記號候選）。用 fun interface 不用 `(Int) -> Boolean`：後者每次呼叫都把 Int 裝箱。 */
+    private fun interface PixelTest {
+        fun test(i: Int): Boolean
+    }
+
     /** 連通塊外接框長邊 ≥ [mind] 的留下（網點：長邊 < [mind] 的小點／小環）。 */
     private fun noDots(m: Mask, mind: Int): Mask {
         val cc = Cv.ccStats(m, 8)
@@ -262,7 +267,7 @@ internal object BgObjects {
                 if (p.pfShape) {
                     // 淡小記號（細暗線不經線核｜σ2 Canny 在去網點之前、扣 X3）：碰到版本 3 外圈、外接框長邊 < dot 的也留 pfMark
                     val cr = canRawB
-                    pfShape(gf, xB, if (cr != null) { i: Int -> (bhOn.data[i] || has(cr, i)) && !x3.data[i] } else null, p,
+                    pfShape(gf, xB, if (cr != null) PixelTest { i -> (bhOn.data[i] || has(cr, i)) && !x3.data[i] } else null, p,
                         if (keepDiag) diag else null)
                 } else {
                     Ring.packBits(dil(gf, p.pfHalo))
@@ -376,7 +381,10 @@ internal object BgObjects {
      * 規則版本 4 的淡線外圈（研究端 `_pf_shape`；[ObjectRuleParams.pfShape]）：[gf]＝長到的淡線（已外擴 pfBridge）。回傳外圈
      * （1 bit/px），⊆ 版本 3 的外圈 dil(gf, pfHalo)。
      * - 逐個 8 連通塊（BFS）看是不是一條線：塊在外接框外擴 max(pfClose, pfHalo)＋1 的窗裡橢圓閉合 pfClose（窗外照 cv2 的
-     *   侵蝕邊界當前景），閉合後面積 ×100 ≤ 原面積 ×pfLinePct ＝線，外擴 pfMargin；不是線外擴 pfHalo。
+     *   侵蝕邊界當前景），閉合後面積 ×100 ≤ 原面積 ×pfLinePct ＝線，外擴 pfMargin；不是線外擴 pfHalo。外接框長邊 < pfStub 的短截
+     *   不算線（不必閉合）、外擴 pfHalo（修法 c）。
+     * - 兩塊之間（修法 c）：每塊在外接框外擴 pfHalo＋pfPair＋1 的窗裡，「塊外擴 pfHalo ∩ 窗裡別的塊（gf ∖ 這塊）外擴 pfPair」也不塗
+     *   （窗外的塊碰不到，與整頁算逐像素相同）。
      * - 洞：gf 整體在外接框外擴 2·pfClose＋1 的窗裡閉合（＝整頁閉合）成 Gc；「Gc ∪ 交代過」的補集（8 連通，研究端的
      *   connectedComponentsWithStats(free, 4) 其實是 8 連通：第二個位置參數是 labels）裡碰到 Gc⊕3×3 的塊，
      *   面積 ×1920² ≤ pfHole ×clamp(頁高, 960, 3840)² 或不碰「交代過⊕3×3」的，∩ 版本 3 外圈也不塗。從碰到 Gc⊕3×3 的像素逐塊
@@ -387,7 +395,7 @@ internal object BgObjects {
      * `obj_pf_holes`（加洞之後）、`obj_X`（交代過）。
      */
     private fun pfShape(
-        gf: Mask, xB: LongArray, mark: ((Int) -> Boolean)?, p: ObjectRuleParams, diag: MutableMap<String, Any>? = null,
+        gf: Mask, xB: LongArray, mark: PixelTest?, p: ObjectRuleParams, diag: MutableMap<String, Any>? = null,
     ): LongArray {
         val w = gf.w
         val h = gf.h
@@ -427,12 +435,38 @@ internal object BgObjects {
             val sw = x1 - x0
             val c = Mask(sw, y1 - y0)
             for (k in 0 until qe) { val i = q[k]; c.data[(i / w - y0) * sw + i % w - x0] = true }
-            val ca = if (pc > 0) Cv.closePacked(c, kc).count() else qe
-            val r = if (100L * ca <= p.pfLinePct.toLong() * qe) p.pfMargin else p.pfHalo
+            val r = if (max(bx1 - bx0 + 1, by1 - by0 + 1) < p.pfStub) {
+                p.pfHalo                                   // 短截：不算線（修法 c）
+            } else {
+                val ca = if (pc > 0) Cv.closePacked(c, kc).count() else qe
+                if (100L * ca <= p.pfLinePct.toLong() * qe) p.pfMargin else p.pfHalo
+            }
             val d = dil(c, r)
             for (yy in y0 until y1) {
                 val b = (yy - y0) * sw - x0
                 for (xx in x0 until x1) if (d.data[b + xx]) out.data[yy * w + xx] = true
+            }
+            if (p.pfPair > 0) {
+                // 兩塊之間（修法 c）：這塊外擴 pfHalo ∩ 窗裡別的塊（gf ∖ 這塊）外擴 pfPair
+                val pq = p.pfHalo + p.pfPair + 1
+                val rx0 = max(0, bx0 - pq); val ry0 = max(0, by0 - pq); val rx1 = min(w, bx1 + 1 + pq); val ry1 = min(h, by1 + 1 + pq)
+                val rw = rx1 - rx0
+                val rc = Mask(rw, ry1 - ry0)
+                for (k in 0 until qe) { val i = q[k]; rc.data[(i / w - ry0) * rw + i % w - rx0] = true }
+                val ro = Mask(rw, ry1 - ry0)
+                var anyO = false
+                for (yy in ry0 until ry1) {
+                    val b = (yy - ry0) * rw - rx0
+                    for (xx in rx0 until rx1) if (gf.data[yy * w + xx] && !rc.data[b + xx]) { ro.data[b + xx] = true; anyO = true }
+                }
+                if (anyO) {
+                    val dc = dil(rc, p.pfHalo)
+                    val dO = dil(ro, p.pfPair)
+                    for (yy in ry0 until ry1) {
+                        val b = (yy - ry0) * rw - rx0
+                        for (xx in rx0 until rx1) if (dc.data[b + xx] && dO.data[b + xx]) out.data[yy * w + xx] = true
+                    }
+                }
             }
         }
         if (gx1 < 0) return Ring.packBits(out)
@@ -527,7 +561,7 @@ internal object BgObjects {
             val seenM = LongArray((n + 63) ushr 6)
             for (sy in max(0, gy0 - p.pfHalo)..min(h - 1, gy1 + p.pfHalo)) for (sx in max(0, gx0 - p.pfHalo)..min(w - 1, gx1 + p.pfHalo)) {
                 val s0 = sy * w + sx
-                if (!old.data[s0] || Ring.has(seenM, s0) || !mark(s0)) continue
+                if (!old.data[s0] || Ring.has(seenM, s0) || !mark.test(s0)) continue
                 var qe = 0
                 q[qe++] = s0
                 Ring.set(seenM, s0)
@@ -540,7 +574,7 @@ internal object BgObjects {
                     if (x < bx0) bx0 = x; if (x > bx1) bx1 = x; if (y < by0) by0 = y; if (y > by1) by1 = y
                     for (yy in max(0, y - 1)..min(h - 1, y + 1)) for (xx in max(0, x - 1)..min(w - 1, x + 1)) {
                         val j = yy * w + xx
-                        if (!Ring.has(seenM, j) && mark(j)) {
+                        if (!Ring.has(seenM, j) && mark.test(j)) {
                             Ring.set(seenM, j)
                             if (qe == q.size) q = q.copyOf(q.size * 2)
                             q[qe++] = j

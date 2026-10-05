@@ -239,7 +239,8 @@ on ch34_010 and ch34_015, the page-level measurements (sparkles, effect ink, ter
 faint lines next to a character included), the veto,
 the light-background fill and the effect-line regions must match the research side pixel for pixel (bit for bit); the
 synthetic page syn_v4 (with an inpaint mask) does the same for the four rules-version-4 additions (seam fill, handwritten text,
-the line-shaped faint-line ring with small faint marks, small blocks next to the inpaint mask).
+the line-shaped faint-line ring with small faint marks, short stubs and the space between two faint lines, small blocks next
+to the inpaint mask).
 
 Character ring thinning (`ring`, on by default and in both product levels; `NIGHTREAD_RING` on the research side):
 only where a drawn outline separates the background from the figure does the already-black background grow up to
@@ -252,7 +253,8 @@ white the sticker layer painted between objects goes back to its "Standard" look
 (white or light tone) is blackened, except a ring around faint lines next to a character (hands the character model
 missed); painted-around text is brightened only when it touches a text box. Rules version 4 (switches `seam`,
 `textStroke`, `pfShape`, `inpaintIslands`) fills grey dashed seams, brightens box-less handwritten text that looks like thick
-ink, keeps only 3 px of ring around a single faint line, and leaves small blocks next to the translation's inpaint mask
+ink, keeps only 3 px of ring around a single faint line (short stubs and the space between two faint lines keep the old
+ring), and leaves small blocks next to the translation's inpaint mask
 (`NightReadInput.inpaintMask`) unpainted. "Standard" is unaffected. Rules and numbers: *"More" background-object rule* in
 `docs/PARAMETERS.md` and `docs/DECISIONS.md`.
 

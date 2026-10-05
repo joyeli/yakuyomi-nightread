@@ -42,8 +42,9 @@ class RulesVersionGuardTest {
         // 2026-10-04 交出
         3 to "4aa60a1bb49a7c0a46380e1ca4140ed801a66a06fe3f701e1c433eccc3c446a7",
         // 4：「更多」灰虛線補黑、沒有字框的手寫字畫亮、淡線外圈貼線形（含淡小記號留灰）、譯後頁去字區旁的小塊不塗（2026-10-05
-        // 使用者決定 q1–q4）。只動更多、標準不變；公開 11 頁一個像素都沒變，七頁的摘要不變，這版起加合成頁 syn_v4（八頁）。還沒交出
-        4 to "34c6580f73595efe0fb319d14ef40b4dba3cb2ddf5f53f2572064d2fb8177161",
+        // 使用者決定 q1–q4）＋交出前複核的修法 c（淡線短截照版本 3、兩塊淡線之間不塗：c362_001 前臂）。只動更多、標準不變；
+        // 公開 11 頁一個像素都沒變，前六頁的摘要不變；syn_more 因修法 c 變了；這版起加合成頁 syn_v4（八頁）
+        4 to "31f2ed4d88e7d85fc8314e958ff2c6483d85d884427115f24c12efa196b32e85",
     )
 
     /**
@@ -128,7 +129,8 @@ class RulesVersionGuardTest {
 
     /**
      * 規則版本 4 的四條各自關掉（研究端開關 NIGHTREAD_OBJ_SEAM／_TXTSTROKE／_PFSHAPE／_INPAINT），合成頁的成品摘要都要變——
-     * 公開 fixture 動不到它們，守門只靠合成頁。修法 a（淡小記號留灰，pfMark＝0）也守。
+     * 公開 fixture 動不到它們，守門只靠合成頁。修法 a（淡小記號留灰，pfMark＝0）、q2 的描亮邊清理（tsBandClean）、修法 c（短截
+     * pfStub＝0、兩塊之間 pfPair＝0）也守。修法 b（只清新畫亮的字旁）守不到：字壓背景、有字框的字走泡的路徑，合成頁做不出來。
      */
     @Test
     fun eachVersion4RuleChangesTheDigest() {
@@ -140,6 +142,9 @@ class RulesVersionGuardTest {
             "pfShape（q3 淡線外圈貼線形）" to base.copy(obj = base.obj.copy(pfShape = false)),
             "inpaintIslands（q4 去字區旁的小塊）" to base.copy(obj = base.obj.copy(inpaintIslands = false)),
             "pfMark（修法 a 淡小記號留灰）" to base.copy(obj = base.obj.copy(pfMark = 0)),
+            "tsBandClean（q2 新畫亮的字旁的描亮邊清回 BG）" to base.copy(obj = base.obj.copy(tsBandClean = false)),
+            "pfStub（修法 c 短截照版本 3）" to base.copy(obj = base.obj.copy(pfStub = 0)),
+            "pfPair（修法 c 兩塊淡線之間不塗）" to base.copy(obj = base.obj.copy(pfPair = 0)),
         )
         for ((name, p) in switches) {
             val changed = synPages.filter { pageDigest(it, p) != on[it] }

@@ -5,10 +5,10 @@
 syn_more 只動得到前一條半（補黑 49 px、外圈 1,337 px），版本守門抓不到其他條的改動。這頁是畫出來的（不含任何真實作品），
 一頁同時用到四條，外加兩個修法（淡小記號留灰、只清新畫亮的字旁的描亮邊）：
   - 大格：淺灰底（228）上一個較暗的圓形光影（202，加 ±1 固定亂數紋後仍 ≥ 200；交界被 σ4 Canny 當成調子邊 ⇒ 塗黑區在交界留一圈灰虛線：縫補黑）；
-  - 大格裡一組粗黑手寫數字「44」（字遮罩有、字框沒有：像粗墨筆畫 ⇒ 畫亮）；旁邊另一組有字框的字（版本 3 本來就畫亮，
-    它旁邊的描亮邊照版本 3 不動）；
+  - 大格裡一組粗黑手寫數字「44」（字遮罩有、字框沒有：像粗墨筆畫 ⇒ 畫亮；字遮罩比墨細一圈 ⇒ 字旁有描亮邊、被清回 BG）；
+    旁邊另一組有字框的字（版本 3 本來就畫亮；字壓背景的字走泡的路徑，只清新畫亮的字這個限制在這頁動不到）；
   - 「人物」＝橢圓（人物遮罩＝填滿，輪廓墨線），右緣伸出一條淡的單線（一條線：外圈只留 3 px），線旁一顆淡小點（P 類記號：
-    留 3 px）；
+    留 3 px）；下緣伸出一長一短兩條淡線（交出前複核的修法 c：短截照版本 3、兩條之間不塗）；
   - 小格（< 1.5% 頁面、比大格暗一階）：左半是去字遮罩（syn_v4_inpaint.png；譯後頁的 `.yakuyomi/<頁>.mask.png`）⇒ 這一小塊不塗。
 輸出：
   nightread/src/test/resources/page/syn_v4_{gray,chroma,seg,char,inpaint}.png、syn_v4_regions.txt
@@ -43,7 +43,8 @@ def page():
     txt = np.zeros((H, W), np.uint8)
     cv2.putText(txt, "44", (560, 330), cv2.FONT_HERSHEY_SIMPLEX, 3.2, 255, 13, lineType=cv2.LINE_AA)
     g = np.where(txt > 0, np.minimum(g, (228 - (txt.astype(np.int32) * 216) // 255)).astype(np.uint8), g)
-    seg |= (cv2.dilate((txt > 127).astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))) > 0).astype(np.uint8)
+    # 字遮罩比墨細一圈（同下面有字框的字）：墨的灰邊落在字遮罩外 ⇒ 畫亮後字旁有只由它引起的描亮邊，`tsBandClean` 守得到
+    seg |= (cv2.erode((txt > 127).astype(np.uint8), np.ones((3, 3), np.uint8)) > 0).astype(np.uint8)
     # 有字框的字（版本 3 本來就畫亮）
     t2 = np.zeros((H, W), np.uint8)
     cv2.putText(t2, "OK", (600, 520), cv2.FONT_HERSHEY_SIMPLEX, 2.4, 255, 9, lineType=cv2.LINE_AA)
@@ -58,6 +59,10 @@ def page():
     cv2.ellipse(g, (260, 700), (110, 150), 0, 0, 360, 30, 3, lineType=cv2.LINE_AA)
     cv2.line(g, (368, 690), (430, 640), 140, 2, lineType=cv2.LINE_AA)
     cv2.rectangle(g, (412, 666), (414, 668), 150, -1)
+    # 下緣伸出兩條淡線（交出前複核的修法 c：袖子左緣線與髮梢之間的前臂）：左邊一條長的（一條線）、右邊一小截（短截不算線，
+    # 照版本 3 外擴 10），兩條相距約 20 px ⇒ 中間那段（一塊的版本 3 外圈 ∩ 另一塊外擴 PF_PAIR）不塗
+    cv2.line(g, (240, 846), (234, 884), 140, 2, lineType=cv2.LINE_AA)
+    cv2.line(g, (264, 848), (265, 860), 140, 2, lineType=cv2.LINE_AA)
     # 格框線
     cv2.rectangle(g, (ax0, ay0), (ax1, ay1), 0, 3)
     # 小格（< 1.5% 頁面；橫的框線夠長才認得是格框線）：淺灰底，左半是去字區

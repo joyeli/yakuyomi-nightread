@@ -44,7 +44,9 @@ research/out/v4_integrate/，都 gitignore。只動「更多」，「標準」�
      鋸齒）、星形與汗滴（細、灰）不像，留原樣。這些新畫亮的字旁、只由它們的墨引起的描亮邊塗回 BG（TS_BANDCLEAN；有字框的字旁
      照版本 3 不動——整合時的修法 b：合併研究原本對所有畫亮的字都清，TS_BANDCLEAN_ALL=1 可重現）。
   q3 人物旁淡線外圈貼線形（OBJ_PFSHAPE；_pf_shape）：長到的淡線逐塊看是不是「一條線」（橢圓閉合 PF_CLOSE 後面積 ×100 ≤ 原面積
-     ×PF_LINE_PCT），線只外擴 PF_MARGIN，不是線（手、網點、擠在一起的好幾筆）照版本 3 外擴 PF_HALO；被淡線（閉合後）與 X 圍住的
+     ×PF_LINE_PCT），線只外擴 PF_MARGIN，不是線（手、網點、擠在一起的好幾筆）照版本 3 外擴 PF_HALO；外接框長邊 < PF_STUB 的短截
+     （髮梢、從人物伸出來的一小截線：看不出是不是線）也照版本 3（交出前複核的修法 c）；兩塊淡線之間（一塊的版本 3 外圈 ∩ 另一塊
+     外擴 PF_PAIR）也不塗（修法 c：c362_001 揮手女孩袖口下方，袖子左緣線與髮絲之間的前臂）；被淡線（閉合後）與 X 圍住的
      小塊（面積 ≤ PF_HOLE ×sH²）或只被淡線自己圍住的塊，在版本 3 外圈之內的部分也不塗；碰到版本 3 外圈的淡小記號（細暗線不經
      線核｜σ2 Canny 在去網點之前、扣 X3，外接框長邊 < DOT）外擴 PF_MARK 也不塗（整合時的修法 a：縮 0.9 的情緒記號、短畫留灰；
      PF_MARK=0 可重現合併研究）。結果 ⊆ 版本 3 的外圈。
@@ -158,6 +160,8 @@ PF_MARGIN = int(os.environ.get("NIGHTREAD_PF_MARGIN", "3"))    # 閉合後的線
 PF_HOLE = int(os.environ.get("NIGHTREAD_PF_HOLE", "2500"))     # 被（閉合後的線 ∪ X）圍住、碰到線的塊 ≤ 此 px（×sH²）：整塊不塗（手心、指間）
 PF_LINE_PCT = int(os.environ.get("NIGHTREAD_PF_LINE_PCT", "104"))  # 塊閉合後面積 ≤ 原面積 ×此 % ＝一條線（外圈只貼線）
 PF_MARK = int(os.environ.get("NIGHTREAD_PF_MARK", "3"))        # 碰到版本 3 外圈的淡小記號（外接框長邊 < DOT）再橢圓外擴此 px 也不塗（0＝不做）
+PF_STUB = int(os.environ.get("NIGHTREAD_PF_STUB", "16"))       # 外接框長邊 < 此 px 的塊不算一條線、照版本 3 外擴 PF_HALO（髮梢、伸出人物的一小截；0＝不做）
+PF_PAIR = int(os.environ.get("NIGHTREAD_PF_PAIR", "20"))       # 一塊的版本 3 外圈裡、離別的淡線塊 ≤ 此 px（橢圓外擴）的也不塗＝兩塊之間（0＝不做）
 
 # ── 沒有字框的手寫字（規則版本 4 q2，OBJ_TXTSTROKE）──
 TS_INK = 128            # 字塊裡的墨＝原圖灰階 < 此
@@ -497,7 +501,11 @@ def _pf_shape(Gf, X, marks=None):
     """規則版本 4 的淡線外圈（OBJ_PFSHAPE；結果 ⊆ 版本 3 的外圈 dil(Gf, PF_HALO)）。Gf＝長到的淡線（已外擴 PF_BRIDGE）。
     逐個 8 連通塊看是不是「一條線」：塊在自己的外接框外擴 max(PF_CLOSE, PF_HALO)＋1 的窗裡橢圓閉合 PF_CLOSE（窗外照 cv2 侵蝕的邊界
     當前景；Kotlin 用同一個窗），閉合後面積 ×100 ≤ 原面積 ×PF_LINE_PCT（單一條線、點、短畫幾乎不增；手、網點、好幾筆擠在一起的會增）。
-      線：外圈＝塊橢圓外擴 PF_MARGIN（貼著線）；不是線：照版本 3 外擴 PF_HALO（圓滑的圈）。
+      線：外圈＝塊橢圓外擴 PF_MARGIN（貼著線）；不是線：照版本 3 外擴 PF_HALO（圓滑的圈）。外接框長邊 < PF_STUB 的塊（短截：
+      點、髮梢、從人物伸出來的一小截線，閉合判準對它沒有意義）不算線、照版本 3（修法 c）。
+    兩塊之間（修法 c）：每塊在外接框外擴 PF_HALO＋PF_PAIR＋1 的窗裡，「塊外擴 PF_HALO ∩ 窗裡別的塊外擴 PF_PAIR」也不塗（兩條淡線
+    相距 ≤ PF_HALO＋PF_PAIR 時，夾在中間的那一段＝版本 3 兩個外圈之間；窗外的塊離塊外擴 PF_HALO 超過 PF_PAIR，碰不到，與整頁
+    算逐像素相同）。
     另外，「Gf 整體橢圓閉合 PF_CLOSE ∪ X」的補集（8 連通）裡碰到閉合後的線（3×3 外擴 1）的塊，面積 ×1920² ≤ PF_HOLE ×clamp(頁高, 960, 3840)²（＝PF_HOLE ×sH²；兩條手指線、
     泡與袖口圍住的手心）或不碰 X（3×3 外擴 1；只被淡線自己圍住＝封閉輪廓的內部，不論大小），在版本 3 外圈之內的部分也不塗。
     [marks]＝淡記號候選（細暗線不經線核｜σ2 Canny、去網點之前，扣 X3）：8 連通塊外接框長邊 < DOT（＝去網點丟掉的那些點、短畫）
@@ -512,9 +520,20 @@ def _pf_shape(Gf, X, marks=None):
         p_ = max(pc, PF_HALO) + 1
         y0, y1, x0, x1 = max(0, y - p_), min(H, y + h + p_), max(0, x - p_), min(W, x + w + p_)
         C = lb[y0:y1, x0:x1] == i
-        ca = int((cv2.morphologyEx(C.astype(np.uint8), cv2.MORPH_CLOSE, ell(pc)) > 0).sum()) if pc > 0 else a
-        r = PF_MARGIN if 100 * ca <= PF_LINE_PCT * a else PF_HALO
+        if max(w, h) < PF_STUB:
+            r = PF_HALO                                 # 短截：不算線（修法 c）
+        else:
+            ca = int((cv2.morphologyEx(C.astype(np.uint8), cv2.MORPH_CLOSE, ell(pc)) > 0).sum()) if pc > 0 else a
+            r = PF_MARGIN if 100 * ca <= PF_LINE_PCT * a else PF_HALO
         out[y0:y1, x0:x1] |= dil(C, r)
+        if PF_PAIR > 0:
+            # 兩塊之間（修法 c）：這塊的版本 3 外圈裡、離窗裡別的塊 ≤ PF_PAIR 的像素
+            q_ = PF_HALO + PF_PAIR + 1
+            ry0, ry1, rx0, rx1 = max(0, y - q_), min(H, y + h + q_), max(0, x - q_), min(W, x + w + q_)
+            L = lb[ry0:ry1, rx0:rx1]
+            Ot = (L > 0) & (L != i)
+            if Ot.any():
+                out[ry0:ry1, rx0:rx1] |= dil(L == i, PF_HALO) & dil(Ot, PF_PAIR)
     if PF_HOLE > 0:
         # 閉合只在 Gf 外接框外擴 2×PF_CLOSE＋1 的窗裡算：窗內離 Gf ≤ PF_CLOSE 的像素，侵蝕看的鄰居都還在窗內，所以與整頁閉合
         # 逐像素相同（窗碰到頁緣的那邊照整頁的邊界規則）；補集的標號照樣整頁（塊要量整塊面積）

@@ -180,14 +180,14 @@ val charMask = Mask(w, h, BooleanArray(w * h) { a[it] || b[it] })
 `BgObjectsParityTest` 守「更多」背景物件規則（`obj`／`BgObjects.kt`，研究端 `nightread_obj.py`）：整數高斯、Canny、中值、chamfer、
 二次曲面殘差這些原語、效果線（`EffectLines.kt`，研究端 `nightread_fx.py`）的細化與直分支，與 ch34_010、ch34_015 兩頁的整頁量測
 （含閃光、效果墨、地盤、成員線）、否決、亮背景區塗黑、效果線區都與研究端逐像素（逐位元）相同；合成頁 syn_v4（帶去字遮罩）守規則
-版本 4 的四項（補縫、手寫字、淡線外圈貼線形與淡小記號、去字區旁的小塊）。
+版本 4 的四項（補縫、手寫字、淡線外圈貼線形與淡小記號、短截與兩條淡線之間、去字區旁的小塊）。
 
 人物外灰圈收細（`ring`，預設開、兩檔都套；研究端 `NIGHTREAD_RING`）：只在有畫出來的輪廓線把背景跟人物隔開的地方，讓已經塗黑的
 背景長到輪廓線，其餘維持原本那圈灰。規則與數字見 `docs/PARAMETERS_zh.md`「人物外灰圈收細」與 `docs/DECISIONS.md`。
 
 「更多」背景物件規則（`obj`，預設開、只在開了 `more` 的檔生效＝產品「更多」；研究端 `NIGHTREAD_OBJ`）：「更多」的背景塗黑看有沒有
 物件——貼紙多塗、夾在物件之間的白還原成「標準」的樣子，無物件的亮背景（白或淺色調）塗黑。規則版本 4（開關 `seam`、`textStroke`、
-`pfShape`、`inpaintIslands`）：灰虛線補黑、沒有字框但像粗墨筆畫的手寫字畫亮、一條淡線只留 3 像素外圈、譯文去字遮罩
+`pfShape`、`inpaintIslands`）：灰虛線補黑、沒有字框但像粗墨筆畫的手寫字畫亮、一條淡線只留 3 像素外圈（短截與兩條淡線之間照舊）、譯文去字遮罩
 （`NightReadInput.inpaintMask`）旁的小塊不塗。「標準」不受影響。規則與數字見
 `docs/PARAMETERS_zh.md`「「更多」背景物件規則」與 `docs/DECISIONS.md`。
 

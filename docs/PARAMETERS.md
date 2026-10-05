@@ -1056,7 +1056,7 @@ and keep their pixels. The highlight band that only these newly brightened strok
 text that has a box stays as in version 3 (integration fix b). The「…」on c362_001 sits only 1–8 percentage points above the
 50% very-dark share — known and accepted.
 
-### `OBJ_PFSHAPE` = 1 · `PF_CLOSE` = 10 · `PF_MARGIN` = 3 · `PF_HOLE` = 2500 · `PF_LINE_PCT` = 104 · `PF_MARK` = 3 (`NIGHTREAD_OBJ_PFSHAPE`; Kotlin `pfShape` / `pfClose` / `pfMargin` / `pfHole` / `pfLinePct` / `pfMark`)
+### `OBJ_PFSHAPE` = 1 · `PF_CLOSE` = 10 · `PF_MARGIN` = 3 · `PF_HOLE` = 2500 · `PF_LINE_PCT` = 104 · `PF_MARK` = 3 · `PF_STUB` = 16 · `PF_PAIR` = 20 (`NIGHTREAD_OBJ_PFSHAPE`; Kotlin `pfShape` / `pfClose` / `pfMargin` / `pfHole` / `pfLinePct` / `pfMark` / `pfStub` / `pfPair`)
 q3, the faint-line ring next to a character follows the line. Each 8-connected component of the grown faint ink is closed with an
 ellipse of radius 10 inside its bounding box padded by 11; if the closed area × 100 ≤ the area × 104 it is a single line and keeps
 only a 3 px margin, otherwise (hands, screentone, several strokes bunched together) it keeps the version-3 ring of 10 px. Blocks
@@ -1064,7 +1064,11 @@ of the complement of (faint ink closed with radius 10 ∪ explained mask), 8-con
 (area × 1920² ≤ 2500 × clamp(page height, 960, 3840)²) or do not touch the explained mask are also kept inside the version-3
 ring (palms, the gaps between fingers). Faint small marks — thin dark ink before the line kernel or σ2 Canny, before the dot
 filter, minus X⊕3, bounding-box long side < 10 — that touch the version-3 ring keep a 3 px margin too, so emotion marks and short
-strokes stay grey (integration fix a). The result is always inside the version-3 ring.
+strokes stay grey (integration fix a). Pre-delivery review fix c (the forearm under the waving girl's cuff on c362_001): a
+faint-ink component whose bounding-box long side is under 16 px (a hair tip, a short stub sticking out of a character — too short
+to tell whether it is a line) keeps the version-3 ring of 10 px, and inside one component's version-3 ring, pixels within 20 px
+(ellipse dilation) of another faint-ink component are not painted either (the space between two faint lines). The result is
+always inside the version-3 ring.
 
 ### `OBJ_INPAINT` = 1 · `ISLAND_INP_D` = 6 · `ISLAND_INP_PCT` = 30 (`NIGHTREAD_OBJ_INPAINT`; Kotlin `inpaintIslands` / `islandInpD` / `islandInpPct`)
 q4, translated pages: a small painted block (under 1.5% of the page) with at least 30% of its pixels within 6 px of the inpaint
