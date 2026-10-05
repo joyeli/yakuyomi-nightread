@@ -43,7 +43,7 @@ class RulesVersionGuardTest {
         3 to "4aa60a1bb49a7c0a46380e1ca4140ed801a66a06fe3f701e1c433eccc3c446a7",
         // 4：「更多」灰虛線補黑、沒有字框的手寫字畫亮、淡線外圈貼線形（含淡小記號留灰）、譯後頁去字區旁的小塊不塗（2026-10-05
         // 使用者決定 q1–q4）＋交出前複核的修法 c（淡線短截照版本 3、兩塊淡線之間不塗：c362_001 前臂）。只動更多、標準不變；
-        // 公開 11 頁一個像素都沒變，前六頁的摘要不變；syn_more 因修法 c 變了；這版起加合成頁 syn_v4（八頁）
+        // 公開 11 頁一個像素都沒變，前六頁的摘要不變；syn_more 因修法 c 變了；這版起加合成頁 syn_v4（八頁）。2026-10-06 交出
         4 to "31f2ed4d88e7d85fc8314e958ff2c6483d85d884427115f24c12efa196b32e85",
     )
 
@@ -55,6 +55,7 @@ class RulesVersionGuardTest {
         1 to "852996dcb2d3dc5b0cf674feee343bfce9e3c115e6d3d2a8db014b5f2294bab0",     // 2026-10-03 debug APK
         2 to "78a821623962844b53f7ff4c5f395c5dcc514df659a7ed3ef2293bce6dabbec7",     // 2026-10-03 debug APK（灰圈收細）
         3 to "4aa60a1bb49a7c0a46380e1ca4140ed801a66a06fe3f701e1c433eccc3c446a7",     // 2026-10-04 debug APK（「更多」背景物件規則）
+        4 to "31f2ed4d88e7d85fc8314e958ff2c6483d85d884427115f24c12efa196b32e85",     // 2026-10-06 debug APK（「更多」規則版本 4）
     )
 
     private val pages = listOf("ch34_011", "demo01", "demo02", "demo05", "demo06", "ch34_015", "syn_more", "syn_v4")
