@@ -18,6 +18,8 @@
 二、整頁（resources/page/<頁>_*）：
     ch34_010：同時有亮背景區塗黑（裁定 3 的 A3 白地板）與否決（A4 牆板窄條、A1 牆），也有字幕塊；沒有效果線族。
     ch34_015：有效果線族（裁定 2 A：上排右格頂的集中線塗黑、線留亮），否決（A1 壁燈）走效果線的例外判斷。
+    syn_v4：規則版本 4 的合成頁（make_v4_guard_fixture.py 產的輸入，含去字遮罩 syn_v4_inpaint.png）：灰虛線補黑（obj_seam）、
+      沒有字框的手寫字畫亮、淡線外圈貼線形與淡小記號、去字區旁的小塊不塗。輸入檔不在這裡寫（用那支產的）。
     輸入＝研究端 47 頁 parity 用的同一份（原圖灰階、DBNet 字遮罩、字區、人物遮罩、彩度）；期望＝研究端「更多」
     （MORE=1）跑 run_page 時 nightread_obj 的整頁量測遮罩（含閃光、效果墨、地盤、成員線、人物旁淡線的外圈 phalo）、否決的輸入（extra／std_dark）與
     輸出、亮背景區的輸入（dark）與輸出（fill／band／txt／效果線區 fxpaint），加上逐區特徵（obj_rows.txt，fit 以 repr 存；
@@ -144,9 +146,12 @@ def fx_crop(O, N, ob):
     print("效果線原語 fixture：細化", int(fxm.thin(inkx).sum()), "px、直分支", len(fxm.segments(inkx)), "段")
 
 
-def page(name, PO, N, ob):
-    jobs = {j["name"]: j for j in json.load(open(os.path.join(OUT, "more_and_strip/more/harden/pert/orig/jobs.json")))}
-    j = jobs[name]
+def page(name, PO, N, ob, job=None):
+    if job is None:
+        jobs = {j["name"]: j for j in json.load(open(os.path.join(OUT, "more_and_strip/more/harden/pert/orig/jobs.json")))}
+        j = jobs[name]
+    else:
+        j = job
     bgr = cv2.imread(j["page"], cv2.IMREAD_COLOR)
     g = cv2.imread(j["page"], cv2.IMREAD_GRAYSCALE)
     chroma = (bgr.max(axis=2).astype(np.int16) - bgr.min(axis=2)).clip(0, 255).astype(np.uint8)
@@ -155,13 +160,15 @@ def page(name, PO, N, ob):
     seg = np.load(j["det_npz"])["seg"].astype(bool)
     N.CHARMASK_DIR = j["char_dir"]
     char_raw = N.load_charmask(j["page"], g.shape)
-    cv2.imwrite(os.path.join(PO, f"{name}_gray.png"), g)
-    cv2.imwrite(os.path.join(PO, f"{name}_chroma.png"), chroma, PNG9)
-    cv2.imwrite(os.path.join(PO, f"{name}_seg.png"), seg.astype(np.uint8) * 255, PNG9)
-    cv2.imwrite(os.path.join(PO, f"{name}_char.png"), char_raw.astype(np.uint8) * 255, PNG9)
-    with open(os.path.join(PO, f"{name}_regions.txt"), "w", encoding="utf-8") as f:
-        for r in regions:
-            f.write(" ".join(str(int(v)) for v in r["bbox"]) + "\n")
+    inpaint = cv2.imread(j["inpaint"], cv2.IMREAD_GRAYSCALE) > 127 if j.get("inpaint") else None
+    if job is None:                                     # 合成頁的輸入由產它的那支寫（同一份內容）
+        cv2.imwrite(os.path.join(PO, f"{name}_gray.png"), g)
+        cv2.imwrite(os.path.join(PO, f"{name}_chroma.png"), chroma, PNG9)
+        cv2.imwrite(os.path.join(PO, f"{name}_seg.png"), seg.astype(np.uint8) * 255, PNG9)
+        cv2.imwrite(os.path.join(PO, f"{name}_char.png"), char_raw.astype(np.uint8) * 255, PNG9)
+        with open(os.path.join(PO, f"{name}_regions.txt"), "w", encoding="utf-8") as f:
+            for r in regions:
+                f.write(" ".join(str(int(v)) for v in r["bbox"]) + "\n")
     CAP = {}
     c0, v0, l0 = ob.context, ob.veto_blocks, ob.light_fill
 
@@ -182,7 +189,7 @@ def page(name, PO, N, ob):
     diag = {}
     try:
         with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
-            N.run_page(j["page"], outdir=tmp, regions=regions, seg=seg, diag=diag)
+            N.run_page(j["page"], outdir=tmp, regions=regions, seg=seg, diag=diag, inpaint=inpaint)
     finally:
         ob.context, ob.veto_blocks, ob.light_fill = c0, v0, l0
     c = CAP["ctx"]
@@ -192,7 +199,7 @@ def page(name, PO, N, ob):
                  Ev2=c["Ev2"], longz=c["longz"], X3=c["X3"], extra=CAP["extra"], stddark=CAP["std_dark"],
                  veto=CAP["veto"], dark=CAP["dark"], fill=diag.get("obj_fill", empty), band=diag.get("obj_band", empty),
                  txt=diag.get("obj_txt", empty), spark=c["spark"], fxpaint=diag["obj_fxpaint"],
-                 phalo=c["phalo"] if c.get("phalo") is not None else empty)
+                 phalo=c["phalo"] if c.get("phalo") is not None else empty, seam=diag.get("obj_seam", empty))
     if fx is not None:
         masks.update(fxe=fx["fxe"], fxe_t=fx["fxe_t"], terr=fx["terr"], memline=fx["memline"])
     for k, m in masks.items():
@@ -211,6 +218,7 @@ def page(name, PO, N, ob):
                         f"{r.get('fx_fit', -1.0)!r}\n")
     print(f"{name}：fill {int(masks['fill'].sum())} px、否決 {int(CAP['veto'].sum())} px、描亮邊 {int(masks['band'].sum())} px、"
           f"字 {int(masks['txt'].sum())} px、效果線區 {int(masks['fxpaint'].sum())} px、閃光 {int(masks['spark'].sum())} px、"
+          f"補縫 {int(masks['seam'].sum())} px、外圈 {int(masks['phalo'].sum())} px、"
           f"逐區 {len(diag['obj_rows'])} 區（效果線區判定 {len(fxr)} 區）")
 
 
@@ -228,6 +236,8 @@ def main():
     fx_crop(os.path.join(RES, "obj"), N, ob)
     page("ch34_010", os.path.join(RES, "page"), N, ob)
     page("ch34_015", os.path.join(RES, "page"), N, ob)
+    sg = json.load(open(os.path.join(OUT, "syn_guard", "jobs_v4.json")))[0]
+    page("syn_v4", os.path.join(RES, "page"), N, ob, job=sg)
 
 
 if __name__ == "__main__":

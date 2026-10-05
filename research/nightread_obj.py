@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""nightread_obj.py — 「更多」背景物件規則（2026-10-03 使用者拍板，規則版本 3；只在「更多」MORE_RULE 生效，「標準」逐像素不變）。
+"""nightread_obj.py — 「更多」背景物件規則（2026-10-03 使用者拍板，規則版本 3；版本 4 加 q1–q4，見下；只在「更多」MORE_RULE 生效，「標準」逐像素不變）。
 
 使用者原則：「塗黑不用看白不白，以有沒有物件判斷」。原型 rec（research/out/more_v3，gitignore：PROTO.md／VERIFY.md、
 decide/）＝V1 ＋ 否決門檻 25 ‰ ＋ 拿掉漸層暗端斜坡。兩個機制，都在貼紙層之後、灰圈收細與泡重繪之前：
@@ -34,10 +34,31 @@ decide/）＝V1 ＋ 否決門檻 25 ‰ ＋ 拿掉漸層暗端斜坡。兩個機
      「孤立亮記號多就整區留灰」那條關掉；塗黑區裡的閃光畫成淺灰。另外尺畫的直線（PCA 垂距均方根 ≤ LONG_STRAIGHT）不給長線帶
      （否則核心在長線旁退 40 px、生長只到 37 px，留直角灰缺口）。
 
+規則版本 4（2026-10-05 使用者決定 q1–q4；研究 research/out/more_v4/（blemish、costs、combined、verify2）與整合
+research/out/v4_integrate/，都 gitignore。只動「更多」，「標準」逐像素不變；四條各自的開關全關＝規則版本 3 逐像素相同）：
+  q1 灰虛線補黑（OBJ_SEAM）：兩階光影的交界被 σ4 Canny 當成調子邊，塗黑區在那裡留一條灰虛線 ⇒ 塗黑區閉合（SEAM_R）補得起來、
+     整條沒有細暗線／亮記號／谷（σ2 blackhat > BH_TH）、原圖都 ≥ SEAM_G、不碰閃光外擴 SEAM_SPARK 的細縫補黑（_seam；孤島之後、
+     塗 BG 之前）。
+  q2 沒有字框的手寫字畫亮（OBJ_TXTSTROKE）：四周大多被塗黑、碰不到字框的字塊，像粗墨筆畫的照樣畫亮——墨（灰階 < TS_INK）
+     ≥ TS_MIN px、灰階 ≤ TS_G 的過半、輪廓平滑又不細（3×3 開再閉變動的 px ×100 ≤ 邊界 px ×TS_ROUGH）（_stroke_like）。樹叢（紋理、
+     鋸齒）、星形與汗滴（細、灰）不像，留原樣。這些新畫亮的字旁、只由它們的墨引起的描亮邊塗回 BG（TS_BANDCLEAN；有字框的字旁
+     照版本 3 不動——整合時的修法 b：合併研究原本對所有畫亮的字都清，TS_BANDCLEAN_ALL=1 可重現）。
+  q3 人物旁淡線外圈貼線形（OBJ_PFSHAPE；_pf_shape）：長到的淡線逐塊看是不是「一條線」（橢圓閉合 PF_CLOSE 後面積 ×100 ≤ 原面積
+     ×PF_LINE_PCT），線只外擴 PF_MARGIN，不是線（手、網點、擠在一起的好幾筆）照版本 3 外擴 PF_HALO；被淡線（閉合後）與 X 圍住的
+     小塊（面積 ≤ PF_HOLE ×sH²）或只被淡線自己圍住的塊，在版本 3 外圈之內的部分也不塗；碰到版本 3 外圈的淡小記號（細暗線不經
+     線核｜σ2 Canny 在去網點之前、扣 X3，外接框長邊 < DOT）外擴 PF_MARK 也不塗（整合時的修法 a：縮 0.9 的情緒記號、短畫留灰；
+     PF_MARK=0 可重現合併研究）。結果 ⊆ 版本 3 的外圈。
+  q4 譯後頁去字區旁的小塊不塗（OBJ_INPAINT）：孤島規則加一條，小塊（< ISLAND_MAX）有 ≥ ISLAND_INP_PCT % 在去字遮罩外擴
+     ISLAND_INP_D 內就不塗（c362_014 泡與譯文之間的黑楔＝日文手寫字去字後的乾淨白）。去字遮罩＝翻譯素材 `.yakuyomi/<頁>.mask.png`，
+     run_page／context 的 inpaint；沒傳（日文頁）＝版本 3。
+  沒做（使用者決定）：q5 網點漸層接到暗端（RAMP）、q6 c362_016 點描集中線（FXDASH）——兩支的程式碼沒有搬進來；q7 結構否決結案。
+  版本 4 交出之後「更多」凍結，只修紅線。
+
 開關（預設開；只在 NIGHTREAD_MORE=1 時有作用）：NIGHTREAD_OBJ=0 ＝ 規則版本 2 的「更多」（逐像素相同）；
 NIGHTREAD_OBJ_VETO=0 ／ NIGHTREAD_OBJ_LT=0 只關 V ／ L（消融用）；NIGHTREAD_OBJ_FXA=0 ／ NIGHTREAD_OBJ_FXC=0 只關效果線 A ／
 閃光 C（兩個都關＝效果線之前的規則版本 3，逐像素相同）；NIGHTREAD_OBJ_PF=0 ／ NIGHTREAD_OBJ_TXTREG=0 只關人物旁淡線外圈 ／
-字框條件（兩個都關＝複核收尾之前，逐像素相同）。
+字框條件（兩個都關＝複核收尾之前，逐像素相同）；NIGHTREAD_OBJ_SEAM=0 ／ NIGHTREAD_OBJ_TXTSTROKE=0 ／ NIGHTREAD_OBJ_PFSHAPE=0 ／
+NIGHTREAD_OBJ_INPAINT=0 只關規則版本 4 的 q1–q4（四個都關＝規則版本 3，逐像素相同）。
 """
 import math
 import os
@@ -55,6 +76,11 @@ OBJ_FXA = os.environ.get("NIGHTREAD_OBJ_FXA", "1") == "1"      # 效果線 A（�
 OBJ_FXC = os.environ.get("NIGHTREAD_OBJ_FXC", "1") == "1"      # 閃光 C（裁定 2）
 OBJ_PF = os.environ.get("NIGHTREAD_OBJ_PF", "1") == "1"        # 人物旁的淡線外圈不塗（複核 1：人物模型漏掉的手）
 OBJ_TXTREG = os.environ.get("NIGHTREAD_OBJ_TXTREG", "1") == "1"  # 字畫亮只限有字框的字塊（複核 2：DBNet 誤當字的樹叢）
+# ── 規則版本 4（2026-10-05 使用者拍板 q1–q4；四條各自的開關，全關＝規則版本 3 逐像素相同）──
+OBJ_SEAM = os.environ.get("NIGHTREAD_OBJ_SEAM", "1") == "1"            # q1 塗黑區裡的灰虛線（兩階光影交界）補黑
+OBJ_TXTSTROKE = os.environ.get("NIGHTREAD_OBJ_TXTSTROKE", "1") == "1"  # q2 沒有字框、但像粗墨筆畫的字塊照樣畫亮（手寫字）
+OBJ_PFSHAPE = os.environ.get("NIGHTREAD_OBJ_PFSHAPE", "1") == "1"      # q3 人物旁淡線外圈改貼線形（一條線只留 3 px）
+OBJ_INPAINT = os.environ.get("NIGHTREAD_OBJ_INPAINT", "1") == "1"      # q4 譯後頁：去字區旁的小塊不塗（要產品傳去字遮罩）
 
 # ── V：否決 ──
 VETO_EPM = 25.0         # 超區證據 ‰ 上限（原型 15；VERIFY 改 25：c362_009 男孩背後紙白 21.6、字幕框 21.3 救回，b 類最低 26.7）
@@ -81,6 +107,14 @@ CTX_WHITE = 230
 ISLAND_MAX = 0.015      # 孤島／貼人物檢查只對整頁佔比 < 此的塊
 ISLAND_TOUCH = 12       # 碰黑的距離（px）
 ISLAND_TOUCH_MIN = 20   # 碰黑像素 < 此＝孤島
+ISLAND_INP_D = 6        # 規則版本 4 q4：去字區外擴（px）
+ISLAND_INP_PCT = 30     # 規則版本 4 q4：譯後頁的小塊（< ISLAND_MAX）≥ 此 % 在去字區外擴 ISLAND_INP_D 內 ⇒ 不塗
+SEAM_R = 3              # 規則版本 4 q1 縫補黑：塗黑區閉合半徑（補得起來的縫才補）
+SEAM_SPARK = 4          # 縫補黑：閃光外擴這麼多 px 內碰到的縫整條不補
+SEAM_G = 200            # 縫補黑：縫上原圖灰階下限（兩階光影的交界兩側都亮；畫出來的淡線是谷，另由 blackhat 擋）
+for _k in ("ISLAND_INP_D", "ISLAND_INP_PCT", "SEAM_R", "SEAM_G", "SEAM_SPARK"):
+    if os.environ.get("NIGHTREAD_OBJ_" + _k):                   # 研究用覆寫（產品不吃）
+        globals()[_k] = int(os.environ["NIGHTREAD_OBJ_" + _k])
 HUG_MAX = 0.6           # 外緣貼人物遮罩的比例上限
 LONG_LEN = 80           # 長線（外接框長邊 ≥ 此 px）…
 LONG_R = 40             # …四周此 px 不當核心
@@ -118,6 +152,20 @@ PF_TOUCH = 5            # 淡線（細暗線不經線核｜σ2 Canny，扣 X3）
 PF_BRIDGE = 2           # 淡線橢圓外擴此 px 再連（點狀的淡線斷成一顆顆）
 PF_REACH = 64           # 從起點沿外擴後的淡線最多長幾 px（測地；人物模型漏掉的手、筆離人物不遠）
 PF_HALO = 10            # 長到的淡線（已外擴 PF_BRIDGE）再橢圓外擴此 px：這圈不塗（亮背景區塗黑扣掉）
+# 規則版本 4 q3（OBJ_PFSHAPE）：外圈改成「線本身外擴 PF_MARGIN ∪ 線與線（或線與人物、泡、格框線）圍住的小塊 ∪ 淡小記號外擴 PF_MARK」
+PF_CLOSE = int(os.environ.get("NIGHTREAD_PF_CLOSE", "10"))     # 一條線的判準與圍住的塊都先橢圓閉合此半徑（＝版本 3 外圈半徑：寬 ≤ 20 px 的 U 形、指縫照樣不塗）
+PF_MARGIN = int(os.environ.get("NIGHTREAD_PF_MARGIN", "3"))    # 閉合後的線再橢圓外擴此 px：線旁這圈不塗
+PF_HOLE = int(os.environ.get("NIGHTREAD_PF_HOLE", "2500"))     # 被（閉合後的線 ∪ X）圍住、碰到線的塊 ≤ 此 px（×sH²）：整塊不塗（手心、指間）
+PF_LINE_PCT = int(os.environ.get("NIGHTREAD_PF_LINE_PCT", "104"))  # 塊閉合後面積 ≤ 原面積 ×此 % ＝一條線（外圈只貼線）
+PF_MARK = int(os.environ.get("NIGHTREAD_PF_MARK", "3"))        # 碰到版本 3 外圈的淡小記號（外接框長邊 < DOT）再橢圓外擴此 px 也不塗（0＝不做）
+
+# ── 沒有字框的手寫字（規則版本 4 q2，OBJ_TXTSTROKE）──
+TS_INK = 128            # 字塊裡的墨＝原圖灰階 < 此
+TS_MIN = 5              # 墨 ≥ 此 px 才看
+TS_G = int(os.environ.get("NIGHTREAD_TS_G", "30"))        # 墨多半很黑：灰階 ≤ 此的墨 ×2 > 墨的 px（中位數 ≤ 此；樹叢 38–48、星形與汗滴 75–117）
+TS_BANDCLEAN = os.environ.get("NIGHTREAD_TS_BANDCLEAN", "1") == "1"  # 沒有字框才畫亮的字旁、只由這些字引起的描亮邊塗回 BG
+TS_BANDCLEAN_ALL = os.environ.get("NIGHTREAD_TS_BANDCLEAN_ALL", "0") == "1"  # 研究用：所有畫亮的字都清（＝合併 patch 原樣，驗證用）
+TS_ROUGH = int(os.environ.get("NIGHTREAD_TS_ROUGH", "12"))  # 輪廓平滑：墨做 3×3 開再 3×3 閉，變的 px ×100 ≤ 墨的邊界 px ×此（樹叢 17–33、細線 ≥ 46）
 
 DARK_G = 63             # 「已經黑」＝塗成 BG 的像素 ∪ 原圖灰階 ≤ 此（預設場景曲線 ≤ 40 的上限；與亮度偏好、墨線增亮無關）
 
@@ -332,9 +380,11 @@ def _min_area(m, a):
 
 # ── 整頁量測（與檔位無關）───────────────────────────────────────────────────
 
-def context(g, chroma, charmask, char_raw, bubble, seg, frame, regions):
+def context(g, chroma, charmask, char_raw, bubble, seg, frame, regions, inpaint=None):
     """交代過的遮罩 X、物件證據 E（細暗線｜σ4 Canny｜亮記號，扣 X 外擴 3 與頁緣 6 px、去 < 15 px）、否決證據 Ev2
-    （細暗線不經線核｜σ2 Canny）、調子邊緣、亮度門檻、長線帶、σ2.5 亮度（Q16）。[bubble]＝修剪前的泡（含封縫救回的）。"""
+    （細暗線不經線核｜σ2 Canny）、調子邊緣、亮度門檻、長線帶、σ2.5 亮度（Q16）。[bubble]＝修剪前的泡（含封縫救回的）。
+    [inpaint]＝譯後頁的去字區（翻譯素材的去字遮罩 `.yakuyomi/<頁>.mask.png`，與頁同尺寸的布林；規則版本 4）：存進
+    ctx["inpaint"]，只給孤島規則用；None 或全空＝日文頁、沒有素材的譯後頁（與版本 3 相同）。"""
     H, W = g.shape
     gb2 = gauss_q16(g, 2.0)
     bh = morph_q(gb2, cv2.MORPH_BLACKHAT)
@@ -343,7 +393,8 @@ def context(g, chroma, charmask, char_raw, bubble, seg, frame, regions):
     gb15 = gauss_q16(g, 1.5)
     th = morph_q(gb15, cv2.MORPH_TOPHAT)
     bright = _nodots((th > BRIGHT_TH * Q) & line_mean_gt(th, _OFF11, BRIGHT_LR_NUM * Q, BRIGHT_LR_DEN), 8)
-    can = _nodots(cv2.Canny((gb2 >> 16).astype(np.uint8), CANNY_LO, CANNY_HI) > 0)
+    can_raw = cv2.Canny((gb2 >> 16).astype(np.uint8), CANNY_LO, CANNY_HI) > 0
+    can = _nodots(can_raw)
     del gb2, gb15, th
     can4 = cv2.Canny((gauss_q16(g, 4.0) >> 16).astype(np.uint8), CANNY4_LO, CANNY4_HI) > 0
     sH = min(2.0, max(0.5, H / 1920.0))
@@ -384,9 +435,15 @@ def context(g, chroma, charmask, char_raw, bubble, seg, frame, regions):
         fb = dil(faint, PF_BRIDGE)
         seed = fb & dil(charmask | char_raw, PF_TOUCH)
         if seed.any():
-            phalo = dil(_grow(seed, fb, PF_REACH), PF_HALO)
+            Gf = _grow(seed, fb, PF_REACH)
+            if OBJ_PFSHAPE:
+                # 淡小記號（點、短畫：細暗線不經線核｜σ2 Canny 在去網點之前、外接框長邊 < DOT）不在淡線裡、長不到；外圈收細後
+                # 它們會露出來被塗黑（縮 0.9 的 c371_009 情緒記號、c371_013 短畫）⇒ 碰到版本 3 外圈的照樣留 PF_MARK px
+                phalo = _pf_shape(Gf, X, ((bh_on | can_raw) & ~X3) if PF_MARK > 0 else None)
+            else:
+                phalo = dil(Gf, PF_HALO)
         del fb, seed
-    del faint
+    del faint, can_raw
     n3, lb3, st3, _ = cv2.connectedComponentsWithStats((ink & ~X3).astype(np.uint8), 8)
     lg = np.zeros(n3, bool)
     lg[1:] = np.maximum(st3[1:, cv2.CC_STAT_WIDTH], st3[1:, cv2.CC_STAT_HEIGHT]) >= LONG_LEN
@@ -410,7 +467,91 @@ def context(g, chroma, charmask, char_raw, bubble, seg, frame, regions):
         fx_info = None
     return dict(regions=regions, longz=longz, X=X, X3=X3, E=E, Ev2=Ev2, bright=bright, ink=ink, tone=tone,
                 tone_e=can4, gb25=gb25, light=light, chroma=chroma, seg=seg, frame=frame, charmask=charmask,
-                char_raw=char_raw, bubble=bubble, spark=spark, sH=sH, fx=fx, fx_info=fx_info, phalo=phalo)
+                char_raw=char_raw, bubble=bubble, spark=spark, sH=sH, fx=fx, fx_info=fx_info, phalo=phalo,
+                bh_on=bh_on if OBJ_SEAM else None,
+                inpaint=inpaint if (OBJ_INPAINT and inpaint is not None and inpaint.any()) else None)
+
+
+def _stroke_like(gw, Cw):
+    """字塊（窗 gw 裡的遮罩 Cw）是不是「粗墨筆畫」（規則版本 4）：墨 D＝Cw ∩ 灰階 < TS_INK、≥ TS_MIN px；
+    (1) 多半很黑：#(D ∩ 灰階 ≤ TS_G) ×2 > #D；(2) 輪廓平滑又不細：D（窗外補 0）做 3×3 方核開、再 3×3 方核閉，
+    與 D 不同的 px ×100 ≤ D 的邊界 px（D 扣掉 3×3 侵蝕，窗外算 0）×TS_ROUGH。回傳 (是否, 紀錄)。"""
+    D = Cw & (gw < TS_INK)
+    nD = int(D.sum())
+    if nD < TS_MIN:
+        return False, dict(nD=nD)
+    nk = int((D & (gw <= TS_G)).sum())
+    Du = np.pad(D.astype(np.uint8), 2)
+    k3 = np.ones((3, 3), np.uint8)
+    ero = cv2.erode(Du, k3, borderType=cv2.BORDER_CONSTANT, borderValue=0)
+    per = int((Du & (1 - ero)).sum())
+    op = cv2.dilate(ero, k3, borderType=cv2.BORDER_CONSTANT, borderValue=0)
+    cl = cv2.erode(cv2.dilate(op, k3, borderType=cv2.BORDER_CONSTANT, borderValue=0), k3,
+                   borderType=cv2.BORDER_CONSTANT, borderValue=0)
+    chg = int((cl != Du).sum())
+    ok = 2 * nk > nD and 100 * chg <= TS_ROUGH * per
+    return ok, dict(nD=nD, nk=nk, per=per, chg=chg)
+
+
+def _pf_shape(Gf, X, marks=None):
+    """規則版本 4 的淡線外圈（OBJ_PFSHAPE；結果 ⊆ 版本 3 的外圈 dil(Gf, PF_HALO)）。Gf＝長到的淡線（已外擴 PF_BRIDGE）。
+    逐個 8 連通塊看是不是「一條線」：塊在自己的外接框外擴 max(PF_CLOSE, PF_HALO)＋1 的窗裡橢圓閉合 PF_CLOSE（窗外照 cv2 侵蝕的邊界
+    當前景；Kotlin 用同一個窗），閉合後面積 ×100 ≤ 原面積 ×PF_LINE_PCT（單一條線、點、短畫幾乎不增；手、網點、好幾筆擠在一起的會增）。
+      線：外圈＝塊橢圓外擴 PF_MARGIN（貼著線）；不是線：照版本 3 外擴 PF_HALO（圓滑的圈）。
+    另外，「Gf 整體橢圓閉合 PF_CLOSE ∪ X」的補集（8 連通）裡碰到閉合後的線（3×3 外擴 1）的塊，面積 ×1920² ≤ PF_HOLE ×clamp(頁高, 960, 3840)²（＝PF_HOLE ×sH²；兩條手指線、
+    泡與袖口圍住的手心）或不碰 X（3×3 外擴 1；只被淡線自己圍住＝封閉輪廓的內部，不論大小），在版本 3 外圈之內的部分也不塗。
+    [marks]＝淡記號候選（細暗線不經線核｜σ2 Canny、去網點之前，扣 X3）：8 連通塊外接框長邊 < DOT（＝去網點丟掉的那些點、短畫）
+    且碰到版本 3 外圈的，橢圓外擴 PF_MARK（∩ 版本 3 外圈）也不塗（P 類記號留灰；None＝不做）。"""
+    H, W = Gf.shape
+    out = np.zeros((H, W), bool)
+    old = dil(Gf, PF_HALO)                              # 版本 3 的外圈（結果 ⊆ 它）
+    n, lb, st, _ = cv2.connectedComponentsWithStats(Gf.astype(np.uint8), 8)
+    pc = PF_CLOSE
+    for i in range(1, n):
+        x, y, w, h, a = [int(v) for v in st[i]]
+        p_ = max(pc, PF_HALO) + 1
+        y0, y1, x0, x1 = max(0, y - p_), min(H, y + h + p_), max(0, x - p_), min(W, x + w + p_)
+        C = lb[y0:y1, x0:x1] == i
+        ca = int((cv2.morphologyEx(C.astype(np.uint8), cv2.MORPH_CLOSE, ell(pc)) > 0).sum()) if pc > 0 else a
+        r = PF_MARGIN if 100 * ca <= PF_LINE_PCT * a else PF_HALO
+        out[y0:y1, x0:x1] |= dil(C, r)
+    if PF_HOLE > 0:
+        # 閉合只在 Gf 外接框外擴 2×PF_CLOSE＋1 的窗裡算：窗內離 Gf ≤ PF_CLOSE 的像素，侵蝕看的鄰居都還在窗內，所以與整頁閉合
+        # 逐像素相同（窗碰到頁緣的那邊照整頁的邊界規則）；補集的標號照樣整頁（塊要量整塊面積）
+        ys, xs = np.nonzero(Gf)
+        q = 2 * pc + 1
+        wy0, wy1, wx0, wx1 = max(0, int(ys.min()) - q), min(H, int(ys.max()) + 1 + q), max(0, int(xs.min()) - q), min(W, int(xs.max()) + 1 + q)
+        Gc = np.zeros((H, W), bool)
+        Gc[wy0:wy1, wx0:wx1] = (cv2.morphologyEx(Gf[wy0:wy1, wx0:wx1].astype(np.uint8), cv2.MORPH_CLOSE, ell(pc)) > 0
+                                if pc > 0 else Gf[wy0:wy1, wx0:wx1])
+        free = ~(Gc | X)
+        # ⚠️ 8 連通：合併研究寫的是 connectedComponentsWithStats(free, 4)，但 cv2 的第二個位置參數是 labels 輸出、不是
+        # connectivity（同 nightread_ring 的坑），實際一直是 8 連通；驗證過的成品照它，這裡寫明
+        n2, lb2, st2, _ = cv2.connectedComponentsWithStats(free.astype(np.uint8), connectivity=8)
+        hc = min(3840, max(960, H))                    # ＝sH ×1920（sH 夾 0.5–2）；整數比，不經浮點取整
+        small = np.zeros(n2, bool)
+        small[1:] = st2[1:, cv2.CC_STAT_AREA].astype(np.int64) * (1920 * 1920) <= PF_HOLE * hc * hc
+        k3 = np.ones((3, 3), np.uint8)
+        touch = np.bincount(lb2[cv2.dilate(Gc.astype(np.uint8), k3) > 0], minlength=n2) > 0
+        # 只被淡線自己圍住（不碰 X）的塊＝封閉的輪廓裡面（手、道具的內部）：不論大小都算（只看碰到線又不小的塊）
+        need = touch & ~small
+        need[0] = False
+        tx = np.ones(n2, bool)
+        if need.any():
+            tx = np.bincount(lb2[cv2.dilate(X.astype(np.uint8), k3) > 0], minlength=n2) > 0
+        keep = (small | ~tx) & touch
+        keep[0] = False
+        if keep.any():
+            out |= keep[lb2] & old
+    if marks is not None and marks.any():
+        n3, lb3, st3, _ = cv2.connectedComponentsWithStats(marks.astype(np.uint8), 8)
+        sm = np.zeros(n3, bool)
+        sm[1:] = np.maximum(st3[1:, cv2.CC_STAT_WIDTH], st3[1:, cv2.CC_STAT_HEIGHT]) < DOT
+        sm &= np.bincount(lb3[old], minlength=n3) > 0
+        sm[0] = False
+        if sm.any():
+            out |= dil(sm[lb3], PF_MARK) & old
+    return out
 
 
 def _straight(lb, st, n):
@@ -639,6 +780,24 @@ def _fx_paint(out, g, ctx, fx, fxpf, dark):
     return P
 
 
+def _seam(fill, g, ctx, dark):
+    """規則版本 4 q1：塗黑區之間沒塗到的細縫（閉合 SEAM_R 補得起來、不是交代過／已經黑／人物旁淡線外圈）；連通塊裡只要有一點
+    細暗線、亮記號、谷（σ2 blackhat > BH_TH）、原圖 < SEAM_G 或碰到閃光外擴 SEAM_SPARK 就整塊不補。回傳要補的像素。"""
+    C = (cv2.morphologyEx(fill.astype(np.uint8), cv2.MORPH_CLOSE, ell(SEAM_R)) > 0) & ~fill & ~ctx["X"] & ~dark
+    if ctx.get("phalo") is not None:
+        C &= ~ctx["phalo"]
+    if not C.any():
+        return C
+    bad = ctx["ink"] | ctx["bright"] | ctx["bh_on"] | (g < SEAM_G)
+    if ctx.get("spark") is not None and ctx["spark"].any():
+        bad |= dil(ctx["spark"], SEAM_SPARK)            # 閃光旁的淡斜芒（灰點）照版本 3 留著
+    n, lb = cv2.connectedComponents(C.astype(np.uint8), connectivity=8)
+    badl = np.zeros(n, bool)
+    badl[np.unique(lb[bad & C])] = True
+    badl[0] = True
+    return ~badl[lb]
+
+
 def light_fill(out, g, ctx, diag=None, dark=None):
     """在貼紙層（含否決）之後的 [out] 上，把無物件的亮背景塗黑（就地改 out 並回傳）。[dark]＝「已經黑」的覆寫（函式層 parity
     用：餵 Kotlin 那一邊的；None＝blackish(out, g)）。
@@ -720,6 +879,7 @@ def light_fill(out, g, ctx, diag=None, dark=None):
         drop = np.zeros(nf, bool)
         cmk = ctx["charmask"] | ctx["char_raw"]
         blk = dark & (g >= 128) & ~dil(ctx["bubble"], 8)
+        inpd = dil(ctx["inpaint"], ISLAND_INP_D) if ctx.get("inpaint") is not None else None
         info = []
         for k in range(1, nf):
             if sf[k, cv2.CC_STAT_AREA] >= ISLAND_MAX * H * W_:
@@ -729,15 +889,28 @@ def light_fill(out, g, ctx, diag=None, dark=None):
             y0_, y1_, x0_, x1_ = max(0, y - p_), min(H, y + h + p_), max(0, x - p_), min(W_, x + w + p_)
             ck = lf[y0_:y1_, x0_:x1_] == k
             t = int((dil(ck, ISLAND_TOUCH) & blk[y0_:y1_, x0_:x1_]).sum())
+            tin = None
+            if inpd is not None:
+                # 規則版本 4 q4：譯後頁的小塊有 ≥ ISLAND_INP_PCT % 離去字區 ISLAND_INP_D px 內＝原文字旁、去字後才變乾淨的白
+                # （c362_014：日文手寫字去字後，泡與譯文之間的黑楔；日文頁那裡是字，從來不塗）
+                tin = int((ck & inpd[y0_:y1_, x0_:x1_]).sum())
             per = ck & ~(cv2.erode(ck.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0)
             ph = int((per & dil(cmk[y0_:y1_, x0_:x1_], 4)).sum())
             ps = max(1, int(per.sum()))
-            info.append(dict(bbox=[x, y, w, h], area=int(sf[k, cv2.CC_STAT_AREA]), touch=t, hug=round(ph / ps, 3)))
-            if t < ISLAND_TOUCH_MIN or ph > HUG_MAX * ps:
+            ak = int(sf[k, cv2.CC_STAT_AREA])
+            info.append(dict(bbox=[x, y, w, h], area=ak, touch=t, txt=tin, hug=round(ph / ps, 3)))
+            if t < ISLAND_TOUCH_MIN or ph > HUG_MAX * ps or (tin is not None and tin * 100 >= ISLAND_INP_PCT * ak):
                 drop[k] = True
         if diag is not None:
             diag["obj_island"] = info
         fill &= ~drop[lf]
+    if OBJ_SEAM and fill.any():
+        # 規則版本 4 縫補黑：兩階光影的交界（兩側都過門、交界被 σ4 Canny 當成調子邊）在塗黑區裡留一條灰虛線 ⇒ 塗黑區閉合
+        # 補得起來的細縫，整條沒有細暗線、亮記號、谷（σ2 blackhat）且原圖都亮（≥ SEAM_G）的補黑
+        sm = _seam(fill, g, ctx, dark)
+        fill |= sm
+        if diag is not None:
+            diag["obj_seam"] = sm
     if diag is not None:
         diag["obj_fill"] = fill.copy()
     if not fill.any():
@@ -765,6 +938,7 @@ def light_fill(out, g, ctx, diag=None, dark=None):
         hit = np.bincount(lt_d[ringm & fill], minlength=nt)
         okt = np.zeros(nt, bool)
         okt[1:] = 2 * hit[1:] >= np.maximum(tot[1:], 1)
+        snew = np.zeros(nt, bool)                      # 規則版本 4：沒有字框、因為像粗墨筆畫才畫亮的字塊
         if OBJ_TXTREG:
             # 複核 2：只畫亮碰到字框（DBNet 字行分群後的字區外接框）的字塊；只有字遮罩、沒有字框的（樹叢、星形記號被誤當字）
             # 不當字（留原樣，跟物件一樣）
@@ -775,10 +949,32 @@ def light_fill(out, g, ctx, diag=None, dark=None):
             hasr = np.zeros(nt, bool)
             hasr[np.unique(lt[rm & sd])] = True
             hasr[0] = False
+            if OBJ_TXTSTROKE:
+                # 規則版本 4：四周大多被塗黑、沒有字框的字塊，像粗墨筆畫（多半很黑、輪廓平滑不細）的照樣畫亮（手寫字
+                # 「44…」）；樹叢（墨有網點紋理、輪廓鋸齒）、星形與汗滴（細線、灰）不像，留原樣
+                tc = []
+                for k in np.flatnonzero(okt & ~hasr):
+                    ys, xs = np.nonzero(lt == k)
+                    y0, y1, x0, x1 = int(ys.min()), int(ys.max()) + 1, int(xs.min()), int(xs.max()) + 1
+                    ok_, info_ = _stroke_like(g[y0:y1, x0:x1], lt[y0:y1, x0:x1] == k)
+                    if ok_:
+                        hasr[k] = True
+                        snew[k] = True
+                    tc.append(dict(bbox=[x0, y0, x1 - x0, y1 - y0], stroke=bool(ok_), **info_))
+                if diag is not None:
+                    diag["obj_txtc"] = tc
             okt &= hasr
         txt = okt[lt]
         if txt.any():
             out[txt] = _TEXT_LUT[g[txt]]
+            if OBJ_TXTSTROKE and TS_BANDCLEAN and (snew.any() or TS_BANDCLEAN_ALL):
+                # 規則版本 4：沒有字框、因為像粗墨筆畫才畫亮的字（snew）旁邊的描亮邊（只由這些字的墨引起、離別的線／人物／
+                # 有字框的字都遠的）塗回 BG——否則亮字外圍 3–r px 會多出一條條 1 px 的亮碎線（字遮罩外擴 3 的邊界剛好落在描亮邊
+                # 的範圍裡）。有字框的字旁的描亮邊照版本 3 不動（TS_BANDCLEAN_ALL=1＝研究用：所有畫亮的字都清，＝驗證 patch 原樣）
+                tn = txt if TS_BANDCLEAN_ALL else (okt & snew)[lt]
+                cl = band & dil(F & tn, r) & ~dil(F & ~tn, r)
+                if cl.any():
+                    out[cl] = BG
     if diag is not None:
         diag["obj_band"] = band
         diag["obj_txt"] = txt if nt > 1 else np.zeros((H, W_), bool)

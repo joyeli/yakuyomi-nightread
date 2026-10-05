@@ -2295,12 +2295,14 @@ def mask_viz(img_bgr, gutter, panel_scene, bubble, seg, regions, sticker_mask=No
     return viz
 
 
-def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None, diag=None):
+def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None, diag=None, inpaint=None):
     """單頁一條龍：偵測 → 遮罩 → 合成 → 落檔。回傳統計 dict（批次表用）。
 
     [regions] 與 [seg] 可以由外部提供，跳過偵測——**產品路徑就是這樣走的**：頁面先經過翻譯，
     文字區早就算過（存在翻譯素材裡），譯文的筆畫位置則由排版器自己知道，都不必重測一次。
     只給其中一個也行，另一個仍走偵測。[diag] 透傳給 compose（中間遮罩／耗時，parity 用）。
+    [inpaint]＝譯後頁的去字遮罩（翻譯素材 `.yakuyomi/<頁>.mask.png`，與頁同尺寸的布林）：只給「更多」背景物件規則的
+    孤島判斷用（規則版本 4，nightread_obj）；None＝日文頁或沒有素材（與版本 3 相同）。
     """
     name = os.path.splitext(os.path.basename(page_path))[0]
     os.makedirs(outdir, exist_ok=True)
@@ -2346,7 +2348,7 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None, 
         # 「更多」背景物件規則（nightread_obj.py）：整頁量測一次；否決要「只塗標準（L2）」的 keep（∩ 這一檔的 keep）
         t_obj = time.perf_counter()
         obj_ctx = nightread_obj.context(g, (img.max(axis=2).astype(np.int16) - img.min(axis=2).astype(np.int16)).astype(np.uint8),
-                                        charmask, char_raw, bubble, seg, (lhm | lvm) > 0, regions)
+                                        charmask, char_raw, bubble, seg, (lhm | lvm) > 0, regions, inpaint=inpaint)
         std_keep, _ = filter_sticker_plan(g, lab, stats, accept0, audit, promoted0, char_raw, (lhm | lvm) > 0,
                                           mode="simple", rough_max=10.0, min_frac=0.005, mark_audit=False)
         obj_ctx["std_keep"] = set(std_keep) & set(sticker)
