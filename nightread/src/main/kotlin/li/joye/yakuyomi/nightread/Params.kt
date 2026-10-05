@@ -339,6 +339,50 @@ data class ObjectRuleParams(
     val pfHalo: Int = 10,
     /** 字畫亮只限碰到字框（[TextRegion]）的字塊（2026-10-04 複核 2；研究端 NIGHTREAD_OBJ_TXTREG）：DBNet 誤當字的樹叢不反相。 */
     val textNeedsRegion: Boolean = true,
+    /**
+     * 規則版本 4 q3（2026-10-05 使用者拍板；研究端 NIGHTREAD_OBJ_PFSHAPE）：人物旁的淡線外圈貼線形。長到的淡線逐塊看是不是
+     * 「一條線」（在外接框外擴 [pfClose]＋1 的窗裡橢圓閉合 [pfClose]，閉合後面積 ×100 ≤ 原面積 ×[pfLinePct]）：線只外擴
+     * [pfMargin]，不是線（手、網點、擠在一起的好幾筆）照版本 3 外擴 [pfHalo]；被淡線（閉合後）與交代過的遮罩圍住的小塊
+     * （面積 ×1920² ≤ [pfHole] ×clamp(頁高, 960, 3840)²）或只被淡線自己圍住的塊，在版本 3 外圈之內的部分也不塗；碰到版本 3
+     * 外圈的淡小記號（細暗線不經線核｜σ2 Canny 在去網點之前、外接框長邊 < [dot]）外擴 [pfMark] 也不塗。結果 ⊆ 版本 3 的外圈。
+     * 只在 [personFaint] 開著時有作用。
+     */
+    val pfShape: Boolean = true,
+    val pfClose: Int = 10,
+    val pfMargin: Int = 3,
+    val pfHole: Int = 2500,
+    val pfLinePct: Int = 104,
+    /** 淡小記號（P 類：情緒記號、短畫）的保護半徑；0＝不保護（＝合併研究的原樣）。 */
+    val pfMark: Int = 3,
+    /**
+     * 規則版本 4 q2（研究端 NIGHTREAD_OBJ_TXTSTROKE）：四周大多被塗黑、碰不到字框的字塊，像粗墨筆畫的照樣畫亮（手寫字）：
+     * 墨（灰階 < [tsInk]）≥ [tsMin] px、灰階 ≤ [tsG] 的過半、輪廓平滑又不細（墨在外接框外補 2 px 0、3×3 方核開再閉，變動的 px
+     * ×100 ≤ 墨的邊界 px（3×3 侵蝕掉的）×[tsRough]）。這些字旁、只由它們的墨引起的描亮邊塗回 BG（[tsBandClean]；有字框的字旁照
+     * 版本 3 不動）。只在 [textNeedsRegion] 開著時有作用（關著的話所有字塊本來就畫亮）。
+     */
+    val textStroke: Boolean = true,
+    val tsInk: Int = 128,
+    val tsMin: Int = 5,
+    val tsG: Int = 30,
+    val tsRough: Int = 12,
+    val tsBandClean: Boolean = true,
+    /**
+     * 規則版本 4 q1（研究端 NIGHTREAD_OBJ_SEAM）：塗黑區裡的灰虛線（兩階光影的交界被 σ4 Canny 當成調子邊）補黑：塗黑區橢圓閉合
+     * [seamR] 補得起來、不是交代過／已經黑／人物旁淡線外圈的細縫，8 連通塊裡沒有細暗線、亮記號、谷（σ2 blackhat > [bhTh]）、
+     * 原圖 < [seamG]、閃光外擴 [seamSpark] 的整塊補黑。
+     */
+    val seam: Boolean = true,
+    val seamR: Int = 3,
+    val seamSpark: Int = 4,
+    val seamG: Int = 200,
+    /**
+     * 規則版本 4 q4（研究端 NIGHTREAD_OBJ_INPAINT）：譯後頁的小塊（< [islandMax] 整頁）有 ≥ [islandInpPct] % 在去字遮罩
+     * （[NightReadInput.inpaintMask]）橢圓外擴 [islandInpD] 內就不塗（日文字去字後才變乾淨的白，例：泡與譯文之間的黑楔）。
+     * 沒有去字遮罩＝版本 3。
+     */
+    val inpaintIslands: Boolean = true,
+    val islandInpD: Int = 6,
+    val islandInpPct: Int = 30,
     /** V：超區證據 ‰ 上限（原型 15；查核改 25：救回無物件的紙白與字幕框，有物件的 b 類最低 26.7）。 */
     val vetoEpm: Double = 25.0,
     /** V／L 脈絡：白跨細線閉合的橢圓半徑。 */
@@ -957,6 +1001,9 @@ data class TextRegion(val x0: Int, val y0: Int, val x1: Int, val y1: Int)
  * @param regions 文字區
  * @param charMask 人物遮罩（模型原輸出，未收邊未平滑）。**必要**：沒有它紅線不可達。
  * @param chroma 每像素彩度（max−min 通道），彩頁判定用；純灰階頁可傳 null。
+ * @param inpaintMask 譯後頁的去字遮罩（翻譯素材 `.yakuyomi/<頁>.mask.png`，**與 [gray] 同尺寸**，true＝去字區）。只給「更多」
+ *            背景物件規則的孤島判斷用（規則版本 4，[ObjectRuleParams.inpaintIslands]）：去字區旁的小塊不塗。日文頁、沒有素材＝null
+ *            （與規則版本 3 相同）；全空的遮罩也等於 null。「標準」不看它。
  */
 data class NightReadInput(
     val gray: Gray,
@@ -964,6 +1011,7 @@ data class NightReadInput(
     val regions: List<TextRegion>,
     val charMask: Mask,
     val chroma: Gray? = null,
+    val inpaintMask: Mask? = null,
 )
 
 /** 夜讀的輸出，附上供除錯與驗收用的中間遮罩。 */

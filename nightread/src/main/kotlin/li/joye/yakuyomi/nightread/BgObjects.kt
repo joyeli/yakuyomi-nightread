@@ -27,6 +27,16 @@ import kotlin.math.sqrt
  * 複核收尾（2026-10-04）：人物旁的淡線（人物模型漏掉、用點狀淡線畫的手、筆）外圈不塗（[ObjectRuleParams.personFaint]，
  * [Context.phalo]）；字畫亮只限碰到字框的字塊（[ObjectRuleParams.textNeedsRegion]）。
  *
+ * 規則版本 4（2026-10-05 使用者決定 q1–q4；研究端同名開關，四條都關＝版本 3 逐像素相同）：
+ * - q1 灰虛線補黑（[ObjectRuleParams.seam]，[seam]）：孤島之後，塗黑區閉合補得起來、沒有細暗線／亮記號／谷、原圖都亮的細縫補黑。
+ * - q2 沒有字框的手寫字畫亮（[ObjectRuleParams.textStroke]，[strokeLike]）：碰不到字框、像粗墨筆畫的字塊照樣畫亮；這些字旁、只由
+ *   它們的墨引起的描亮邊塗回 BG（有字框的字旁照版本 3）。
+ * - q3 淡線外圈貼線形（[ObjectRuleParams.pfShape]，[pfShape]）：一條線只留 pfMargin，手／網點照舊 pfHalo，圍住的小塊與淡小記號
+ *   （pfMark）也不塗；⊆ 版本 3 的外圈。
+ * - q4 譯後頁去字區旁的小塊不塗（[ObjectRuleParams.inpaintIslands]，[NightReadInput.inpaintMask]，[Context.inpaint]）。
+ * 計算順序照研究端：context 的淡線外圈（含記號）→ light_fill 的孤島（含去字區）→ 補縫 → 塗 BG → 描亮邊 → 閃光 → 字（含手寫字）→
+ * 手寫字旁的描亮邊清理。版本 4 交出之後「更多」凍結，只修紅線。
+ *
  * **確定性寫法**：高斯＝整數核（[Cv.gaussW]）兩趟卷積到 Q16；blackhat／tophat、線核平均、亮度門檻都在 Q16 整數上比；Canny 吃
  * Q16 整數部分；調子邊緣＝Q16 的 3×3 Sobel 平方和比門檻平方；距離＝5×5 chamfer（非 IPP）；‰／平均／中位都用整數比；
  * 二次曲面殘差＝正規方程（numpy 的分段成對加總，[npSumChunked]）＋固定順序高斯消去；字的亮度＝256 格查表。與原型（浮點）的差
@@ -62,8 +72,12 @@ internal object BgObjects {
         val spark: LongArray?,
         /** 效果線場（A；沒開或沒有收下的族＝null）。 */
         val fx: EffectLines.Field?,
-        /** 人物旁的淡線外圈（複核 1：亮背景區塗黑扣掉；沒開或沒有＝null）。 */
+        /** 人物旁的淡線外圈（複核 1：亮背景區塗黑扣掉；沒開或沒有＝null）。規則版本 4 起貼線形（[ObjectRuleParams.pfShape]）。 */
         val phalo: LongArray? = null,
+        /** σ2 blackhat > [ObjectRuleParams.bhTh]（不經線核、不去網點；規則版本 4 縫補黑的「谷」；縫補黑沒開＝null）。 */
+        val bhOn: LongArray? = null,
+        /** 譯後頁的去字遮罩（規則版本 4 孤島判斷；沒開、沒有或全空＝null）。 */
+        val inpaint: LongArray? = null,
     )
 
     private fun has(b: LongArray, i: Int): Boolean = (b[i ushr 6] ushr (i and 63)) and 1L != 0L
@@ -144,7 +158,7 @@ internal object BgObjects {
      */
     fun context(
         g: Gray, charMask: Mask, charRaw: Mask, bubble: Mask, seg: Mask, frame: Mask, p: ObjectRuleParams,
-        diag: MutableMap<String, Any>?,
+        diag: MutableMap<String, Any>?, inpaint: Mask? = null,
     ): Context {
         val w = g.w
         val h = g.h
@@ -170,14 +184,19 @@ internal object BgObjects {
         // σ2：Canny（否決證據）→ blackhat（細暗線）
         var bh: Gray?
         val can: Mask
+        // σ2 Canny 去網點之前（規則版本 4：淡線外圈的淡小記號要它；1 bit/px，外圈算完就放掉）
+        var canRawB: LongArray?
         run {
             val gb2 = Cv.gaussQ16(g, 2.0)
-            can = noDots(Cv.canny(gb2.data, w, h, 16, p.cannyLo, p.cannyHi), p.dot)
+            val raw = Cv.canny(gb2.data, w, h, 16, p.cannyLo, p.cannyHi)
+            canRawB = if (p.personFaint && p.pfShape && p.pfMark > 0) Ring.packBits(raw) else null
+            can = noDots(raw, p.dot)
             val cl = Cv.morphGrayGather(Cv.morphGrayGather(gb2, ell11, wantMax = true), ell11, wantMax = false)
             for (i in 0 until n) cl.data[i] -= gb2.data[i]
             bh = cl
         }
         val bhOn = Mask(w, h, BooleanArray(n) { bh!!.data[it] > p.bhTh * Q })
+        val bhOnB = if (p.seam) Ring.packBits(bhOn) else null
         val ink = noDots(lineMeanGt(bh!!, off17, p.lineR * qv, 1L, bhOn), p.dot)
         val inkB = Ring.packBits(ink)
         // 效果線場（A）：細暗線＋blackhat（結構張量）；算完 blackhat 就不要了
@@ -238,8 +257,19 @@ internal object BgObjects {
             val cmd = dil(charMask or charRaw, p.pfTouch)
             var any = false
             for (i in 0 until n) { cmd.data[i] = cmd.data[i] && fb.data[i]; if (cmd.data[i]) any = true }
-            if (!any) null else Ring.packBits(dil(growCropped(cmd, fb, p.pfReach, bfs = null), p.pfHalo))
+            if (!any) null else {
+                val gf = growCropped(cmd, fb, p.pfReach, bfs = null)
+                if (p.pfShape) {
+                    // 淡小記號（細暗線不經線核｜σ2 Canny 在去網點之前、扣 X3）：碰到版本 3 外圈、外接框長邊 < dot 的也留 pfMark
+                    val cr = canRawB
+                    pfShape(gf, xB, if (cr != null) { i: Int -> (bhOn.data[i] || has(cr, i)) && !x3.data[i] } else null, p,
+                        if (keepDiag) diag else null)
+                } else {
+                    Ring.packBits(dil(gf, p.pfHalo))
+                }
+            }
         }
+        canRawB = null
         val ev2 = minArea(ev2Raw, p.evMinArea)
         // 長線帶
         val longz = run {
@@ -264,7 +294,8 @@ internal object BgObjects {
         return Context(
             w, h, xB, x3B, Ring.packBits(e), Ring.packBits(ev2), inkB,
             Ring.packBits(bright), Ring.packBits(tone), Ring.packBits(toneE), light, Ring.packBits(longz),
-            spark?.let { Ring.packBits(it) }, fx, phalo,
+            spark?.let { Ring.packBits(it) }, fx, phalo, bhOnB,
+            if (p.inpaintIslands && inpaint != null && inpaint.any()) Ring.packBits(inpaint) else null,
         )
     }
 
@@ -339,6 +370,196 @@ internal object BgObjects {
             val l2 = tr / 2.0 - sqrt(max(tr * tr / 4.0 - (cxx * cyy - cxy * cxy), 0.0))
             if (sqrt(max(l2, 0.0)) <= lim) keep[l] = false
         }
+    }
+
+    /**
+     * 規則版本 4 的淡線外圈（研究端 `_pf_shape`；[ObjectRuleParams.pfShape]）：[gf]＝長到的淡線（已外擴 pfBridge）。回傳外圈
+     * （1 bit/px），⊆ 版本 3 的外圈 dil(gf, pfHalo)。
+     * - 逐個 8 連通塊（BFS）看是不是一條線：塊在外接框外擴 max(pfClose, pfHalo)＋1 的窗裡橢圓閉合 pfClose（窗外照 cv2 的
+     *   侵蝕邊界當前景），閉合後面積 ×100 ≤ 原面積 ×pfLinePct ＝線，外擴 pfMargin；不是線外擴 pfHalo。
+     * - 洞：gf 整體在外接框外擴 2·pfClose＋1 的窗裡閉合（＝整頁閉合）成 Gc；「Gc ∪ 交代過」的補集（8 連通，研究端的
+     *   connectedComponentsWithStats(free, 4) 其實是 8 連通：第二個位置參數是 labels）裡碰到 Gc⊕3×3 的塊，
+     *   面積 ×1920² ≤ pfHole ×clamp(頁高, 960, 3840)² 或不碰「交代過⊕3×3」的，∩ 版本 3 外圈也不塗。從碰到 Gc⊕3×3 的像素逐塊
+     *   BFS（整頁走、只記落在版本 3 外圈的像素），不配整頁標號。
+     * - 淡小記號：[mark]（像素 → 是不是淡記號候選）的 8 連通塊（BFS，整頁走）碰到版本 3 外圈、外接框長邊 < dot 的，橢圓外擴
+     *   pfMark ∩ 版本 3 外圈也不塗；null＝不做。
+     * [diag]（parity 除錯，context 的 diag["obj"]＝true 才傳）：`obj_gf`（長到的淡線）、`obj_gc`（閉合後）、`obj_pf_lines`（逐塊外擴之後）、
+     * `obj_pf_holes`（加洞之後）、`obj_X`（交代過）。
+     */
+    private fun pfShape(
+        gf: Mask, xB: LongArray, mark: ((Int) -> Boolean)?, p: ObjectRuleParams, diag: MutableMap<String, Any>? = null,
+    ): LongArray {
+        val w = gf.w
+        val h = gf.h
+        val n = w * h
+        val old = dil(gf, p.pfHalo)
+        val out = Mask(w, h)
+        val pc = p.pfClose
+        val kc = Cv.ellipse(2 * pc + 1)
+        val seen = LongArray((n + 63) ushr 6)
+        var q = IntArray(256)
+        var gx0 = w; var gy0 = h; var gx1 = -1; var gy1 = -1
+        // 逐塊：一條線只留 pfMargin
+        for (s0 in 0 until n) {
+            if (!gf.data[s0] || Ring.has(seen, s0)) continue
+            var qe = 0
+            q[qe++] = s0
+            Ring.set(seen, s0)
+            var qs = 0
+            var bx0 = s0 % w; var bx1 = bx0; var by0 = s0 / w; var by1 = by0
+            while (qs < qe) {
+                val i = q[qs++]
+                val x = i % w
+                val y = i / w
+                if (x < bx0) bx0 = x; if (x > bx1) bx1 = x; if (y < by0) by0 = y; if (y > by1) by1 = y
+                for (yy in max(0, y - 1)..min(h - 1, y + 1)) for (xx in max(0, x - 1)..min(w - 1, x + 1)) {
+                    val j = yy * w + xx
+                    if (gf.data[j] && !Ring.has(seen, j)) {
+                        Ring.set(seen, j)
+                        if (qe == q.size) q = q.copyOf(q.size * 2)
+                        q[qe++] = j
+                    }
+                }
+            }
+            gx0 = min(gx0, bx0); gy0 = min(gy0, by0); gx1 = max(gx1, bx1); gy1 = max(gy1, by1)
+            val pd = max(pc, p.pfHalo) + 1
+            val x0 = max(0, bx0 - pd); val y0 = max(0, by0 - pd); val x1 = min(w, bx1 + 1 + pd); val y1 = min(h, by1 + 1 + pd)
+            val sw = x1 - x0
+            val c = Mask(sw, y1 - y0)
+            for (k in 0 until qe) { val i = q[k]; c.data[(i / w - y0) * sw + i % w - x0] = true }
+            val ca = if (pc > 0) Cv.closePacked(c, kc).count() else qe
+            val r = if (100L * ca <= p.pfLinePct.toLong() * qe) p.pfMargin else p.pfHalo
+            val d = dil(c, r)
+            for (yy in y0 until y1) {
+                val b = (yy - y0) * sw - x0
+                for (xx in x0 until x1) if (d.data[b + xx]) out.data[yy * w + xx] = true
+            }
+        }
+        if (gx1 < 0) return Ring.packBits(out)
+        if (diag != null) { diag["obj_gf"] = gf; diag["obj_pf_lines"] = out.copy(); diag["obj_X"] = unpack(xB, w, h) }
+        if (p.pfHole > 0) {
+            // Gc＝gf 在窗裡閉合（窗內離 gf ≤ pfClose 的像素侵蝕看的鄰居都在窗內 ⇒ 與整頁閉合逐像素相同）
+            val qd = 2 * pc + 1
+            val wx0 = max(0, gx0 - qd); val wy0 = max(0, gy0 - qd); val wx1 = min(w, gx1 + 1 + qd); val wy1 = min(h, gy1 + 1 + qd)
+            val ww = wx1 - wx0; val wh = wy1 - wy0
+            val gw = Mask(ww, wh)
+            for (yy in 0 until wh) for (xx in 0 until ww) gw.data[yy * ww + xx] = gf.data[(yy + wy0) * w + xx + wx0]
+            val gc = if (pc > 0) Cv.closePacked(gw, kc) else gw
+            if (diag != null) {
+                val gcf = Mask(w, h)
+                for (yy in 0 until wh) for (xx in 0 until ww) if (gc.data[yy * ww + xx]) gcf.data[(yy + wy0) * w + xx + wx0] = true
+                diag["obj_gc"] = gcf
+            }
+            // Gc⊕3×3：窗外擴 1（Gc 在窗外是 0）
+            val pw = ww + 2
+            val gcd = Mask(pw, wh + 2)
+            for (yy in 0 until wh) for (xx in 0 until ww) {
+                if (!gc.data[yy * ww + xx]) continue
+                for (dy in 0..2) for (dx in 0..2) gcd.data[(yy + dy) * pw + xx + dx] = true
+            }
+            fun gcAt(x: Int, y: Int): Boolean = x in wx0 until wx1 && y in wy0 until wy1 && gc.data[(y - wy0) * ww + x - wx0]
+            fun free(i: Int): Boolean = !has(xB, i) && !gcAt(i % w, i / w)
+            fun nearX(x: Int, y: Int): Boolean {
+                for (yy in max(0, y - 1)..min(h - 1, y + 1)) for (xx in max(0, x - 1)..min(w - 1, x + 1)) if (has(xB, yy * w + xx)) return true
+                return false
+            }
+            val hc = min(3840, max(960, h)).toLong()
+            val holeLim = p.pfHole.toLong() * hc * hc
+            val seenF = LongArray((n + 63) ushr 6)
+            var keepPx = IntArray(256)
+            for (py in 0 until wh + 2) for (px in 0 until pw) {
+                if (!gcd.data[py * pw + px]) continue
+                val sx = px + wx0 - 1
+                val sy = py + wy0 - 1
+                if (sx < 0 || sy < 0 || sx >= w || sy >= h) continue
+                val s0 = sy * w + sx
+                if (Ring.has(seenF, s0) || !free(s0)) continue
+                // 補集的一塊（8 連通，整頁走）：面積、碰不碰交代過⊕3×3、落在版本 3 外圈的像素
+                var qe = 0
+                q[qe++] = s0
+                Ring.set(seenF, s0)
+                var qs = 0
+                var area = 0L
+                var touchX = false
+                var nk = 0
+                // 佇列當環形用：只留還沒處理的（大塊可以接近整頁）
+                var cap = q.size
+                while (qs != qe) {
+                    val i = q[qs]
+                    qs = if (qs + 1 == cap) 0 else qs + 1
+                    area++
+                    val x = i % w
+                    val y = i / w
+                    if (!touchX && nearX(x, y)) touchX = true
+                    if (old.data[i]) {
+                        if (nk == keepPx.size) keepPx = keepPx.copyOf(nk * 2)
+                        keepPx[nk++] = i
+                    }
+                    for (yy in max(0, y - 1)..min(h - 1, y + 1)) for (xx in max(0, x - 1)..min(w - 1, x + 1)) {
+                        val j = yy * w + xx
+                        if (Ring.has(seenF, j) || !free(j)) continue
+                        Ring.set(seenF, j)
+                        val next = if (qe + 1 == cap) 0 else qe + 1
+                        if (next == qs) {
+                            // 環滿：攤平成 [qs..) 再加倍
+                            val nq = IntArray(cap * 2)
+                            var m = 0
+                            var t = qs
+                            while (t != qe) { nq[m++] = q[t]; t = if (t + 1 == cap) 0 else t + 1 }
+                            q = nq; cap = nq.size; qs = 0; qe = m
+                        }
+                        q[qe] = j
+                        qe = if (qe + 1 == cap) 0 else qe + 1
+                    }
+                }
+                val small = area * (1920L * 1920L) <= holeLim
+                if (small || !touchX) for (k in 0 until nk) out.data[keepPx[k]] = true
+            }
+        }
+        if (diag != null) diag["obj_pf_holes"] = out.copy()
+        if (mark != null) {
+            // 淡小記號：碰到版本 3 外圈的候選塊（8 連通、整頁走），外接框長邊 < dot 的外擴 pfMark ∩ 版本 3 外圈
+            val pd = p.pfHalo + p.dot + p.pfMark
+            val ox0 = max(0, gx0 - pd); val oy0 = max(0, gy0 - pd); val ox1 = min(w, gx1 + 1 + pd); val oy1 = min(h, gy1 + 1 + pd)
+            val ow = ox1 - ox0
+            val mk = Mask(ow, oy1 - oy0)
+            var anyMk = false
+            val seenM = LongArray((n + 63) ushr 6)
+            for (sy in max(0, gy0 - p.pfHalo)..min(h - 1, gy1 + p.pfHalo)) for (sx in max(0, gx0 - p.pfHalo)..min(w - 1, gx1 + p.pfHalo)) {
+                val s0 = sy * w + sx
+                if (!old.data[s0] || Ring.has(seenM, s0) || !mark(s0)) continue
+                var qe = 0
+                q[qe++] = s0
+                Ring.set(seenM, s0)
+                var qs = 0
+                var bx0 = sx; var bx1 = sx; var by0 = sy; var by1 = sy
+                while (qs < qe) {
+                    val i = q[qs++]
+                    val x = i % w
+                    val y = i / w
+                    if (x < bx0) bx0 = x; if (x > bx1) bx1 = x; if (y < by0) by0 = y; if (y > by1) by1 = y
+                    for (yy in max(0, y - 1)..min(h - 1, y + 1)) for (xx in max(0, x - 1)..min(w - 1, x + 1)) {
+                        val j = yy * w + xx
+                        if (!Ring.has(seenM, j) && mark(j)) {
+                            Ring.set(seenM, j)
+                            if (qe == q.size) q = q.copyOf(q.size * 2)
+                            q[qe++] = j
+                        }
+                    }
+                }
+                if (max(bx1 - bx0 + 1, by1 - by0 + 1) >= p.dot) continue
+                for (k in 0 until qe) { val i = q[k]; mk.data[(i / w - oy0) * ow + i % w - ox0] = true }
+                anyMk = true
+            }
+            if (anyMk) {
+                val md = dil(mk, p.pfMark)
+                for (yy in oy0 until oy1) {
+                    val b = (yy - oy0) * ow - ox0
+                    for (xx in ox0 until ox1) { val i = yy * w + xx; if (md.data[b + xx] && old.data[i]) out.data[i] = true }
+                }
+            }
+        }
+        return Ring.packBits(out)
     }
 
     // ── 整數／確定性的小工具 ─────────────────────────────────────────────
@@ -748,18 +969,26 @@ internal object BgObjects {
         if (ph != null) for (i in 0 until n) if (has(ph, i)) fill.data[i] = false     // 人物旁的淡線外圈不塗（複核 1）
         val dark = unpack(darkB, w, h)
         if (fill.any()) fill = dropContext(g, fill, l0B, dark, ctx, charMask, charRaw, bubble, frame, p, diag)
-        if (fill.any()) fill = dropIslands(g, fill, dark, charMask, charRaw, bubble, p, diag)
+        if (fill.any()) fill = dropIslands(g, fill, dark, charMask, charRaw, bubble, ctx.inpaint, p, diag)
+        if (p.seam && fill.any()) {
+            // 規則版本 4 縫補黑（q1）：兩階光影的交界被 σ4 Canny 當成調子邊，塗黑區在那裡留一條灰虛線 ⇒ 閉合補得起來、整條沒有
+            // 細暗線／亮記號／谷、原圖都亮的細縫補黑
+            val sm = seam(fill, g, ctx, dark, p)
+            if (sm != null) fill.orInPlace(sm)
+            if (diag != null) diag["obj_seam"] = sm ?: Mask(w, h)
+        }
         if (diag != null) diag["obj_fill"] = fill
         if (!fill.any()) return
         val bgf = np.bg.toFloat()
         for (i in 0 until n) if (fill.data[i]) out.data[i] = bgf
         // 描亮邊：fill 內、緊鄰「細暗線／暗（< 100）／人物／格框線」（還沒黑的）的帶
         val r = Math.rint(0.0035 * min(h, w)).toInt().coerceIn(4, 7)
+        // 描亮邊的來源 F（1 bit/px）：規則版本 4 沒有字框才畫亮的字旁要再用
+        val fB = Ring.packBits(Mask(w, h, BooleanArray(n) {
+            !fill.data[it] && (has(ctx.ink, it) || g.data[it] < 100 || charMask.data[it] || frame.data[it]) && !dark.data[it]
+        }))
         val band = run {
-            val f = Mask(w, h, BooleanArray(n) {
-                !fill.data[it] && (has(ctx.ink, it) || g.data[it] < 100 || charMask.data[it] || frame.data[it]) && !dark.data[it]
-            })
-            val bd = dil(f, r)
+            val bd = dil(unpack(fB, w, h), r)
             val segd = dil(seg, 2)
             for (i in 0 until n) bd.data[i] = bd.data[i] && fill.data[i] && !segd.data[i]
             bd
@@ -801,6 +1030,9 @@ internal object BgObjects {
                 if (fill.data[i]) hit[mx]++
             }
             val okt = BooleanArray(ccT.n) { it > 0 && 2 * hit[it] >= max(tot[it], 1) }
+            // 規則版本 4（q2）：沒有字框、因為像粗墨筆畫才畫亮的字塊
+            val sNew = BooleanArray(ccT.n)
+            var anyNew = false
             if (p.textNeedsRegion) {
                 // 複核 2：只畫亮碰到字框的字塊；只有字遮罩、沒有字框的（樹叢、星形記號被 DBNet 誤當字）不當字（留原樣）
                 val hasR = BooleanArray(ccT.n)
@@ -810,12 +1042,31 @@ internal object BgObjects {
                         for (x in max(0, rg.x0) until min(w, max(0, rg.x1))) { val v = lb[b + x]; if (v > 0) hasR[v] = true }
                     }
                 }
+                if (p.textStroke) {
+                    // 四周大多被塗黑、沒有字框的字塊，像粗墨筆畫（多半很黑、輪廓平滑不細）的照樣畫亮（手寫字）；樹叢、星形、汗滴留原樣
+                    val info = if (diag != null) ArrayList<String>() else null
+                    for (k in 1 until ccT.n) {
+                        if (!okt[k] || hasR[k]) continue
+                        val ok = strokeLike(g, ccT, k, p, info)
+                        if (ok) { hasR[k] = true; sNew[k] = true; anyNew = true }
+                    }
+                    if (diag != null) diag["obj_txtc"] = info!!
+                }
                 for (k in 1 until ccT.n) if (!hasR[k]) okt[k] = false
             }
             val t = Mask(w, h, BooleanArray(n) { okt[ccT.labels[it]] })
             if (t.any()) {
                 val lut = textLut(np.bg, np.ink)
                 for (i in 0 until n) if (t.data[i]) out.data[i] = lut[g.data[i]]
+                if (p.textStroke && p.tsBandClean && anyNew) {
+                    // 沒有字框才畫亮的字旁、只由這些字的墨引起（離別的線／人物／有字框的字都遠）的描亮邊塗回 BG（有字框的字旁照版本 3）
+                    val tn = Mask(w, h, BooleanArray(n) { sNew[ccT.labels[it]] })
+                    val fNew = Mask(w, h, BooleanArray(n) { tn.data[it] && has(fB, it) })
+                    val fOther = Mask(w, h, BooleanArray(n) { !tn.data[it] && has(fB, it) })
+                    val dn = dil(fNew, r)
+                    val dOther = dil(fOther, r)
+                    for (i in 0 until n) if (band.data[i] && dn.data[i] && !dOther.data[i]) out.data[i] = bgf
+                }
             }
             txt = t
         }
@@ -1241,9 +1492,13 @@ internal object BgObjects {
         return Mask(w, h, BooleanArray(n) { fill.data[it] && !drop[ccF.labels[it]] })
     }
 
-    /** 孤島：小塊又 [ObjectRuleParams.islandTouch] px 內碰不到塗黑的（泡不算）；或外緣多半貼著人物遮罩。 */
+    /**
+     * 孤島：小塊又 [ObjectRuleParams.islandTouch] px 內碰不到塗黑的（泡不算）；或外緣多半貼著人物遮罩；或（規則版本 4 q4，
+     * [inpaint]＝譯後頁的去字遮罩）有 ≥ [ObjectRuleParams.islandInpPct] % 在去字區橢圓外擴 [ObjectRuleParams.islandInpD] 內
+     * （窗外擴 islandTouch＋2 ≥ islandInpD：在窗裡外擴與整頁外擴在塊的像素上相同）。
+     */
     private fun dropIslands(
-        g: Gray, fill: Mask, dark: Mask, charMask: Mask, charRaw: Mask, bubble: Mask, p: ObjectRuleParams,
+        g: Gray, fill: Mask, dark: Mask, charMask: Mask, charRaw: Mask, bubble: Mask, inpaint: LongArray?, p: ObjectRuleParams,
         diag: MutableMap<String, Any>?,
     ): Mask {
         val w = g.w
@@ -1280,11 +1535,128 @@ internal object BgObjects {
             var ps = 0
             for (j in 0 until sw * sh) if (per.data[j]) { ps++; if (cmd.data[j]) ph++ }
             ps = max(1, ps)
-            info?.add("[${ccF.left[k]},${ccF.top[k]},${ccF.width[k]},${ccF.height[k]}] area=${ccF.area[k]} touch=$t hug=$ph/$ps")
-            if (t < p.islandTouchMin || ph > p.hugMax * ps) drop[k] = true
+            var tin = -1
+            if (inpaint != null) {
+                // 規則版本 4（q4）：譯後頁的小塊有 ≥ islandInpPct % 離去字區 islandInpD px 內＝原文字旁、去字後才變乾淨的白
+                val ind = dil(subBits(inpaint, w, x0, y0, x1, y1), p.islandInpD)
+                tin = 0
+                for (j in 0 until sw * sh) if (ck.data[j] && ind.data[j]) tin++
+            }
+            info?.add("[${ccF.left[k]},${ccF.top[k]},${ccF.width[k]},${ccF.height[k]}] area=${ccF.area[k]} touch=$t txt=$tin hug=$ph/$ps")
+            if (t < p.islandTouchMin || ph > p.hugMax * ps || (tin >= 0 && tin.toLong() * 100 >= p.islandInpPct.toLong() * ccF.area[k])) {
+                drop[k] = true
+            }
         }
         if (diag != null) diag["obj_island"] = info!!
         return Mask(w, h, BooleanArray(n) { fill.data[it] && !drop[ccF.labels[it]] })
+    }
+
+    /**
+     * 規則版本 4 縫補黑（q1；研究端 `_seam`）：塗黑區橢圓閉合 [ObjectRuleParams.seamR] 補得起來、不是塗黑區／交代過／已經黑／人物旁
+     * 淡線外圈的像素，8 連通塊（BFS）裡只要有一點細暗線、亮記號、谷（σ2 blackhat > bhTh，[Context.bhOn]）、原圖 < seamG 或閃光
+     * 外擴 seamSpark 就整塊不補。回傳要補的像素（沒有＝null）。
+     */
+    private fun seam(fill: Mask, g: Gray, ctx: Context, dark: Mask, p: ObjectRuleParams): Mask? {
+        val w = g.w
+        val h = g.h
+        val n = w * h
+        val c = Cv.closePacked(fill, Cv.ellipse(2 * p.seamR + 1))
+        val ph = ctx.phalo
+        var any = false
+        for (i in 0 until n) {
+            val v = c.data[i] && !fill.data[i] && !has(ctx.x, i) && !dark.data[i] && (ph == null || !has(ph, i))
+            c.data[i] = v
+            if (v) any = true
+        }
+        if (!any) return null
+        val bhOn = ctx.bhOn ?: error("縫補黑要 Context.bhOn（context 時 seam 要開）")
+        val sp = if (ctx.spark != null) Ring.packBits(dil(unpack(ctx.spark, w, h), p.seamSpark)) else null
+        fun bad(i: Int): Boolean =
+            has(ctx.ink, i) || has(ctx.bright, i) || has(bhOn, i) || g.data[i] < p.seamG || (sp != null && has(sp, i))
+        val out = Mask(w, h)
+        val seen = LongArray((n + 63) ushr 6)
+        var q = IntArray(256)
+        var found = false
+        for (s0 in 0 until n) {
+            if (!c.data[s0] || Ring.has(seen, s0)) continue
+            var qe = 0
+            q[qe++] = s0
+            Ring.set(seen, s0)
+            var qs = 0
+            var isBad = false
+            while (qs < qe) {
+                val i = q[qs++]
+                if (!isBad && bad(i)) isBad = true
+                val x = i % w
+                val y = i / w
+                for (yy in max(0, y - 1)..min(h - 1, y + 1)) for (xx in max(0, x - 1)..min(w - 1, x + 1)) {
+                    val j = yy * w + xx
+                    if (c.data[j] && !Ring.has(seen, j)) {
+                        Ring.set(seen, j)
+                        if (qe == q.size) q = q.copyOf(q.size * 2)
+                        q[qe++] = j
+                    }
+                }
+            }
+            if (isBad) continue
+            for (k in 0 until qe) out.data[q[k]] = true
+            found = true
+        }
+        return if (found) out else null
+    }
+
+    /**
+     * 規則版本 4（q2；研究端 `_stroke_like`）：字塊 [k]（[cc] 的標號，外接框的窗）是不是「粗墨筆畫」：墨 D＝塊 ∩ 灰階 < tsInk、
+     * ≥ tsMin px；(1) 多半很黑：#(D ∩ 灰階 ≤ tsG) ×2 > #D；(2) 輪廓平滑又不細：D（窗外補 2 px 0）做 3×3 方核開、再 3×3 方核閉
+     * （影像外當 0），與 D 不同的 px ×100 ≤ D 的邊界 px（D 扣掉 3×3 侵蝕）×tsRough。
+     */
+    private fun strokeLike(g: Gray, cc: CC, k: Int, p: ObjectRuleParams, info: MutableList<String>?): Boolean {
+        val w = g.w
+        val x0 = cc.left[k]; val y0 = cc.top[k]; val bw = cc.width[k]; val bh = cc.height[k]
+        val pw = bw + 4
+        val ph = bh + 4
+        val d = BooleanArray(pw * ph)
+        var nD = 0
+        var nk = 0
+        for (yy in 0 until bh) for (xx in 0 until bw) {
+            val i = (yy + y0) * w + xx + x0
+            if (cc.labels[i] != k) continue
+            val gv = g.data[i]
+            if (gv >= p.tsInk) continue
+            d[(yy + 2) * pw + xx + 2] = true
+            nD++
+            if (gv <= p.tsG) nk++
+        }
+        if (nD < p.tsMin) {
+            info?.add("[$x0,$y0,$bw,$bh] nD=$nD stroke=false")
+            return false
+        }
+        // 3×3 方核：影像（補過 2 px 的窗）外當 0
+        fun morph(src: BooleanArray, dilate: Boolean): BooleanArray {
+            val o = BooleanArray(pw * ph)
+            for (y in 0 until ph) for (x in 0 until pw) {
+                var v = !dilate
+                loop@ for (dy in -1..1) for (dx in -1..1) {
+                    val yy = y + dy
+                    val xx = x + dx
+                    val s = yy in 0 until ph && xx in 0 until pw && src[yy * pw + xx]
+                    if (dilate && s) { v = true; break@loop }
+                    if (!dilate && !s) { v = false; break@loop }
+                }
+                o[y * pw + x] = v
+            }
+            return o
+        }
+        val ero = morph(d, dilate = false)
+        var per = 0
+        for (i in d.indices) if (d[i] && !ero[i]) per++
+        val op = morph(ero, dilate = true)
+        val cl = morph(morph(op, dilate = true), dilate = false)
+        var chg = 0
+        for (i in d.indices) if (cl[i] != d[i]) chg++
+        val ok = 2 * nk > nD && 100L * chg <= p.tsRough.toLong() * per
+        info?.add("[$x0,$y0,$bw,$bh] nD=$nD nk=$nk per=$per chg=$chg stroke=$ok")
+        return ok
     }
 
     private const val WHITE_TH = 235

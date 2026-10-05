@@ -1,6 +1,7 @@
 package li.joye.yakuyomi.nightread
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.awt.image.BufferedImage
 import java.security.MessageDigest
@@ -20,6 +21,8 @@ import javax.imageio.ImageIO
  * 只守這個模組的規則與預設參數。engine 的 NightReadRenderer（縮圖上限、偵測／分割配方）、fork 餵進來的字框、人物模型換版
  * 不在這裡，改了一樣要加版本（見 DECISIONS）。亮度偏好不算規則，所以只用預設亮度。
  * 摘要只在同一套 JVM 浮點下穩定：換了機器或 JDK 而摘要變了、parity 測試卻都過，先確認輸出真的有變再決定要不要加版本。
+ * 版本 4 起加合成頁 syn_v4（research/make_v4_guard_fixture.py，帶去字遮罩 syn_v4_inpaint.png）：版本 4 的四條（灰虛線補黑、沒有
+ * 字框的手寫字畫亮、淡線外圈貼線形、去字區旁的小塊不塗）各自關掉，合成頁的摘要都要變（[eachVersion4RuleChangesTheDigest]）。
  */
 class RulesVersionGuardTest {
 
@@ -38,6 +41,9 @@ class RulesVersionGuardTest {
         // 加人物旁淡線的外圈、字畫亮只限有字框的字塊，再加合成頁 syn_more（閃光、淡線的手、沒有字框的樹叢；六頁的摘要不受這三條影響）。
         // 2026-10-04 交出
         3 to "4aa60a1bb49a7c0a46380e1ca4140ed801a66a06fe3f701e1c433eccc3c446a7",
+        // 4：「更多」灰虛線補黑、沒有字框的手寫字畫亮、淡線外圈貼線形（含淡小記號留灰）、譯後頁去字區旁的小塊不塗（2026-10-05
+        // 使用者決定 q1–q4）。只動更多、標準不變；公開 11 頁一個像素都沒變，七頁的摘要不變，這版起加合成頁 syn_v4（八頁）。還沒交出
+        4 to "34c6580f73595efe0fb319d14ef40b4dba3cb2ddf5f53f2572064d2fb8177161",
     )
 
     /**
@@ -50,7 +56,10 @@ class RulesVersionGuardTest {
         3 to "4aa60a1bb49a7c0a46380e1ca4140ed801a66a06fe3f701e1c433eccc3c446a7",     // 2026-10-04 debug APK（「更多」背景物件規則）
     )
 
-    private val pages = listOf("ch34_011", "demo01", "demo02", "demo05", "demo06", "ch34_015", "syn_more")
+    private val pages = listOf("ch34_011", "demo01", "demo02", "demo05", "demo06", "ch34_015", "syn_more", "syn_v4")
+
+    /** 合成頁（[eachVersion4RuleChangesTheDigest] 只算這兩頁：規則一條條關掉時要變的是它們）。 */
+    private val synPages = listOf("syn_more", "syn_v4")
 
     /** 版本表本身：從 1 連續編到 [NightRead.RULES_VERSION]、各版本摘要互不相同、已交出的版本摘要沒被改。 */
     @Test
@@ -90,32 +99,62 @@ class RulesVersionGuardTest {
         regions = readRegions("${page}_regions.txt"),
         charMask = readMask("${page}_char.png"),
         chroma = readGray("${page}_chroma.png"),
+        // 譯後頁的去字遮罩（syn_v4 才有；其他頁＝日文頁，null）
+        inpaintMask = if (javaClass.classLoader!!.getResource("page/${page}_inpaint.png") != null) readMask("${page}_inpaint.png") else null,
     )
+
+    /** 一頁產品兩檔的摘要輸入（頁名／檔位標頭＋尺寸＋成品位元組；更多與標準相同時記 "="），依序餵給 [sinks]。 */
+    private fun feedPage(page: String, base: NightReadParams, vararg sinks: MessageDigest) {
+        val tiers = listOf(NightTier.L2, NightTier.L3)
+        NightRead.renderTiers(input(page), tiers.map { it.apply(base) }) { k, gray ->
+            val head = "$page/${tiers[k].key}:".toByteArray()
+            for (s in sinks) s.update(head)
+            if (gray == null) {
+                // 更多與標準相同（產品不另存 more 檔）
+                for (s in sinks) s.update("=".toByteArray())
+            } else {
+                val bytes = ByteArray(gray.data.size) { gray.data[it].toByte() }
+                val size = "${gray.w}x${gray.h}".toByteArray()
+                for (s in sinks) { s.update(size); s.update(bytes) }
+            }
+        }
+    }
+
+    private fun pageDigest(page: String, base: NightReadParams): String {
+        val md = MessageDigest.getInstance("SHA-256")
+        feedPage(page, base, md)
+        return hex(md.digest())
+    }
+
+    /**
+     * 規則版本 4 的四條各自關掉（研究端開關 NIGHTREAD_OBJ_SEAM／_TXTSTROKE／_PFSHAPE／_INPAINT），合成頁的成品摘要都要變——
+     * 公開 fixture 動不到它們，守門只靠合成頁。修法 a（淡小記號留灰，pfMark＝0）也守。
+     */
+    @Test
+    fun eachVersion4RuleChangesTheDigest() {
+        val base = NightReadParams()
+        val on = synPages.associateWith { pageDigest(it, base) }
+        val switches = listOf(
+            "seam（q1 灰虛線補黑）" to base.copy(obj = base.obj.copy(seam = false)),
+            "textStroke（q2 沒有字框的手寫字）" to base.copy(obj = base.obj.copy(textStroke = false)),
+            "pfShape（q3 淡線外圈貼線形）" to base.copy(obj = base.obj.copy(pfShape = false)),
+            "inpaintIslands（q4 去字區旁的小塊）" to base.copy(obj = base.obj.copy(inpaintIslands = false)),
+            "pfMark（修法 a 淡小記號留灰）" to base.copy(obj = base.obj.copy(pfMark = 0)),
+        )
+        for ((name, p) in switches) {
+            val changed = synPages.filter { pageDigest(it, p) != on[it] }
+            println("關掉 $name：摘要變了的合成頁 $changed")
+            assertTrue("關掉 $name 時合成頁的摘要要變（不然守門抓不到這條的改動）", changed.isNotEmpty())
+        }
+    }
 
     @Test
     fun productOutputMatchesRulesVersion() {
-        val tiers = listOf(NightTier.L2, NightTier.L3)
         val md = MessageDigest.getInstance("SHA-256")
         val perPage = ArrayList<String>()
         for (page in pages) {
             val pageMd = MessageDigest.getInstance("SHA-256")
-            NightRead.renderTiers(input(page), tiers.map { it.apply() }) { k, gray ->
-                val head = "$page/${tiers[k].key}:"
-                md.update(head.toByteArray())
-                pageMd.update(head.toByteArray())
-                if (gray == null) {
-                    // 更多與標準相同（產品不另存 more 檔）
-                    md.update("=".toByteArray())
-                    pageMd.update("=".toByteArray())
-                } else {
-                    val bytes = ByteArray(gray.data.size) { gray.data[it].toByte() }
-                    val size = "${gray.w}x${gray.h}".toByteArray()
-                    md.update(size)
-                    md.update(bytes)
-                    pageMd.update(size)
-                    pageMd.update(bytes)
-                }
-            }
+            feedPage(page, NightReadParams(), md, pageMd)
             perPage += "$page=${hex(pageMd.digest()).take(16)}"
         }
         val actual = hex(md.digest())

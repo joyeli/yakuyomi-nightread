@@ -173,9 +173,10 @@ class BgObjectsParityTest {
             val p = it.trim().split(" ").map(String::toInt)
             TextRegion(p[0], p[1], p[2], p[3])
         }.toList()
+        val inp = if (javaClass.classLoader!!.getResource("page/${page}_inpaint.png") != null) readMask("page/${page}_inpaint.png") else null
         return NightReadInput(
             gray = readGray("page/${page}_gray.png"), seg = readMask("page/${page}_seg.png"), regions = regions,
-            charMask = readMask("page/${page}_char.png"), chroma = readGray("page/${page}_chroma.png"),
+            charMask = readMask("page/${page}_char.png"), chroma = readGray("page/${page}_chroma.png"), inpaintMask = inp,
         )
     }
 
@@ -196,13 +197,23 @@ class BgObjectsParityTest {
         assertTrue("ch34_015 要有效果線區塗黑", fx.any())
     }
 
+    /**
+     * 規則版本 4 的合成頁 syn_v4（research/make_v4_guard_fixture.py；含去字遮罩）：淡線外圈貼線形與淡小記號（phalo）、灰虛線補黑
+     * （obj_seam）、去字區旁的小塊不塗、沒有字框的手寫字畫亮——整頁量測與亮背景區函式層逐像素。
+     */
+    @Test
+    fun pageSynV4Rules4() {
+        val (_, fill, _) = checkPage("syn_v4", expectFx = false)
+        assertTrue("syn_v4 要有亮背景區塗黑", fill.any())
+    }
+
     /** 回傳（否決、亮背景區塗黑、效果線區）。 */
     private fun checkPage(page: String, expectFx: Boolean): Triple<Mask, Mask, Mask> {
         val p = NightTier.L3.apply()
         val a = NightRead.analyze(input(page), p, null, null, shared = false)
         val diag = HashMap<String, Any>()
         diag["obj"] = true
-        val ctx = BgObjects.context(a.g, a.charMask, a.charRaw, a.bubbleUntrim, a.seg, a.frame, p.obj, diag)
+        val ctx = BgObjects.context(a.g, a.charMask, a.charRaw, a.bubbleUntrim, a.seg, a.frame, p.obj, diag, a.inpaint)
         val keys = mutableListOf("obj_ink" to "ink", "obj_bright" to "bright", "obj_can4" to "can4", "obj_tone" to "tone",
             "obj_light" to "light", "obj_E" to "E", "obj_Ev2" to "Ev2", "obj_longz" to "longz", "obj_X3" to "X3", "obj_spark" to "spark",
             "obj_phalo" to "phalo")
@@ -223,6 +234,7 @@ class BgObjectsParityTest {
         assertMask("$page 亮背景區塗黑", readMask("page/${page}_obj_fill.png"), fill)
         assertMask("$page 描亮邊", readMask("page/${page}_obj_band.png"), d2["obj_band"] as Mask? ?: empty)
         assertMask("$page 字", readMask("page/${page}_obj_txt.png"), d2["obj_txt"] as Mask? ?: empty)
+        assertMask("$page 補縫（規則版本 4）", readMask("page/${page}_obj_seam.png"), d2["obj_seam"] as Mask? ?: empty)
         val fxp = d2["obj_fxpaint"] as Mask
         assertMask("$page 效果線區", readMask("page/${page}_obj_fxpaint.png"), fxp)
         // 逐區特徵（研究端 raw：nl nc nt ae fit thick csum marks ok）

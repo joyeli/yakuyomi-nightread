@@ -38,8 +38,10 @@ object NightRead {
      *  - 3（2026-10-04）：「更多」背景物件規則（[BgObjects]）＋效果線與閃光不算物件（[EffectLines]；裁定 2 的 A 有限制、C）＋
      *    複核收尾（人物旁淡線外圈不塗、字畫亮只限有字框）。只動更多，標準與版本 2 逐像素相同。版本 3 的 debug APK 同日交給使用者，
      *    之後的規則修改一律加到 4。
+     *  - 4（2026-10-05，還沒交出）：「更多」灰虛線補黑、沒有字框的手寫字畫亮、人物旁淡線外圈貼線形（含淡小記號留灰）、譯後頁
+     *    去字區旁的小塊不塗（[NightReadInput.inpaintMask]）。只動更多，標準與版本 3 逐像素相同。交出之後「更多」凍結，只修紅線。
      */
-    const val RULES_VERSION: Int = 3
+    const val RULES_VERSION: Int = 4
 
     /**
      * 重繪一頁。
@@ -190,6 +192,8 @@ object NightRead {
          * 放在分析而不是合成：合成時活著的遮罩多（成品、還原遮罩、灰圈收集的幾張），證據的暫存疊上去會墊高記憶體峰值。
          */
         val ringEvidence: LongArray?,
+        /** 譯後頁的去字遮罩（[NightReadInput.inpaintMask]，同頁尺寸；只給「更多」背景物件規則的孤島判斷）；沒有或全空＝null。 */
+        val inpaint: Mask? = null,
     ) {
         val sep: Mask? get() = layer?.sep
 
@@ -232,6 +236,12 @@ object NightRead {
     ): Analysis {
         val g = Regions.normalizePaper(input.gray, input.chroma, p)
         val seg = input.seg
+        val inpaint = input.inpaintMask?.let { m ->
+            require(m.w == input.gray.w && m.h == input.gray.h) {
+                "inpaintMask 要與頁同尺寸（${input.gray.w}×${input.gray.h}），收到 ${m.w}×${m.h}"
+            }
+            if (m.any()) m else null
+        }
 
         val charRaw = input.charMask
         val charMask = Regions.smoothCharMask(Regions.snapCharMask(charRaw, g, p), g, p)
@@ -337,7 +347,7 @@ object NightRead {
             bubbleUntrim = bubbleRes.bubble, cored = bubbleRes.cored, sealed = sealedOnly, anySealed = anySealed,
             bubble = bubble, bubbleStruct = bubbleStruct, bubbleLocal = bubbleLocal, lost = lost,
             plan = plan, scene = scene, layer = layer, p = p, shared = shared, chroma = input.chroma,
-            ringEvidence = ringEvidence,
+            ringEvidence = ringEvidence, inpaint = inpaint,
         )
     }
 
@@ -1205,7 +1215,7 @@ object NightRead {
      * 連通元件是那時的峰值）；每個開了規則的檔各算一次。
      */
     private fun objContext(a: Analysis, p: NightReadParams, diag: MutableMap<String, Any>?): BgObjects.Context =
-        BgObjects.context(a.g, a.charMask, a.charRaw, a.bubbleUntrim, a.seg, a.frame, p.obj, diag)
+        BgObjects.context(a.g, a.charMask, a.charRaw, a.bubbleUntrim, a.seg, a.frame, p.obj, diag, a.inpaint)
 
     /**
      * 背景物件規則 V（研究端 compose 的否決分支）：先只塗標準（[NightTier.L2] 的 keep ∩ 這一檔的 keep）、再塗全部；多塗的連通塊
