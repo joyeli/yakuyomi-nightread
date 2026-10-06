@@ -192,6 +192,16 @@ without re-deriving them:
 
 - `NightRead` is an `object` and holds no state. The debug hook is a parameter (`NightReadDebug`), not a
   global field, so `render` can be called concurrently.
+- A caller that only wants stage timings can make its hook implement `NightReadStageTimer`: the stage names and
+  their order stay the same, and the stages that report a mask count send 0 instead (about ten full-page scans saved).
+- Intra-page parallelism (2026-10-06): `render(input, p, debug, parallel)` and
+  `renderTiers(input, tiers, debug, parallel, sink)` take an `Executor`. The independent analysis branches
+  (character-mask smoothing, scene curve, grey-ring evidence, sticker plan) and the「更多」background-object
+  measurement run on it, and the calling thread waits only when it needs a result. A branch the pool has not
+  started yet is run by the calling thread itself, so a small, busy or rejecting pool never stalls. The output is
+  bit-for-bit identical to the sequential run; `null` (the old overloads) is sequential. The cost is peak heap:
+  about 12–24 MB more on a 2.6 MPx page (about 5–9 B/px, depending on scheduling), so it rarely pays when several pages already run at once on
+  a tight heap budget (see "加速四批" in `docs/DECISIONS.md`).
 - The segmenters that produce `charMask` are not this module's concern. In yakuyomi-engine each holds one
   NCNN net and is `AutoCloseable`: build once, reuse across pages, close when done.
 

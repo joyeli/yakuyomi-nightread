@@ -279,7 +279,9 @@ compose, so there is one code path. `renderTiers` runs the analysis once and str
 to a sink; a level whose kept-component set equals the previous level's is not composed at all and arrives as
 null, because the output depends on the levels only through that set. The three parameter sets come from
 `NightTier.apply(base)`. Each level's output is bit-for-bit identical to a single-level `render`, and the
-lowest heap the streaming version runs in is the same as for one level.
+lowest heap the streaming version runs in is the same as for one level. The independent analysis branches can
+run on an `Executor` the caller supplies (intra-page parallelism: same output, higher peak heap; see "加速四批" in
+DECISIONS).
 
 ## Two red lines
 
