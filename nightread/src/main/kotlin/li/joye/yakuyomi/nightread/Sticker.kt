@@ -92,17 +92,11 @@ internal object Sticker {
         // 沒有開放背景核＝整顆都是窄碎 ⇒ 全保護（極端保守）
         if (!hasSeed) return Mask(w, h, BooleanArray(w * h) { true })
 
-        var recon = seed
-        var prev = -1
-        val k3 = Cv.rect(3, 3)
-        for (step in 0 until 4000) {
-            recon = Cv.dilate(recon, k3) and compH
-            val cnt = recon.count()
-            if (cnt == prev) break
-            prev = cnt
-        }
+        // 由核做 3×3 測地重建：每步「外擴 3×3 再與 compH 交集」、不再長大就停、最多 4000 步＝BFS 到 4000 步內可達
+        //（[Cv.geodesicDistance] step 1；種子是 compH 的侵蝕、本來就在 compH 裡）。逐位元相同，成本只跟到達面積有關。
+        val dist = Cv.geodesicDistance(seed, compH, 1, 4000)
         val appendage = Mask(hw, hh)
-        for (i in appendage.data.indices) appendage.data[i] = compH.data[i] && !recon.data[i]
+        for (i in appendage.data.indices) appendage.data[i] = compH.data[i] && dist[i] < 0
         val acc = Cv.ccStats(appendage, 8)
         val need = max(100.0, p.stickerProtectEatenMin * area) / 4.0
         val eatenPerBlob = IntArray(acc.n)

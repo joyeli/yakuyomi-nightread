@@ -292,8 +292,13 @@ internal object Regions {
         }
         keepIds.remove(0)
         if (keepIds.isEmpty()) return Mask(comp.w, comp.h)
+        // 逐像素查 BooleanArray（`labels[i] in keepIds` 每像素一次 HashSet 查詢＋裝箱）
+        val want = BooleanArray(cc.n)
+        for (id in keepIds) want[id] = true
         val filled = Mask(comp.w, comp.h)
-        for (i in filled.data.indices) filled.data[i] = cc.labels[i] in keepIds
+        val fd = filled.data
+        val lab = cc.labels
+        for (i in fd.indices) fd[i] = want[lab[i]]
         return Cv.geodesicGrow(filled, comp, recoverR, step = 3)
     }
 

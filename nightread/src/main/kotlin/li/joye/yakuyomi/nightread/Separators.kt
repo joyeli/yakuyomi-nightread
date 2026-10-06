@@ -142,7 +142,15 @@ internal object Separators {
     /** `np.dot` 兩維：逐項乘、再相加（無 FMA，實測同 numpy）。 */
     private fun dot(ax: Double, ay: Double, bx: Double, by: Double): Double = ax * bx + ay * by
 
-    private fun rint(v: Double): Int = Math.rint(v).toInt()
+    /**
+     * `Math.rint(v).toInt()`（四捨六入五成雙）。|v| < 2⁵¹ 時用加減 1.5·2⁵² 的捨入（預設捨入模式就是五成雙，結果與 rint 相同，
+     * −0.0 也一樣變 0），其餘（含 NaN）退回 [Math.rint]。inline：debug APK 不內聯，`Math.rint → StrictMath.rint → copySign…`
+     * 一串真呼叫讓格溝在 debug 版慢 9 倍（2026-10-06 剖析）。
+     */
+    @Suppress("NOTHING_TO_INLINE")
+    private inline fun rint(v: Double): Int =
+        if (v > -2.251799813685248E15 && v < 2.251799813685248E15) ((v + 6.755399441055744E15) - 6.755399441055744E15).toInt()
+        else Math.rint(v).toInt()
 
     /** 分段計時（除錯／效能量測用）：[debug] 非 null 時把耗時（ms）累加到 "t_[key]"。 */
     private inline fun <T> timed(debug: MutableMap<String, Any>?, key: String, block: () -> T): T {

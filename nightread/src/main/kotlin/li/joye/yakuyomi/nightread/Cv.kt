@@ -25,8 +25,10 @@ import kotlin.math.sqrt
  * - 結構元素形狀重現 `cv2.getStructuringElement(MORPH_ELLIPSE, (s, s))` 的**光柵化演算法**
  *   （cv2 不是理想圓：以 r=s/2 為半徑、逐列算 `dx = round(c * sqrt(1 - (dy/r)^2))` 的橫向跨距），
  *   否則 dilate 結果會跟 Python 差幾個像素、連鎖影響所有門檻量測。
+ * - 影像與核的欄位一律 `@JvmField`：debug APK（debuggable ART）只編譯不內聯，`data`／`w` 的 getter 在逐像素迴圈裡
+ *   每頁是二十多億次真呼叫（2026-10-06 剖析）；欄位存取沒有呼叫。Kotlin 呼叫端寫法不變，Java 呼叫端改讀欄位。
  */
-class Mask(val w: Int, val h: Int, val data: BooleanArray = BooleanArray(w * h)) {
+class Mask(@JvmField val w: Int, @JvmField val h: Int, @JvmField val data: BooleanArray = BooleanArray(w * h)) {
     operator fun get(x: Int, y: Int): Boolean = data[y * w + x]
     operator fun set(x: Int, y: Int, v: Boolean) { data[y * w + x] = v }
     fun copy(): Mask = Mask(w, h, data.copyOf())
@@ -53,7 +55,7 @@ class Mask(val w: Int, val h: Int, val data: BooleanArray = BooleanArray(w * h))
     fun orInPlace(o: Mask): Mask { for (i in data.indices) if (o.data[i]) data[i] = true; return this }
 }
 
-class Gray(val w: Int, val h: Int, val data: IntArray = IntArray(w * h)) {
+class Gray(@JvmField val w: Int, @JvmField val h: Int, @JvmField val data: IntArray = IntArray(w * h)) {
     operator fun get(x: Int, y: Int): Int = data[y * w + x]
     operator fun set(x: Int, y: Int, v: Int) { data[y * w + x] = v }
     fun copy(): Gray = Gray(w, h, data.copyOf())
@@ -64,7 +66,7 @@ class Gray(val w: Int, val h: Int, val data: IntArray = IntArray(w * h)) {
     fun toF(): FImg = FImg(w, h, FloatArray(w * h) { data[it].toFloat() })
 }
 
-class FImg(val w: Int, val h: Int, val data: FloatArray = FloatArray(w * h)) {
+class FImg(@JvmField val w: Int, @JvmField val h: Int, @JvmField val data: FloatArray = FloatArray(w * h)) {
     operator fun get(x: Int, y: Int): Float = data[y * w + x]
     operator fun set(x: Int, y: Int, v: Float) { data[y * w + x] = v }
     fun copy(): FImg = FImg(w, h, data.copyOf())
@@ -76,12 +78,12 @@ class FImg(val w: Int, val h: Int, val data: FloatArray = FloatArray(w * h)) {
  * [runStart] / [runEnd] 是每一列的連續 run 半開區間（相對核座標，`x` 從 0 起算）；run 為空時
  * `runStart[y] >= runEnd[y]`。形態學靠它做 O(W·H·kh) 的列分解，不逐像素掃核。
  */
-class Kernel(val w: Int, val h: Int, val data: BooleanArray) {
-    val ax: Int get() = w / 2
-    val ay: Int get() = h / 2
+class Kernel(@JvmField val w: Int, @JvmField val h: Int, @JvmField val data: BooleanArray) {
+    @JvmField val ax: Int = w / 2
+    @JvmField val ay: Int = h / 2
 
-    val runStart = IntArray(h)
-    val runEnd = IntArray(h)
+    @JvmField val runStart = IntArray(h)
+    @JvmField val runEnd = IntArray(h)
 
     init {
         for (y in 0 until h) {
@@ -101,13 +103,13 @@ class Kernel(val w: Int, val h: Int, val data: BooleanArray) {
  *（含背景 0 號），欄位對應 CC_STAT_LEFT/TOP/WIDTH/HEIGHT/AREA。
  */
 class CC(
-    val n: Int,
-    val labels: IntArray,
-    val left: IntArray,
-    val top: IntArray,
-    val width: IntArray,
-    val height: IntArray,
-    val area: IntArray,
+    @JvmField val n: Int,
+    @JvmField val labels: IntArray,
+    @JvmField val left: IntArray,
+    @JvmField val top: IntArray,
+    @JvmField val width: IntArray,
+    @JvmField val height: IntArray,
+    @JvmField val area: IntArray,
 )
 
 object Cv {
@@ -141,6 +143,11 @@ object Cv {
 
     // ── 二值形態學（cv2.dilate / erode / morphologyEx）──────────────────
 
+    /**
+     * 二值膨脹／侵蝕：1×n、n×1 實心核走 [lineMorph]，其他核走位元打包（[dilatePacked]／[erodePacked]）。
+     * 打包版與原本的逐列前綴計數版逐像素相同（取樣：輸出 (x, y) 看輸入 (x + [runStart−ax .. runEnd−1−ax], y − (ky−ay))；
+     * 膨脹影像外當 0、侵蝕影像外當前景），前綴計數版留在測試（MorphPackedTest）當參考實作。
+     */
     fun dilate(m: Mask, k: Kernel, iterations: Int = 1): Mask {
         val line = lineKernel(k)
         var cur = m
@@ -148,7 +155,7 @@ object Cv {
             cur = when {
                 line > 0 -> lineMorph(cur, line, horizontal = true, anchor = k.ax, dilate = true)
                 line < 0 -> lineMorph(cur, -line, horizontal = false, anchor = k.ay, dilate = true)
-                else -> dilateOnce(cur, k)
+                else -> dilatePacked(cur, k)
             }
         }
         return cur
@@ -161,7 +168,7 @@ object Cv {
             cur = when {
                 line > 0 -> lineMorph(cur, line, horizontal = true, anchor = k.ax, dilate = false)
                 line < 0 -> lineMorph(cur, -line, horizontal = false, anchor = k.ay, dilate = false)
-                else -> erodeOnce(cur, k)
+                else -> erodePacked(cur, k)
             }
         }
         return cur
@@ -198,6 +205,45 @@ object Cv {
                 var v = 0L
                 for (b in 0 until n) if (d[base + x0 + b]) v = v or (1L shl b)
                 out[wb + i] = v
+            }
+        }
+        return out
+    }
+
+    /** ¬[m] 的 [packBits]（只取反影像內的位元：末字超出寬度的位元照樣是 0）。 */
+    fun packBitsNot(m: Mask): LongArray {
+        val w = m.w
+        val h = m.h
+        val nw = (w + 63) ushr 6
+        val out = LongArray(nw * h)
+        val d = m.data
+        for (y in 0 until h) {
+            val base = y * w
+            val wb = y * nw
+            for (i in 0 until nw) {
+                val x0 = i shl 6
+                val n = min(64, w - x0)
+                var v = 0L
+                for (b in 0 until n) if (!d[base + x0 + b]) v = v or (1L shl b)
+                out[wb + i] = v
+            }
+        }
+        return out
+    }
+
+    /** [unpackBits] 再取反（＝¬遮罩）。 */
+    fun unpackBitsNot(a: LongArray, w: Int, h: Int): Mask {
+        val nw = (w + 63) ushr 6
+        val out = Mask(w, h)
+        val od = out.data
+        for (y in 0 until h) {
+            val base = y * w
+            val wb = y * nw
+            for (i in 0 until nw) {
+                val x0 = i shl 6
+                val n = min(64, w - x0)
+                val v = a[wb + i]
+                for (b in 0 until n) od[base + x0 + b] = (v ushr b) and 1L == 0L
             }
         }
         return out
@@ -332,12 +378,6 @@ object Cv {
     }
 
     /**
-     * 列分解的膨脹。核的每一列是一段 run，所以該列的貢獻＝「原圖某一行的某個水平區間內有沒有
-     * true」——用每行的 prefix count O(1) 查詢，總複雜度 O(W·H·kh)。
-     *
-     * 邊界：外側視為 0，所以區間裁切到影像內即可（前景不外溢）。
-     */
-    /**
      * 一維長條核（1×n 或 n×1）的快路：**最近目標像素距離**兩趟掃描，成本與核長無關。
      *
      * 二值遮罩的線膨脹＝「窗內有沒有 true」、線侵蝕＝「窗內有沒有 false」（影像外：膨脹視為 0 不貢獻、
@@ -403,75 +443,6 @@ object Cv {
             return -k.h
         }
         return 0
-    }
-
-    private fun dilateOnce(m: Mask, k: Kernel): Mask {
-        val w = m.w
-        val h = m.h
-        val out = Mask(w, h)
-        val prefix = IntArray(w + 1)
-        for (ky in 0 until k.h) {
-            val runS = k.runStart[ky]
-            val runE = k.runEnd[ky]
-            if (runS >= runE) continue
-            val dy = ky - k.ay
-            // 輸出 (x,y) 取樣輸入 (x + [runS-ax .. runE-1-ax], y - dy)
-            val offL = runS - k.ax
-            val offR = runE - 1 - k.ax
-            for (y in 0 until h) {
-                val sy = y - dy
-                if (sy < 0 || sy >= h) continue
-                val base = sy * w
-                prefix[0] = 0
-                for (x in 0 until w) prefix[x + 1] = prefix[x] + if (m.data[base + x]) 1 else 0
-                if (prefix[w] == 0) continue
-                val obase = y * w
-                for (x in 0 until w) {
-                    if (out.data[obase + x]) continue
-                    val a = max(0, x + offL)
-                    val b = min(w - 1, x + offR)
-                    if (a > b) continue
-                    if (prefix[b + 1] - prefix[a] > 0) out.data[obase + x] = true
-                }
-            }
-        }
-        return out
-    }
-
-    /**
-     * 列分解的腐蝕。初值全 true，逐核列否決；外側視為前景（cv2 的
-     * BORDER_CONSTANT + morphologyDefaultBorderValue），所以落在影像外的區間不否決任何像素。
-     */
-    private fun erodeOnce(m: Mask, k: Kernel): Mask {
-        val w = m.w
-        val h = m.h
-        val out = Mask(w, h, BooleanArray(w * h) { true })
-        val prefix = IntArray(w + 1)
-        for (ky in 0 until k.h) {
-            val runS = k.runStart[ky]
-            val runE = k.runEnd[ky]
-            if (runS >= runE) continue
-            val dy = ky - k.ay
-            val offL = runS - k.ax
-            val offR = runE - 1 - k.ax
-            for (y in 0 until h) {
-                val sy = y - dy
-                val obase = y * w
-                if (sy < 0 || sy >= h) continue     // 外側視為前景 ⇒ 不否決
-                val base = sy * w
-                prefix[0] = 0
-                for (x in 0 until w) prefix[x + 1] = prefix[x] + if (m.data[base + x]) 1 else 0
-                for (x in 0 until w) {
-                    if (!out.data[obase + x]) continue
-                    val a = max(0, x + offL)
-                    val b = min(w - 1, x + offR)
-                    if (a > b) continue              // 整段在影像外 ⇒ 視為前景
-                    val need = b - a + 1
-                    if (prefix[b + 1] - prefix[a] < need) out.data[obase + x] = false
-                }
-            }
-        }
-        return out
     }
 
     // ── 灰階形態學（ink_line_mask 的 7×7 ellipse blackhat）───────────────
@@ -2486,8 +2457,11 @@ object Cv {
         return Gray(w, h, out)
     }
 
-    /** 二值侵蝕的位元打包快路：`erode(m, k)` ＝ ¬`dilate`(¬m, k)（同一組位移；影像外：膨脹當 0 ⇔ 侵蝕當 1，同 cv2）。與 [erode] 逐像素相同。 */
-    fun erodePacked(m: Mask, k: Kernel): Mask = dilatePacked(m.not(), k).not()
+    /**
+     * 二值侵蝕的位元打包快路：`erode(m, k)` ＝ ¬`dilate`(¬m, k)（同一組位移；影像外：膨脹當 0 ⇔ 侵蝕當 1，同 cv2）。
+     * 取反直接在打包／解包時做（[packBitsNot]／[unpackBitsNot]），不配兩張整頁的取反遮罩。
+     */
+    fun erodePacked(m: Mask, k: Kernel): Mask = unpackBitsNot(dilateBits(packBitsNot(m), m.w, m.h, k), m.w, m.h)
 
     /** [close]（cv2 MORPH_CLOSE）的位元打包快路。 */
     fun closePacked(m: Mask, k: Kernel): Mask = erodePacked(dilatePacked(m, k), k)
