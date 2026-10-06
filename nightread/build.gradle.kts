@@ -24,6 +24,10 @@ dependencies {
 
 // parity 測試會印出逐頁的差異統計，沒有這段就只看得到「失敗」而看不到數字
 tasks.withType<Test>().configureEach {
+    // 測試 JVM 的 heap（Gradle 預設 512 MB）：ParallelRenderTest 在 demo04（7.2 MPx）上開 4 條頁內池，尖峰約 430 MB 再加上留著比對
+    // 的依序版成品，512 MB 是擦邊——2026-10-07 OOM 過一次（之前兩輪都過）。產品的記憶體估算另有最低可跑 heap 的量測（DECISIONS），
+    // 不靠這個上限。
+    maxHeapSize = "1g"
     testLogging {
         showStandardStreams = true
         events("passed", "failed")

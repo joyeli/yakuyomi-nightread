@@ -199,9 +199,11 @@ without re-deriving them:
   (character-mask smoothing, scene curve, grey-ring evidence, sticker plan) and the「更多」background-object
   measurement run on it, and the calling thread waits only when it needs a result. A branch the pool has not
   started yet is run by the calling thread itself, so a small, busy or rejecting pool never stalls. The output is
-  bit-for-bit identical to the sequential run; `null` (the old overloads) is sequential. The cost is peak heap:
-  about 12–24 MB more on a 2.6 MPx page (about 5–9 B/px, depending on scheduling), so it rarely pays when several pages already run at once on
-  a tight heap budget (see "加速四批" in `docs/DECISIONS.md`).
+  bit-for-bit identical to the sequential run; `null` (the old overloads) is sequential. Interrupts are ignored
+  the same way as in the sequential run: a calling thread interrupted while it waits for a branch keeps waiting
+  and sets its interrupt flag again before returning. The cost is peak heap: about 11–27 MB more on a 2.6 MPx
+  page (up to about 10.4 B/px, depending on scheduling), so it rarely pays when several pages already run at
+  once on a tight heap budget; budget at least 70 B/px per page with it on (see "加速四批" in `docs/DECISIONS.md`).
 - The segmenters that produce `charMask` are not this module's concern. In yakuyomi-engine each holds one
   NCNN net and is `AutoCloseable`: build once, reuse across pages, close when done.
 

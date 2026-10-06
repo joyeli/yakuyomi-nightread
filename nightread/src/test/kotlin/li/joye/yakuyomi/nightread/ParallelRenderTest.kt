@@ -5,10 +5,13 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.awt.image.BufferedImage
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import javax.imageio.ImageIO
 
 /**
@@ -117,6 +120,74 @@ class ParallelRenderTest {
             big.shutdown()
             one.shutdown()
             big.awaitTermination(10, TimeUnit.SECONDS)
+        }
+    }
+
+    /**
+     * 中斷與依序版一樣不理會（2026-10-07 審查）：分支在池子裡跑的時候主執行緒被中斷（不只一次），join 照等到分支做完、
+     * 回傳值不變，中斷旗標在 join 回傳後補回去。以前 join 直接拋 InterruptedException。
+     * 打斷的那條先打完五次、才放行分支：之後主執行緒看到的旗標只可能是 join 補回去的。
+     */
+    @Test
+    fun branchJoinWaitsThroughInterruptsAndRestoresTheFlag() {
+        val pool = Executors.newSingleThreadExecutor()
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        try {
+            val b = NightRead.Branch(pool) {
+                started.countDown()
+                release.await()
+                42
+            }
+            assertTrue(started.await(10, TimeUnit.SECONDS))
+            val main = Thread.currentThread()
+            val interrupter = Thread {
+                repeat(5) {
+                    main.interrupt()
+                    Thread.sleep(10)
+                }
+                release.countDown()
+            }
+            interrupter.start()
+            val v = b.join()
+            val flag = Thread.interrupted() // 讀並清掉，免得影響下面的 join 與後面的測試
+            interrupter.join()
+            assertEquals(42, v)
+            assertTrue("join 回傳後中斷旗標要補回去", flag)
+        } finally {
+            Thread.interrupted()
+            pool.shutdownNow()
+        }
+    }
+
+    /** 整頁：開了並行的 renderTiers 在主執行緒一直被中斷時照樣做完，成品與依序版逐位元相同（依序版本來就不理會中斷）。 */
+    @Test
+    fun parallelRenderIgnoresInterruptsLikeSequential() {
+        val pool = Executors.newFixedThreadPool(3)
+        try {
+            val inp = input("demo06")
+            val seq = runTiers(inp, null)
+            val result = AtomicReference<Run?>()
+            val error = AtomicReference<Throwable?>()
+            val flagAfter = AtomicBoolean(false)
+            val worker = Thread {
+                try {
+                    result.set(runTiers(inp, pool))
+                } catch (e: Throwable) {
+                    error.set(e)
+                }
+                flagAfter.set(Thread.currentThread().isInterrupted)
+            }
+            worker.start()
+            while (worker.isAlive) {
+                worker.interrupt()
+                Thread.sleep(10)
+            }
+            assertEquals("並行版被中斷不該拋例外", null, error.get())
+            assertSame("被中斷的並行版", seq, result.get()!!)
+            assertTrue("中斷旗標要留著給呼叫端看", flagAfter.get())
+        } finally {
+            pool.shutdownNow()
         }
     }
 }

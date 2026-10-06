@@ -156,7 +156,7 @@ val charMask = Mask(w, h, BooleanArray(w * h) { a[it] || b[it] })
 
 - `NightRead` 是 object 且不持有狀態。除錯回呼是傳入參數（`NightReadDebug`）而不是全域欄位，所以 `render` 可以並發呼叫。
 - 只要分段計時的呼叫端讓回呼實作 `NightReadStageTimer`：段名與順序不變，遮罩計數那幾段的值送 0（不算那十來次整頁掃描）。
-- 頁內並行（2026-10-06）：`render(input, p, debug, parallel)`、`renderTiers(input, tiers, debug, parallel, sink)` 多一個 `Executor`。分析裡彼此獨立的分支（人物收邊平滑、場景曲線、灰圈證據、貼紙計畫）與「更多」的背景物件量測丟給它跑，主執行緒用到時才等；分支還沒開始就由主執行緒自己跑，所以池子小、滿或拒收都不會乾等。輸出與依序版逐位元相同；`null`（舊的多載）＝依序。代價是 heap 尖峰：2.6 MPx 頁約多 12–24 MB（約 5–9 B/px，跟排程有關），所以多頁並行、heap 預算緊的時候通常不划算（見 `docs/DECISIONS.md`「加速四批」）。
+- 頁內並行（2026-10-06）：`render(input, p, debug, parallel)`、`renderTiers(input, tiers, debug, parallel, sink)` 多一個 `Executor`。分析裡彼此獨立的分支（人物收邊平滑、場景曲線、灰圈證據、貼紙計畫）與「更多」的背景物件量測丟給它跑，主執行緒用到時才等；分支還沒開始就由主執行緒自己跑，所以池子小、滿或拒收都不會乾等。輸出與依序版逐位元相同；`null`（舊的多載）＝依序。中斷跟依序版一樣不理會：主執行緒等分支時被中斷照等，回傳前把中斷旗標補回去。代價是 heap 尖峰：2.6 MPx 頁約多 11–27 MB（最多約 10.4 B/px，跟排程有關），所以多頁並行、heap 預算緊的時候通常不划算；開了每頁至少估 70 B/px（見 `docs/DECISIONS.md`「加速四批」）。
 - 產生 `charMask` 的分割器不歸這個模組管。在 yakuyomi-engine 裡它們各持一個 NCNN net、都是 `AutoCloseable`：建一次、跨頁重複用、用完 close。
 
 ## 參數

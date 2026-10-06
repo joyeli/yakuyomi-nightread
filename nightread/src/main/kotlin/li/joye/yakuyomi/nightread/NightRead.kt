@@ -22,8 +22,9 @@ import kotlin.math.roundToInt
 typealias NightReadDebug = (stage: String, value: Int) -> Unit
 
 /**
- * 只要段名的除錯回呼（產品的分段計時用）：回呼物件實作這個介面時，值除了 `("tier", 檔位索引)` 一律送 0——遮罩計數等只給
- * parity 看的值不算（每頁省十來次整頁掃描）。段名與呼叫時點跟一般的除錯回呼完全相同，輸出不受影響。
+ * 只要段名的除錯回呼（產品的分段計時用）：回呼物件實作這個介面時，要另外掃整頁才算得出來的值（遮罩計數等只給 parity 看的，
+ * 經 [mark] 送）一律送 0——每頁省十來次整頁掃描。本來就順手算好、不另花工夫的值照送：`("tier", 檔位索引)`、`ringClaim` 的
+ * 認領像素數、`bubbleOutline[…]‰` 的貼墨比例。段名與呼叫時點跟一般的除錯回呼完全相同，輸出不受影響。
  */
 interface NightReadStageTimer : (String, Int) -> Unit
 
@@ -140,6 +141,7 @@ object NightRead {
      *   [parallel] 拒收（RejectedExecutionException）也一樣在主執行緒跑。呼叫端可以給一個「在呼叫執行緒上直接跑」的 Executor
      *   來暫時關掉並行（例如讓路時）。
      * - 分支拋的例外（含 OutOfMemoryError）在主執行緒用到它時原樣拋出；主執行緒自己出錯時，還沒開始的分支取消。
+     * - 中斷與依序版一樣不理會：主執行緒等分支時被中斷照等到它做完，回傳前把中斷旗標補回去（見 [Branch]）。
      * - 輸出（每檔成品、交出順序、合成鍵去重）與依序版逐位元相同；[debug] 的段名與順序也相同，但段的牆鐘時間不再代表那一段
      *   本身的成本（並行的分支算在等它的那一段裡）。給 [NightReadStageTimer] 以外的除錯回呼（要遮罩計數）時，人物收邊在原本的
      *   時點就等它做完。
@@ -202,16 +204,11 @@ object NightRead {
     }
 
     /**
-     * 與檔位無關的分析結果（[analyze] 產出、[composeTier] 消費）。各欄**不得被合成階段改寫**——三檔共用同一份。
-     *
-     * [shared]＝要合成不只一檔：這時才快取幾個每檔都要、但單檔用一次就丟的遮罩（泡外 41px 圈、留白帶、人物還原遮罩），
-     * 而且一律存成 1 bit/px（[packBits]），用的時候才展開——共用分析多佔的 heap 只有約 0.4 B/px。人物還原的
-     * alpha（4 B/px 浮點）刻意不留：每檔由快取的遮罩重做高斯（幾十 ms），否則它會疊在後面幾檔的合成峰值上（桌面量最低
-     * heap：留 alpha 比單檔高 2 MB，這樣做持平）。單檔 [render] 不快取。
-     */
-    /**
      * 頁內並行的一條分支（[renderTiers] 的 parallel）：[executor] 非 null 就交出去跑；[join] 時還沒開始＝在呼叫執行緒自己跑，
      * 已開始＝等它做完。[executor] null＝[join] 時才在呼叫執行緒跑（與依序版同一個時點）。例外在 [join] 原樣拋出。
+     *
+     * 中斷：依序版整頁不看中斷旗標（照樣做完），[join] 也一樣——等分支時被中斷照等到它做完，回傳前把旗標補回去（呼叫端之後
+     * 自己看得到）。否則開了並行的頁會在等分支時拋 InterruptedException，而依序版同一個中斷什麼事都沒有。
      */
     internal class Branch<T>(executor: Executor?, block: () -> T) {
         private val task = FutureTask(Callable(block))
@@ -228,10 +225,19 @@ object NightRead {
 
         fun join(): T {
             task.run()              // 還沒開始＝這裡跑；已開始或做完＝立刻返回
+            var interrupted = false
             try {
-                return task.get()
-            } catch (e: ExecutionException) {
-                throw e.cause ?: e
+                while (true) {
+                    try {
+                        return task.get()
+                    } catch (_: InterruptedException) {
+                        interrupted = true      // 照等（見類別說明）；get 拋出時已清掉旗標，下一輪不會立刻再拋
+                    } catch (e: ExecutionException) {
+                        throw e.cause ?: e
+                    }
+                }
+            } finally {
+                if (interrupted) Thread.currentThread().interrupt()
             }
         }
 
@@ -241,6 +247,14 @@ object NightRead {
         }
     }
 
+    /**
+     * 與檔位無關的分析結果（[analyze] 產出、[composeTier] 消費）。各欄**不得被合成階段改寫**——三檔共用同一份。
+     *
+     * [shared]＝要合成不只一檔：這時才快取幾個每檔都要、但單檔用一次就丟的遮罩（泡外 41px 圈、留白帶、人物還原遮罩），
+     * 而且一律存成 1 bit/px（[packBits]），用的時候才展開——共用分析多佔的 heap 只有約 0.4 B/px。人物還原的
+     * alpha（4 B/px 浮點）刻意不留：每檔由快取的遮罩重做高斯（幾十 ms），否則它會疊在後面幾檔的合成峰值上（桌面量最低
+     * heap：留 alpha 比單檔高 2 MB，這樣做持平）。單檔 [render] 不快取。
+     */
     internal class Analysis(
         val g: Gray,
         val seg: Mask,
