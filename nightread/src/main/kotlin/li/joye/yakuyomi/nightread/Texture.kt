@@ -110,13 +110,9 @@ internal object Texture {
         val rh = prep.rh
         val cands = prep.cands
         val cc = prep.cc
-        val content = if (exclude == null) prep.content else prep.content.copy().also { c ->
-            for (y in 0 until rh) {
-                val src = (ry0 + y) * w + rx0
-                val dst = y * rw
-                for (x in 0 until rw) if (exclude.data[src + x]) c.data[dst + x] = false
-            }
-        }
+        val content = prep.content
+        // exclude（整頁座標）在累計時才扣：不複製一份 ROI 大小的線稿遮罩
+        val excl = exclude?.data
         val minX = prep.minX
         val minY = prep.minY
         val maxX = prep.maxX
@@ -144,10 +140,20 @@ internal object Texture {
             val preC = IntArray(bw + 1)
             fun addRow(y: Int, sign: Int) {
                 val src = (y0 + y) * rw + x0
-                for (x in 0 until bw) {
-                    if (labels[src + x] == l) {
-                        colR[x] += sign
-                        if (cdat[src + x]) colC[x] += sign
+                if (excl == null) {
+                    for (x in 0 until bw) {
+                        if (labels[src + x] == l) {
+                            colR[x] += sign
+                            if (cdat[src + x]) colC[x] += sign
+                        }
+                    }
+                } else {
+                    val pg = (ry0 + y0 + y) * w + rx0 + x0
+                    for (x in 0 until bw) {
+                        if (labels[src + x] == l) {
+                            colR[x] += sign
+                            if (cdat[src + x] && !excl[pg + x]) colC[x] += sign
+                        }
                     }
                 }
             }
@@ -179,21 +185,32 @@ internal object Texture {
         val textureTh = p.textureTh
         var veto = Mask(rw, rh, BooleanArray(rw * rh) { cands.data[it] && dens[it] >= textureTh })
         if (veto.any()) {
-            val vc = Cv.ccStats(veto, 8)
-            // 塊級決定：候選塊的平均密度過高門檻才否決
-            val sum = DoubleArray(vc.n)
-            val cnt = IntArray(vc.n)
-            for (i in veto.data.indices) {
-                if (!veto.data[i]) continue
-                val l = vc.labels[i]
-                sum[l] += dens[i].toDouble()
-                cnt[l]++
+            // 塊級決定：候選塊的平均密度過高門檻才否決。游程標號（[Cv.ccRuns]）：逐塊加總的順序同逐像素掃描（列序、列內 x 遞增），
+            // 不配 ROI 大小的整頁標號（這裡是合成的記憶體峰值）
+            val vr = Cv.ccRuns(veto, 8)
+            val sum = DoubleArray(vr.n)
+            val cnt = IntArray(vr.n)
+            for (y in 0 until rh) {
+                val base = y * rw
+                for (k in vr.rowFirst[y] until vr.rowFirst[y + 1]) {
+                    val l = vr.lab[k]
+                    for (x in vr.rs[k]..vr.re[k]) {
+                        sum[l] += dens[base + x].toDouble()
+                        cnt[l]++
+                    }
+                }
             }
-            val keep = BooleanArray(vc.n) { l ->
-                l > 0 && vc.area[l] >= p.textureMinArea && sum[l] / max(cnt[l], 1) >= p.textureHi
+            val keep = BooleanArray(vr.n) { l ->
+                l > 0 && cnt[l] >= p.textureMinArea && sum[l] / max(cnt[l], 1) >= p.textureHi
             }
-            val vl = vc.labels
-            veto = Mask(rw, rh, BooleanArray(rw * rh) { keep[vl[it]] })
+            veto = Mask(rw, rh)
+            val vd = veto.data
+            for (y in 0 until rh) {
+                val base = y * rw
+                for (k in vr.rowFirst[y] until vr.rowFirst[y + 1]) {
+                    if (keep[vr.lab[k]]) java.util.Arrays.fill(vd, base + vr.rs[k], base + vr.re[k] + 1, true)
+                }
+            }
             if (veto.any()) {
                 veto = closeSquare(veto, p.textureClose * 2 + 1)
                 for (i in veto.data.indices) if (!cands.data[i]) veto.data[i] = false

@@ -1,5 +1,10 @@
 package li.joye.yakuyomi.nightread
 
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executor
+import java.util.concurrent.FutureTask
+import java.util.concurrent.RejectedExecutionException
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -67,7 +72,23 @@ object NightRead {
         input: NightReadInput,
         p: NightReadParams = NightReadParams(),
         debug: NightReadDebug? = null,
-    ): NightReadResult = render(input, p, debug, null)
+    ): NightReadResult = render(input, p, debug, null as MutableMap<String, Any>?)
+
+    /**
+     * 同 [render]，頁內並行：分析裡彼此獨立的分支（人物收邊平滑、場景曲線、灰圈證據、貼紙計畫）與「更多」的背景物件量測丟給
+     * [parallel] 跑（見 [renderTiers] 的同名參數）。輸出與依序版逐位元相同。
+     */
+    fun render(
+        input: NightReadInput,
+        p: NightReadParams,
+        debug: NightReadDebug?,
+        parallel: Executor?,
+    ): NightReadResult {
+        val a = analyze(input, p, debug, null, shared = false, parallel = parallel,
+            objFor = p.takeIf { it.more.enabled && it.obj.enabled })
+        a.awaitObj()
+        return composeTier(a, keepFor(a, p), p, debug, null)
+    }
 
     /**
      * 同 [render]，另把格溝與出血過濾的中間結果存進 [diag]（parity／除錯用，不影響輸出）：
@@ -106,6 +127,31 @@ object NightRead {
         tiers: List<NightReadParams>,
         debug: NightReadDebug? = null,
         sink: (Int, Gray?) -> Unit,
+    ) = renderTiers(input, tiers, debug, null, sink)
+
+    /**
+     * 同 [renderTiers]，頁內並行（2026-10-06）：分析裡彼此獨立的四條分支——人物收邊平滑、場景曲線（sceneFinal）、灰圈證據
+     * （[Ring.evidence]）、貼紙計畫（[Sticker.plan]，等白元件分類完才開始）——以及「更多」的背景物件量測（[BgObjects.context]，
+     * 等泡與人物收邊完才開始；只有開了「更多」新規則的檔用得到）丟給 [parallel] 跑，主執行緒照原本的順序往下做，用到結果時才等。
+     * 背景物件量測在第一檔合成之前等它做完（只跟分析的後半段重疊、不跟合成的記憶體峰值疊在一起）。
+     *
+     * - [parallel] null＝全部在呼叫執行緒依序跑（與上面那個多載完全相同，包括各段的時點）。
+     * - 分支還沒被 [parallel] 開始跑時，主執行緒等到它就自己跑（池子滿了不會乾等、也不會多出比池子大小＋呼叫執行緒更多的執行緒）；
+     *   [parallel] 拒收（RejectedExecutionException）也一樣在主執行緒跑。呼叫端可以給一個「在呼叫執行緒上直接跑」的 Executor
+     *   來暫時關掉並行（例如讓路時）。
+     * - 分支拋的例外（含 OutOfMemoryError）在主執行緒用到它時原樣拋出；主執行緒自己出錯時，還沒開始的分支取消。
+     * - 輸出（每檔成品、交出順序、合成鍵去重）與依序版逐位元相同；[debug] 的段名與順序也相同，但段的牆鐘時間不再代表那一段
+     *   本身的成本（並行的分支算在等它的那一段裡）。給 [NightReadStageTimer] 以外的除錯回呼（要遮罩計數）時，人物收邊在原本的
+     *   時點就等它做完。
+     * - 記憶體：分支同時活著的暫存會墊高分析段的峰值，背景物件量測的結果（約 1.25 B/px）多活過第一檔的合成；最低可跑 heap 的
+     *   量測見 docs/DECISIONS。
+     */
+    fun renderTiers(
+        input: NightReadInput,
+        tiers: List<NightReadParams>,
+        debug: NightReadDebug?,
+        parallel: Executor?,
+        sink: (Int, Gray?) -> Unit,
     ) {
         require(tiers.isNotEmpty()) { "renderTiers：至少要一檔" }
         val p0 = tiers[0]
@@ -118,7 +164,9 @@ object NightRead {
                     stickerSimpleMinFrac = p0.stickerSimpleMinFrac, more = p0.more) == p0,
             ) { "renderTiers：第 $k 檔與第 0 檔除了貼紙篩選三欄與「更多」新規則之外還有別的參數不同" }
         }
-        val a = analyze(input, p0, debug, null, shared = tiers.size > 1)
+        val a = analyze(input, p0, debug, null, shared = tiers.size > 1, parallel = parallel,
+            objFor = tiers.firstOrNull { it.more.enabled && it.obj.enabled })
+        a.awaitObj()
         var prev: List<Any?>? = null
         for ((k, t) in tiers.withIndex()) {
             val plan = keepFor(a, t)
@@ -161,6 +209,38 @@ object NightRead {
      * alpha（4 B/px 浮點）刻意不留：每檔由快取的遮罩重做高斯（幾十 ms），否則它會疊在後面幾檔的合成峰值上（桌面量最低
      * heap：留 alpha 比單檔高 2 MB，這樣做持平）。單檔 [render] 不快取。
      */
+    /**
+     * 頁內並行的一條分支（[renderTiers] 的 parallel）：[executor] 非 null 就交出去跑；[join] 時還沒開始＝在呼叫執行緒自己跑，
+     * 已開始＝等它做完。[executor] null＝[join] 時才在呼叫執行緒跑（與依序版同一個時點）。例外在 [join] 原樣拋出。
+     */
+    internal class Branch<T>(executor: Executor?, block: () -> T) {
+        private val task = FutureTask(Callable(block))
+
+        init {
+            if (executor != null) {
+                try {
+                    executor.execute(task)
+                } catch (_: RejectedExecutionException) {
+                    // 拒收：join 時在呼叫執行緒跑
+                }
+            }
+        }
+
+        fun join(): T {
+            task.run()              // 還沒開始＝這裡跑；已開始或做完＝立刻返回
+            try {
+                return task.get()
+            } catch (e: ExecutionException) {
+                throw e.cause ?: e
+            }
+        }
+
+        /** 還沒開始的就不跑了（已在跑的照樣跑完、結果丟掉）。 */
+        fun cancel() {
+            task.cancel(false)
+        }
+    }
+
     internal class Analysis(
         val g: Gray,
         val seg: Mask,
@@ -235,6 +315,26 @@ object NightRead {
         /** 灰圈收細只跟頁面有關的兩張遮罩（[Ring.PageParts]：人物原輸出閉運算、人物遮罩外擴）；lazy。 */
         var ringClosedBits: LongArray? = null
         var ringNearBits: LongArray? = null
+
+        /** 頁內並行時在分析裡先算的背景物件量測（[renderTiers] 的 parallel）與它用的參數；[awaitObj] 之後是 [objReady]。 */
+        internal var objBranch: Branch<BgObjects.Context>? = null
+        internal var objReady: BgObjects.Context? = null
+        internal var objParams: ObjectRuleParams? = null
+
+        /** 第一檔合成前等先算的背景物件量測做完（沒有先算＝不做事）。 */
+        fun awaitObj() {
+            val b = objBranch ?: return
+            objBranch = null
+            objReady = b.join()
+        }
+
+        /** 拿走先算好的背景物件量測（參數要相同；只拿一次——之後不再陪著合成）。 */
+        fun takeObj(p: ObjectRuleParams): BgObjects.Context? {
+            val c = objReady ?: return null
+            if (objParams != p) return null
+            objReady = null
+            return c
+        }
     }
 
     /**
@@ -246,7 +346,11 @@ object NightRead {
         debug: NightReadDebug?,
         diag: MutableMap<String, Any>?,
         shared: Boolean,
+        parallel: Executor? = null,
+        objFor: NightReadParams? = null,
     ): Analysis {
+        // diag（parity／除錯）一律依序：diag 不是執行緒安全的，分支會寫它
+        val ex = if (diag == null) parallel else null
         val g = Regions.normalizePaper(input.gray, input.chroma, p)
         val seg = input.seg
         val inpaint = input.inpaintMask?.let { m ->
@@ -257,112 +361,141 @@ object NightRead {
         }
 
         val charRaw = input.charMask
-        val charMask = Regions.smoothCharMask(Regions.snapCharMask(charRaw, g, p), g, p)
-        debug.mark("charRaw") { charRaw.count() }
-        debug.mark("charMask") { charMask.count() }
-        val (lh, lv) = Regions.frameLineMask(g, p)
-        val frame = lh or lv
-        val frameless = Regions.pageIsFrameless(lh, lv, p)
-        val wc = Regions.classifyWhiteComponents(g, p)
-        debug?.invoke("classifyWhite", 0)
-        val excluded = wc.gutterIds + wc.panelIds
-        val bubbleRes = Regions.buildBubbleMask(g, input.regions, seg, wc.cc, excluded, p, input.chroma, debug, charRaw)
-        // 漏泡封縫救回的泡：只進泡的重繪層（泡重繪、偽泡、亮島、人物還原的泡優先），不進格溝／留白／出血過濾／線稿密度否決／
-        // 貼紙／泡外圈這些結構層——泡是它們的隔板或證據，新泡餵進去會改到泡外。
-        val sealedOnly = bubbleRes.sealed
-        val anySealed = sealedOnly.any()
-        debug?.invoke("buildBubble", 0)
-        // 貼紙計畫（安全網）；三檔篩選在 keepFor。人物用**原始**遮罩（未收邊）、格線用 lh|lv
-        val plan = Sticker.plan(g, input.chroma, wc, frameless, input.regions, frame, p)
-        debug?.invoke("stickerPlan", 0)
-
-        // ── 圖層優先權：乾淨泡整顆塗黑、泡遮罩不跨進人物 ─────────────────
-        var bubble = bubbleRes.bubble
-        var bubbleGuard = charMask
-        if (bubble.any()) {
-            val bcc = Cv.ccStats(bubble, 8)
-            val cb = cleanBubbles(g, bcc, seg, p)
-            val clean = cb.clean
-            if (p.bubbleGuardRaw) {
-                // 泡內淺條修法 c：字確認的泡只讓開人物原輸出（收邊／平滑長出來的安全邊被泡蓋過），其餘照舊讓開收邊後的遮罩
-                val confirmed = confirmedBubbles(bcc, g.w, g.h, seg, input.regions, p)
-                if (confirmed.any()) bubbleGuard = (charRaw and confirmed) or charMask.andNot(confirmed)
-            }
-            bubbleGuard = bubbleGuard.andNot(clean)
-            if (p.bubbleLeak) {
-                // 漏泡判準：乾淨泡裡壓在人物原輸出上、貼著的泡外緣又沒有框線的那一塊，還給人物（無框泡的白直接連到白髮高光／白衣）
-                val leak = leakIntoCharacter(g, clean, cb.filled, bubble, charRaw, p)
-                if (leak != null) bubbleGuard = bubbleGuard or leak
-            }
-        }
-        debug?.invoke("cleanBubbles", 0)
-        val bubbleBeforeTrim = bubble.copy()
-        val removed = bubble and bubbleGuard
-        if (removed.any()) {
-            // 只扣「從泡邊緣伸進來的人物」：遮罩誤蓋到泡中央時粗暴地扣會把泡挖出洞＝白泡
-            val rcc = Cv.ccStats(removed, 8)
-            // 「碰到泡外緣」＝自己在泡內、但四鄰有一個在泡外。直接看鄰居就好——
-            // 原本是 `dilate(bubble.not(), 3×3)`，那會對整頁取反再膨脹兩趟全頁運算。
-            val touching = BooleanArray(rcc.n)
-            val bw = bubble.w
-            val bh = bubble.h
-            for (y in 0 until bh) {
-                val base = y * bw
-                for (x in 0 until bw) {
-                    val i = base + x
-                    if (!removed.data[i]) continue
-                    val l = rcc.labels[i]
-                    if (l == 0 || touching[l]) continue
-                    val edge = x == 0 || y == 0 || x == bw - 1 || y == bh - 1 ||
-                        !bubble.data[i - 1] || !bubble.data[i + 1] ||
-                        !bubble.data[i - bw] || !bubble.data[i + bw]
-                    if (edge) touching[l] = true
-                }
-            }
-            var anyTouch = false
-            for (l in 1 until rcc.n) if (touching[l]) { anyTouch = true; break }
-            if (anyTouch) {
-                val b2 = bubble.copy()
-                for (i in b2.data.indices) {
-                    val l = rcc.labels[i]
-                    if (l > 0 && touching[l]) b2.data[i] = false
-                }
-                bubble = b2
-            }
-        }
-        val lost = bubbleBeforeTrim.andNot(bubble)
-        // 封縫救回的泡從泡重繪起才當泡；上面的結構層只看 bubbleStruct
-        val bubbleStruct = if (anySealed) bubble.andNot(sealedOnly) else bubble
-        val bubbleLocal = if (anySealed) bubble and sealedOnly else null
-
-        // ── 場景曲線（各檔合成的底；人物區最終一律還原成它）──────────────────
-        val scene = sceneFinal(g, seg, p)
-        debug?.invoke("sceneFinal", 0)
-
-        // 任意角度格溝／頁邊（SEP）：先算好——出血過濾要拿它當結構證據，貼紙層之前塗、人物還原跳過它。
-        // 圖層規則在 Separators.build 裡：只扣泡 ⊕7（不扣人物）、單條溝被泡吃過半整條丟、碎塊丟。
-        val tSep = System.nanoTime()
-        val layer = if (p.separators) Separators.build(g, seg, bubbleStruct, frame, p) else null
-        if (diag != null) {
-            diag["t_sep"] = (System.nanoTime() - tSep) / 1e6
-            diag["t_bleed"] = 0.0
-            if (layer != null) diag["sep"] = layer
-        }
-        debug.mark("separators") { layer?.sep?.count() ?: 0 }
-
+        // 頁內並行的分支（ex null＝各自在原本的時點依序跑）：只讀 g／seg／charRaw 等輸入，彼此與主線都不寫共用的東西
+        val bChar = Branch(ex) { Regions.smoothCharMask(Regions.snapCharMask(charRaw, g, p), g, p) }
+        val bScene = Branch(ex) { sceneFinal(g, seg, p) }
         // 灰圈收細的頁面級證據（diag 要有 "ring"＝true 才存中間遮罩與耗時，免得一般的 diag 呼叫多抱幾張整頁遮罩）
-        val ringEvidence = if (p.ring.enabled) packBits(Ring.evidence(g, charRaw, p, ringDiag(diag))) else null
-        debug?.invoke("ringEvidence", 0)
+        val bRing = if (p.ring.enabled) Branch(ex) { packBits(Ring.evidence(g, charRaw, p, ringDiag(diag))) } else null
+        var bPlan: Branch<Sticker.Plan>? = null
+        var bObj: Branch<BgObjects.Context>? = null
+        try {
+            // 依序跑、或除錯回呼要遮罩計數：在原本的時點就等人物收邊做完
+            var charMaskNow: Mask? = if (ex == null || (debug != null && debug !is NightReadStageTimer)) bChar.join() else null
+            debug.mark("charRaw") { charRaw.count() }
+            debug.mark("charMask") { charMaskNow!!.count() }
+            val (lh, lv) = Regions.frameLineMask(g, p)
+            val frame = lh or lv
+            val frameless = Regions.pageIsFrameless(lh, lv, p)
+            val wc = Regions.classifyWhiteComponents(g, p)
+            debug?.invoke("classifyWhite", 0)
+            // 貼紙計畫（安全網）；三檔篩選在 keepFor。人物用**原始**遮罩（未收邊）、格線用 lh|lv
+            bPlan = Branch(ex) { Sticker.plan(g, input.chroma, wc, frameless, input.regions, frame, p) }
+            val excluded = wc.gutterIds + wc.panelIds
+            val bubbleRes = Regions.buildBubbleMask(g, input.regions, seg, wc.cc, excluded, p, input.chroma, debug, charRaw)
+            // 漏泡封縫救回的泡：只進泡的重繪層（泡重繪、偽泡、亮島、人物還原的泡優先），不進格溝／留白／出血過濾／線稿密度否決／
+            // 貼紙／泡外圈這些結構層——泡是它們的隔板或證據，新泡餵進去會改到泡外。
+            val sealedOnly = bubbleRes.sealed
+            val anySealed = sealedOnly.any()
+            debug?.invoke("buildBubble", 0)
+            val charMask = charMaskNow ?: bChar.join()
+            charMaskNow = null
+            // 「更多」的背景物件量測：泡與人物收邊都有了就能先算（只在頁內並行時；依序版在合成時算）
+            if (objFor != null && ex != null) {
+                val bubbleUntrim = bubbleRes.bubble
+                bObj = Branch(ex) { BgObjects.context(g, charMask, charRaw, bubbleUntrim, seg, frame, objFor.obj, null, inpaint) }
+            }
+            val plan = bPlan.join()
+            debug?.invoke("stickerPlan", 0)
 
-        return Analysis(
-            g = g, seg = seg, regions = input.regions, charRaw = charRaw, charMask = charMask,
-            lh = lh, lv = lv, frame = frame, frameless = frameless, wc = wc,
-            bubbleUntrim = bubbleRes.bubble, cored = bubbleRes.cored, sealed = sealedOnly, anySealed = anySealed,
-            bubble = bubble, bubbleStruct = bubbleStruct, bubbleLocal = bubbleLocal, lost = lost,
-            plan = plan, scene = scene, layer = layer, p = p, shared = shared, chroma = input.chroma,
-            ringEvidence = ringEvidence, inpaint = inpaint,
-        )
+            // ── 圖層優先權：乾淨泡整顆塗黑、泡遮罩不跨進人物 ─────────────────
+            var bubble = bubbleRes.bubble
+            var bubbleGuard = charMask
+            if (bubble.any()) {
+                val bcc = Cv.ccStats(bubble, 8)
+                val cb = cleanBubbles(g, bcc, seg, p)
+                val clean = cb.clean
+                if (p.bubbleGuardRaw) {
+                    // 泡內淺條修法 c：字確認的泡只讓開人物原輸出（收邊／平滑長出來的安全邊被泡蓋過），其餘照舊讓開收邊後的遮罩
+                    val confirmed = confirmedBubbles(bcc, g.w, g.h, seg, input.regions, p)
+                    if (confirmed.any()) bubbleGuard = (charRaw and confirmed) or charMask.andNot(confirmed)
+                }
+                bubbleGuard = bubbleGuard.andNot(clean)
+                if (p.bubbleLeak) {
+                    // 漏泡判準：乾淨泡裡壓在人物原輸出上、貼著的泡外緣又沒有框線的那一塊，還給人物（無框泡的白直接連到白髮高光／白衣）
+                    val leak = leakIntoCharacter(g, clean, cb.filled, bubble, charRaw, p)
+                    if (leak != null) bubbleGuard = bubbleGuard or leak
+                }
+            }
+            debug?.invoke("cleanBubbles", 0)
+            val bubbleBeforeTrim = bubble.copy()
+            val removed = bubble and bubbleGuard
+            if (removed.any()) {
+                // 只扣「從泡邊緣伸進來的人物」：遮罩誤蓋到泡中央時粗暴地扣會把泡挖出洞＝白泡
+                val rcc = Cv.ccStats(removed, 8)
+                // 「碰到泡外緣」＝自己在泡內、但四鄰有一個在泡外。直接看鄰居就好——
+                // 原本是 `dilate(bubble.not(), 3×3)`，那會對整頁取反再膨脹兩趟全頁運算。
+                val touching = BooleanArray(rcc.n)
+                val bw = bubble.w
+                val bh = bubble.h
+                for (y in 0 until bh) {
+                    val base = y * bw
+                    for (x in 0 until bw) {
+                        val i = base + x
+                        if (!removed.data[i]) continue
+                        val l = rcc.labels[i]
+                        if (l == 0 || touching[l]) continue
+                        val edge = x == 0 || y == 0 || x == bw - 1 || y == bh - 1 ||
+                            !bubble.data[i - 1] || !bubble.data[i + 1] ||
+                            !bubble.data[i - bw] || !bubble.data[i + bw]
+                        if (edge) touching[l] = true
+                    }
+                }
+                var anyTouch = false
+                for (l in 1 until rcc.n) if (touching[l]) { anyTouch = true; break }
+                if (anyTouch) {
+                    val b2 = bubble.copy()
+                    for (i in b2.data.indices) {
+                        val l = rcc.labels[i]
+                        if (l > 0 && touching[l]) b2.data[i] = false
+                    }
+                    bubble = b2
+                }
+            }
+            val lost = bubbleBeforeTrim.andNot(bubble)
+            // 封縫救回的泡從泡重繪起才當泡；上面的結構層只看 bubbleStruct
+            val bubbleStruct = if (anySealed) bubble.andNot(sealedOnly) else bubble
+            val bubbleLocal = if (anySealed) bubble and sealedOnly else null
+
+            // ── 場景曲線（各檔合成的底；人物區最終一律還原成它）──────────────────
+            val scene = bScene.join()
+            debug?.invoke("sceneFinal", 0)
+
+            // 任意角度格溝／頁邊（SEP）：先算好——出血過濾要拿它當結構證據，貼紙層之前塗、人物還原跳過它。
+            // 圖層規則在 Separators.build 裡：只扣泡 ⊕7（不扣人物）、單條溝被泡吃過半整條丟、碎塊丟。
+            val tSep = System.nanoTime()
+            val layer = if (p.separators) Separators.build(g, seg, bubbleStruct, frame, p) else null
+            if (diag != null) {
+                diag["t_sep"] = (System.nanoTime() - tSep) / 1e6
+                diag["t_bleed"] = 0.0
+                if (layer != null) diag["sep"] = layer
+            }
+            debug.mark("separators") { layer?.sep?.count() ?: 0 }
+
+            val ringEvidence = bRing?.join()
+            debug?.invoke("ringEvidence", 0)
+
+            return Analysis(
+                g = g, seg = seg, regions = input.regions, charRaw = charRaw, charMask = charMask,
+                lh = lh, lv = lv, frame = frame, frameless = frameless, wc = wc,
+                bubbleUntrim = bubbleRes.bubble, cored = bubbleRes.cored, sealed = sealedOnly, anySealed = anySealed,
+                bubble = bubble, bubbleStruct = bubbleStruct, bubbleLocal = bubbleLocal, lost = lost,
+                plan = plan, scene = scene, layer = layer, p = p, shared = shared, chroma = input.chroma,
+                ringEvidence = ringEvidence, inpaint = inpaint,
+            ).also { a ->
+                a.objBranch = bObj
+                a.objParams = objFor?.obj
+            }
+        } catch (t: Throwable) {
+            // 主執行緒出錯：還沒開始的分支不跑了（已在跑的跑完、結果丟掉）
+            bChar.cancel()
+            bScene.cancel()
+            bRing?.cancel()
+            bPlan?.cancel()
+            bObj?.cancel()
+            throw t
+        }
     }
+
 
     /**
      * 貼紙計畫過安全網後再過三檔篩選（[StickerMode]；ALL＝原樣）＝[Sticker.filterPlan] 拆成「plain 集合（與檔位無關、
@@ -690,55 +823,89 @@ object NightRead {
     }
 
     /**
-     * 軟性墨線遮罩：blackhat（細暗線構）乘暗度權重，再與文字筆畫取聯集。
-     * 實心黑塊內部是 0，所以增亮不會把大塊黑的對比拉掉。
-     */
-    private fun inkLineMask(g: Gray, seg: Mask): FloatArray {
-        val bh = Cv.blackhat(g, Cv.ellipse(7))
-        val soft = FloatArray(g.data.size)
-        // 暗度權重在 g >= 185 時是 0，那些像素的 blackhat 值再大也乘成 0——紙面佔了頁面大半，
-        // 先判斷就跳過後面的除法與夾取。⚠️ blackhat 本身不能省：它抓的是細墨線（高頻），
-        // 降解析度或先篩輸入都會讓線斷掉。
-        for (i in soft.indices) {
-            val gv = g.data[i]
-            if (seg.data[i]) { soft[i] = 1f; continue }
-            if (gv >= 185) continue
-            val w = if (gv <= 40) 1.0 else (185.0 - gv) / 145.0
-            val v = (bh.data[i] / 45.0).coerceAtMost(1.0) * w
-            soft[i] = v.toFloat()
-        }
-        return soft
-    }
-
-    /**
      * 畫面區最終處理：場景曲線加自適應墨線增亮。增亮只在局部背景偏暗處生效，
      * 且夾在 `glowCap` 之下（低於紙白位準 ⇒ 線永遠比紙暗）。
+     *
+     * 軟性墨線遮罩＝blackhat（細暗線構）乘暗度權重，再與文字筆畫取聯集；實心黑塊內部是 0，所以增亮不會把大塊黑的對比拉掉。
+     * 暗度權重在 g >= 185 時是 0，那些像素的 blackhat 值再大也乘成 0——紙面佔了頁面大半，先判斷就跳過後面的除法與夾取。
+     * ⚠️ blackhat 本身不能省：它抓的是細墨線（高頻），降解析度或先篩輸入都會讓線斷掉。
+     *
+     * 局部背景亮度的高斯只是估「增亮要不要生效」，sigma=8 的大模糊本來就把細節抹光了，在半解析度算再放大，數值差不到 1 階，
+     * 成本卻只剩四分之一（99→28 ms）。
+     *
+     * 記憶體（2026-10-06）：場景曲線的整頁灰階、它的浮點複本、軟性遮罩、放大回來的背景這四張整頁圖都不攤出來——
+     * 縮半直接讀 lut[g]、軟性遮罩與雙線性放大在最後那一趟逐像素算（同一套浮點運算，逐位元相同）；整頁只剩 blackhat 與成品。
      */
     private fun sceneFinal(g: Gray, seg: Mask, p: NightReadParams): FImg {
         val lut = lutScene(p)
-        val dimmed = Gray(g.w, g.h, IntArray(g.data.size) { lut[g.data[it]] })
-        val soft = inkLineMask(g, seg)
-        // 這個高斯只是估「局部背景亮度」，用來判斷筆畫增亮要不要生效。sigma=8 的大模糊本來就
-        // 把細節抹光了，在半解析度算再放大，數值差不到 1 階，成本卻只剩四分之一（99→28 ms）。
-        val half = Cv.resizeArea(dimmed.toF(), max(1, g.w / 2), max(1, g.h / 2))
+        val w = g.w
+        val h = g.h
+        val gd = g.data
+        val hw = max(1, w / 2)
+        val hh = max(1, h / 2)
+        val half = if (hw == w && hh == h) FImg(w, h, FloatArray(w * h) { lut[gd[it]].toFloat() })
+        else Cv.resizeAreaOf(w, h, hw, hh) { lut[gd[it]].toFloat() }
         val bgHalf = Cv.gaussianBlur(half, 4.0)
-        val bg = Cv.resizeBilinear(bgHalf, g.w, g.h)
-        val out = FImg(g.w, g.h)
+        val bh = Cv.blackhat(g, Cv.ellipse(7)).data
+        val sd = seg.data
+        val out = FImg(w, h)
         val od = out.data
-        val bd = bg.data
-        val dd = dimmed.data
         val glowStrength = p.glowStrength
         val glowCap = p.glowCap.toFloat()
-        for (i in od.indices) {
-            var gain = glowStrength * soft[i]
-            // coerceIn 照它的定義展開（NaN 原樣、先比下限再比上限），debug 版省一個呼叫
-            var t = (95.0 - bd[i]) / 95.0
-            if (t < 0.0) t = 0.0 else if (t > 1.0) t = 1.0
-            gain *= t.toFloat()
-            val base = dd[i].toFloat()
-            var lifted = min(base + gain, max(base, glowCap))
-            if (lifted < 0f) lifted = 0f else if (lifted > 255f) lifted = 255f
-            od[i] = lifted
+        // 放大回全尺寸的雙線性（[Cv.resizeBilinear] 的幾何與運算）：欄的來源與權重先算好、列在迴圈外
+        val fw = bgHalf.w
+        val fh = bgHalf.h
+        val fd = bgHalf.data
+        val same = fw == w && fh == h
+        val sx = fw.toDouble() / w
+        val sy = fh.toDouble() / h
+        val cx0 = IntArray(w)
+        val cx1 = IntArray(w)
+        val cwx = FloatArray(w)
+        for (x in 0 until w) {
+            val fx = ((x + 0.5) * sx - 0.5).coerceIn(0.0, (fw - 1).toDouble())
+            cx0[x] = fx.toInt()
+            cx1[x] = min(cx0[x] + 1, fw - 1)
+            cwx[x] = (fx - cx0[x]).toFloat()
+        }
+        for (y in 0 until h) {
+            val fy = ((y + 0.5) * sy - 0.5).coerceIn(0.0, (fh - 1).toDouble())
+            val y0 = fy.toInt()
+            val y1 = min(y0 + 1, fh - 1)
+            val wy = (fy - y0).toFloat()
+            val r0 = y0 * fw
+            val r1 = y1 * fw
+            val base = y * w
+            for (x in 0 until w) {
+                val i = base + x
+                val bgv = if (same) {
+                    fd[i]
+                } else {
+                    val wx = cwx[x]
+                    val a = fd[r0 + cx0[x]] * (1 - wx) + fd[r0 + cx1[x]] * wx
+                    val b = fd[r1 + cx0[x]] * (1 - wx) + fd[r1 + cx1[x]] * wx
+                    a * (1 - wy) + b * wy
+                }
+                val gv = gd[i]
+                val soft = if (sd[i]) {
+                    1f
+                } else if (gv >= 185) {
+                    0f
+                } else {
+                    val wk = if (gv <= 40) 1.0 else (185.0 - gv) / 145.0
+                    val v = (bh[i] / 45.0).coerceAtMost(1.0) * wk
+                    v.toFloat()
+                }
+                var gain = glowStrength * soft
+                // coerceIn 照它的定義展開（NaN 原樣、先比下限再比上限），debug 版省一個呼叫
+                var t = (95.0 - bgv) / 95.0
+                if (t < 0.0) t = 0.0 else if (t > 1.0) t = 1.0
+                gain *= t.toFloat()
+                val base0 = lut[gv].toFloat()
+                var lifted = min(base0 + gain, max(base0, glowCap))
+                if (lifted < 0f) lifted = 0f else if (lifted > 255f) lifted = 255f
+                od[i] = lifted
+            }
         }
         return out
     }
@@ -1270,10 +1437,11 @@ object NightRead {
 
     /**
      * 背景物件規則的整頁量測。不快取在 [Analysis]：產品只有「更多」一檔用它，快取（約 1.25 B/px）會一路活到人物還原（灰圈收細的
-     * 連通元件是那時的峰值）；每個開了規則的檔各算一次。
+     * 連通元件是那時的峰值）；每個開了規則的檔各算一次。頁內並行時分析先算好的那一份（[Analysis.takeObj]）只給第一個用到的檔。
      */
     private fun objContext(a: Analysis, p: NightReadParams, diag: MutableMap<String, Any>?): BgObjects.Context =
-        BgObjects.context(a.g, a.charMask, a.charRaw, a.bubbleUntrim, a.seg, a.frame, p.obj, diag, a.inpaint)
+        (if (diag == null) a.takeObj(p.obj) else null)      // 頁內並行時分析已先算好（同一組參數、同一份輸入）
+            ?: BgObjects.context(a.g, a.charMask, a.charRaw, a.bubbleUntrim, a.seg, a.frame, p.obj, diag, a.inpaint)
 
     /**
      * 背景物件規則 V（研究端 compose 的否決分支）：先只塗標準（[NightTier.L2] 的 keep ∩ 這一檔的 keep）、再塗全部；多塗的連通塊
@@ -1588,8 +1756,6 @@ object NightRead {
     ): GutterBand {
         if (!gutterIn.any()) return GutterBand(null, null)
         val g = a.g
-        val w = g.w
-        val h = g.h
 
         // 出血格過濾：只拿掉留白帶裡的畫面塊、不新增（SEP 之後照塗，拿不掉溝與頁邊）
         fun bleed(band: Mask, band0: Mask): Mask {
@@ -1606,40 +1772,65 @@ object NightRead {
             return res.band
         }
 
-        val bd = borderDistance(g, a.frame, includeFrame = !a.frameless)
         if (a.frameless) {
-            val cc = Cv.ccStats(gutterIn, 8)
-            val lim = p.framelessMarginDepth * min(h, w)
-            val maxDepth = FloatArray(cc.n)
-            for (i in gutterIn.data.indices) {
-                val l = cc.labels[i]
-                if (l > 0 && bd[i] > maxDepth[l]) maxDepth[l] = bd[i]
-            }
-            val keep = Mask(w, h)
-            for (i in keep.data.indices) {
-                val l = cc.labels[i]
-                if (l > 0 && maxDepth[l] <= lim) keep.data[i] = true
-            }
+            val keep = framelessKeep(a, gutterIn, p)
             // 有線稿的白不是留白；出血格畫面拿掉（灰圈收細的 gv 在出血過濾之前取，同研究端）
-            val prep = Texture.prepare(keep, g, a.frame, a.seg, a.bubbleStruct, p)
-            val v2 = vetoExcludingCharacters(a, keep, prep, p)
-            val v1 = vetoShared(a, keep, prep, p)
-            val gv = gutterGv(keep, v1, v2)
-            return GutterBand(bleed(v1, keep), gv)
+            val vg = vetoBand(a, keep, p)
+            return GutterBand(bleed(vg.v1, keep), vg.gv)
         }
+        val band = framedBand(a, gutterIn, p)
+        // 有線稿的白不是留白；出血格畫面拿掉（灰圈收細的 gv 在出血過濾之前取，同研究端）
+        val vg = vetoBand(a, band, p)
+        val band2 = bleed(vg.v1, band)
+        debug.mark("gutterBand") { band2.count() }
+        return GutterBand(band2, vg.gv)
+    }
+
+    /**
+     * 有框頁的留白帶：沿格框線切開（格內背景與頁邊留白在像素層連通）、深度 ≤ 短邊 [NightReadParams.safeGutterDepth]。
+     * 獨立成函式（[framelessKeep]、[vetoBand] 同）：頁邊距離（4 B/px）與切割暫存只活在這裡，不陪著後面的線稿否決與出血過濾
+     * （那裡是合成的記憶體峰值）。
+     */
+    private fun framedBand(a: Analysis, gutterIn: Mask, p: NightReadParams): Mask {
+        val w = a.g.w
+        val h = a.g.h
+        val bd = borderDistance(a.g, a.frame, includeFrame = true)
         val lim = p.safeGutterDepth * min(h, w)
-        // 格內背景與頁邊留白在像素層連通 ⇒ 先沿格框線切開，只留真的留白
         val cut = Regions.gutterFrameCut(gutterIn, a.lh, a.lv, p)
         val band = Mask(w, h)
         for (i in band.data.indices) band.data[i] = cut.data[i] && bd[i] <= lim
-        // 有線稿的白不是留白；出血格畫面拿掉（灰圈收細的 gv 在出血過濾之前取，同研究端）
-        val prep = Texture.prepare(band, g, a.frame, a.seg, a.bubbleStruct, p)
+        return band
+    }
+
+    /** 無框頁的留白帶：只留最深處 ≤ 短邊 [NightReadParams.framelessMarginDepth] 的元件（真頁邊帶）。 */
+    private fun framelessKeep(a: Analysis, gutterIn: Mask, p: NightReadParams): Mask {
+        val w = a.g.w
+        val h = a.g.h
+        val bd = borderDistance(a.g, a.frame, includeFrame = false)
+        val cc = Cv.ccStats(gutterIn, 8)
+        val lim = p.framelessMarginDepth * min(h, w)
+        val maxDepth = FloatArray(cc.n)
+        for (i in gutterIn.data.indices) {
+            val l = cc.labels[i]
+            if (l > 0 && bd[i] > maxDepth[l]) maxDepth[l] = bd[i]
+        }
+        val keep = Mask(w, h)
+        for (i in keep.data.indices) {
+            val l = cc.labels[i]
+            if (l > 0 && maxDepth[l] <= lim) keep.data[i] = true
+        }
+        return keep
+    }
+
+    /** [vetoBand] 的結果：一般否決後的帶、只因人物自己的墨被否決的像素（null＝沒算或沒有）。 */
+    private class VetoedBand(val v1: Mask, val gv: LongArray?)
+
+    /** 兩次線稿密度否決（共用 [Texture.prepare]；準備的暫存只活在這裡）。 */
+    private fun vetoBand(a: Analysis, band: Mask, p: NightReadParams): VetoedBand {
+        val prep = Texture.prepare(band, a.g, a.frame, a.seg, a.bubbleStruct, p)
         val v2 = vetoExcludingCharacters(a, band, prep, p)
         val v1 = vetoShared(a, band, prep, p)
-        val gv = gutterGv(band, v1, v2)
-        val band2 = bleed(v1, band)
-        debug.mark("gutterBand") { band2.count() }
-        return GutterBand(band2, gv)
+        return VetoedBand(v1, gutterGv(band, v1, v2))
     }
 
     /** 每像素到頁邊（有框頁再併入格線）的距離，決定留白填到多深。 */

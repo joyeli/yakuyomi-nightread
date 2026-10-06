@@ -589,7 +589,14 @@ object Cv {
     /** `cv2.morphologyEx(g, MORPH_BLACKHAT, k)` ＝ close(g) − g（灰階，結果 ≥ 0）。 */
     fun blackhat(g: Gray, k: Kernel): Gray {
         val closed = erodeGray(dilateGray(g, k), k)
-        return Gray(g.w, g.h, IntArray(g.w * g.h) { max(0, closed.data[it] - g.data[it]) })
+        // 就地減（closed 是新配的）：不多配一張整頁
+        val d = closed.data
+        val gd = g.data
+        for (i in d.indices) {
+            val v = d[i] - gd[i]
+            d[i] = if (v > 0) v else 0
+        }
+        return closed
     }
 
     /**
@@ -737,18 +744,78 @@ object Cv {
      * （原本是 2 B/px）、find／union 只在游程重疊時呼叫。
      */
     fun ccStats(m: Mask, connectivity: Int = 8): CC {
+        val r = ccRuns(m, connectivity)
+        val w = m.w
+        val h = m.h
+        val n = r.n
+        val labels = IntArray(w * h)
+        val left = IntArray(n) { Int.MAX_VALUE }
+        val top = IntArray(n) { Int.MAX_VALUE }
+        val right = IntArray(n) { Int.MIN_VALUE }
+        val bottom = IntArray(n) { Int.MIN_VALUE }
+        val area = IntArray(n)
+        val rs = r.rs
+        val re = r.re
+        val lab = r.lab
+        for (y in 0 until h) {
+            val base = y * w
+            for (k in r.rowFirst[y] until r.rowFirst[y + 1]) {
+                val l = lab[k]
+                val s = rs[k]
+                val e = re[k]
+                java.util.Arrays.fill(labels, base + s, base + e + 1, l)
+                area[l] += e - s + 1
+                if (s < left[l]) left[l] = s
+                if (y < top[l]) top[l] = y
+                if (e > right[l]) right[l] = e
+                bottom[l] = y
+            }
+        }
+        area[0] = (w.toLong() * h - r.fg).toInt()
+        left[0] = r.bgLeft
+        top[0] = r.bgTop
+        right[0] = r.bgRight
+        bottom[0] = r.bgBottom
+        val width = IntArray(n)
+        val height = IntArray(n)
+        for (i in 0 until n) {
+            if (left[i] == Int.MAX_VALUE) { left[i] = 0; top[i] = 0 }
+            width[i] = right[i] - left[i] + 1
+            height[i] = bottom[i] - top[i] + 1
+            if (width[i] < 0) width[i] = 0
+            if (height[i] < 0) height[i] = 0
+        }
+        return CC(n, labels, left, top, width, height, area)
+    }
+
+    /**
+     * [ccStats] 的游程本體（不攤整頁標號）：[rs]／[re]＝每個游程的起點／終點（含）、[rowFirst]＝每列第一個游程的索引
+     * （[rowFirst] 長 h＋1）、[lab]＝游程的最終標號（首見掃描序，1..n−1）、[n]＝元件數（含背景 0 號）；[fg]＝前景像素數，
+     * bg*＝背景（0 號）的 bbox（沒有背景像素＝Int.MAX／MIN）。只要逐元件累計、不需要逐像素查標號的呼叫端用它省 4 B/px。
+     */
+    internal class CcRuns(
+        @JvmField val n: Int,
+        @JvmField val rs: IntArray,
+        @JvmField val re: IntArray,
+        @JvmField val rowFirst: IntArray,
+        @JvmField val lab: IntArray,
+        @JvmField val fg: Long,
+        @JvmField val bgLeft: Int,
+        @JvmField val bgTop: Int,
+        @JvmField val bgRight: Int,
+        @JvmField val bgBottom: Int,
+    )
+
+    internal fun ccRuns(m: Mask, connectivity: Int = 8): CcRuns {
         val w = m.w
         val h = m.h
         val d = m.data
-        val labels = IntArray(w * h)
         val adj = if (connectivity == 8) 1 else 0
-        // 游程：起點、終點（含）；rowFirst[y]＝第 y 列第一個游程的索引（rowFirst[h]＝總數）
         var rs = IntArray(max(64, h * 2))
         var re = IntArray(rs.size)
         var parent = IntArray(rs.size)
         val rowFirst = IntArray(h + 1)
         var nr = 0
-        // 背景（0 號）的 bbox 與前景像素數
         var bgLeft = Int.MAX_VALUE
         var bgTop = Int.MAX_VALUE
         var bgRight = Int.MIN_VALUE
@@ -809,50 +876,18 @@ object Cv {
             }
         }
         rowFirst[h] = nr
-
-        // 按游程（＝掃描）順序配最終標號、填標號、累計統計
+        // 按游程（＝掃描）順序配最終標號
         val remap = IntArray(nr)
+        val lab = IntArray(nr)
         var n = 1
         for (r in 0 until nr) {
             var root = r
             while (parent[root] != root) root = parent[root]
             if (remap[root] == 0) { remap[root] = n; n++ }
             parent[r] = root
+            lab[r] = remap[root]
         }
-        val left = IntArray(n) { Int.MAX_VALUE }
-        val top = IntArray(n) { Int.MAX_VALUE }
-        val right = IntArray(n) { Int.MIN_VALUE }
-        val bottom = IntArray(n) { Int.MIN_VALUE }
-        val area = IntArray(n)
-        for (y in 0 until h) {
-            val base = y * w
-            for (r in rowFirst[y] until rowFirst[y + 1]) {
-                val l = remap[parent[r]]
-                val s = rs[r]
-                val e = re[r]
-                java.util.Arrays.fill(labels, base + s, base + e + 1, l)
-                area[l] += e - s + 1
-                if (s < left[l]) left[l] = s
-                if (y < top[l]) top[l] = y
-                if (e > right[l]) right[l] = e
-                bottom[l] = y
-            }
-        }
-        area[0] = (w.toLong() * h - fg).toInt()
-        left[0] = bgLeft
-        top[0] = bgTop
-        right[0] = bgRight
-        bottom[0] = bgBottom
-        val width = IntArray(n)
-        val height = IntArray(n)
-        for (i in 0 until n) {
-            if (left[i] == Int.MAX_VALUE) { left[i] = 0; top[i] = 0 }
-            width[i] = right[i] - left[i] + 1
-            height[i] = bottom[i] - top[i] + 1
-            if (width[i] < 0) width[i] = 0
-            if (height[i] < 0) height[i] = 0
-        }
-        return CC(n, labels, left, top, width, height, area)
+        return CcRuns(n, rs, re, rowFirst, lab, fg, bgLeft, bgTop, bgRight, bgBottom)
     }
 
     // ── 距離變換 ─────────────────────────────────────────────────────
@@ -1132,9 +1167,13 @@ object Cv {
 
     /** `cv2.resize(f, (nw, nh), INTER_AREA)`（縮小用；對每個輸出格取其來源矩形的面積加權平均）。 */
     fun resizeArea(f: FImg, nw: Int, nh: Int): FImg {
-        val w = f.w
-        val h = f.h
-        if (nw == w && nh == h) return f.copy()
+        if (nw == f.w && nh == f.h) return f.copy()
+        val d = f.data
+        return resizeAreaOf(f.w, f.h, nw, nh) { d[it] }
+    }
+
+    /** [resizeArea] 的本體，來源像素由 [src]（索引 → 值）給：呼叫端可以不先攤出一張整頁的來源圖（同一套浮點運算）。 */
+    internal inline fun resizeAreaOf(w: Int, h: Int, nw: Int, nh: Int, src: (Int) -> Float): FImg {
         val sx = w.toDouble() / nw
         val sy = h.toDouble() / nh
         val out = FloatArray(nw * nh)
@@ -1157,7 +1196,7 @@ object Cv {
                         val wx = min((x + 1).toDouble(), x1) - max(x.toDouble(), x0)
                         if (wx <= 0) continue
                         val ww = wx * wy
-                        acc += ww * f.data[y * w + x]
+                        acc += ww * src(y * w + x)
                         wsum += ww
                     }
                 }
