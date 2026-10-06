@@ -23,7 +23,23 @@ internal object Texture {
 
     /** [exclude]＝不算線稿的像素（人物外灰圈收細拿人物遮罩重算一次，看哪些留白只因人物自己的墨被否決）。 */
     fun veto(fill: Mask, g: Gray, frame: Mask, seg: Mask, bubble: Mask, p: NightReadParams, exclude: Mask? = null): Mask {
-        if (!fill.any()) return fill
+        val prep = prepare(fill, g, frame, seg, bubble, p) ?: return fill
+        return decide(prep, fill, g, p, exclude)
+    }
+
+    /**
+     * [veto] 裡與 exclude 無關的部分（候選、ROI、格框／泡隔板的區域標號、各區的候選 bbox、未扣 exclude 的線稿）。
+     * 留白帶同一個 fill 要否決兩次（一般、不算人物的墨）：準備一次、[decide] 兩次，結果與各自呼叫 [veto] 逐位元相同。
+     * null＝不必否決（fill 空、候選空），[veto] 原樣回傳 fill（同一個物件：呼叫端用 === 判斷有沒有否決）。
+     */
+    class Prep internal constructor(
+        val rx0: Int, val ry0: Int, val rw: Int, val rh: Int,
+        val bubNear: Mask, val cands: Mask, val content: Mask, val cc: CC,
+        val minX: IntArray, val minY: IntArray, val maxX: IntArray, val maxY: IntArray,
+    )
+
+    fun prepare(fill: Mask, g: Gray, frame: Mask, seg: Mask, bubble: Mask, p: NightReadParams): Prep? {
+        if (!fill.any()) return null
         val w = g.w
         val h = g.h
         val k = p.textureWin
@@ -31,8 +47,8 @@ internal object Texture {
         // 候選＝要填、且離泡夠遠
         val bubNear = if (bubble.any()) dilateSquare(bubble, p.textureBubbleNear) else Mask(w, h)
         val cand = fill.andNot(bubNear)
-        if (!cand.any()) return fill
-        val bb = bbox(cand) ?: return fill
+        if (!cand.any()) return null
+        val bb = bbox(cand) ?: return null
         val rx0 = max(0, bb[0] - k)
         val ry0 = max(0, bb[1] - k)
         val rx1 = min(w, bb[2] + k + 1)
@@ -44,26 +60,22 @@ internal object Texture {
         val frs = cropMask(fr, rx0, ry0, rw, rh)
         val cands = cropMask(cand, rx0, ry0, rw, rh)
         val content = Mask(rw, rh)
+        val cd = content.data
+        val gd = g.data
+        val whiteTh = p.whiteTh
         for (y in 0 until rh) {
             val src = (ry0 + y) * w + rx0
             val dst = y * rw
-            for (x in 0 until rw) content.data[dst + x] = g.data[src + x] < p.whiteTh && !frs.data[dst + x]
+            for (x in 0 until rw) cd[dst + x] = gd[src + x] < whiteTh && !frs.data[dst + x]
         }
         if (seg.any()) {
             val segD = dilateSquare(cropMask(seg, rx0, ry0, rw, rh), p.textureSegDil)
-            for (i in content.data.indices) if (segD.data[i]) content.data[i] = false
-        }
-        if (exclude != null) {
-            for (y in 0 until rh) {
-                val src = (ry0 + y) * w + rx0
-                val dst = y * rw
-                for (x in 0 until rw) if (exclude.data[src + x]) content.data[dst + x] = false
-            }
+            for (i in cd.indices) if (segD.data[i]) cd[i] = false
         }
         var barrier = frs
         if (bubble.any()) {
             val bubD = dilateSquare(cropMask(bubble, rx0, ry0, rw, rh), p.textureBubbleOutline * 2 + 1)
-            for (i in content.data.indices) if (bubD.data[i]) content.data[i] = false
+            for (i in cd.indices) if (bubD.data[i]) cd[i] = false
             barrier = frs or bubD
         }
         val cc = Cv.ccStats(barrier.not(), 8)
@@ -73,17 +85,44 @@ internal object Texture {
         val minY = IntArray(cc.n) { Int.MAX_VALUE }
         val maxX = IntArray(cc.n) { -1 }
         val maxY = IntArray(cc.n) { -1 }
+        val labels = cc.labels
         for (y in 0 until rh) {
             val base = y * rw
             for (x in 0 until rw) {
                 if (!cands.data[base + x]) continue
-                val l = cc.labels[base + x]
+                val l = labels[base + x]
                 if (x < minX[l]) minX[l] = x
                 if (x > maxX[l]) maxX[l] = x
                 if (y < minY[l]) minY[l] = y
                 if (y > maxY[l]) maxY[l] = y
             }
         }
+        return Prep(rx0, ry0, rw, rh, bubNear, cands, content, cc, minX, minY, maxX, maxY)
+    }
+
+    /** [prepare] 之後的判定（[exclude] 只扣在線稿上；[prep] 不被改寫，可以判定好幾次）。 */
+    fun decide(prep: Prep, fill: Mask, g: Gray, p: NightReadParams, exclude: Mask? = null): Mask {
+        val w = g.w
+        val k = p.textureWin
+        val rx0 = prep.rx0
+        val ry0 = prep.ry0
+        val rw = prep.rw
+        val rh = prep.rh
+        val cands = prep.cands
+        val cc = prep.cc
+        val content = if (exclude == null) prep.content else prep.content.copy().also { c ->
+            for (y in 0 until rh) {
+                val src = (ry0 + y) * w + rx0
+                val dst = y * rw
+                for (x in 0 until rw) if (exclude.data[src + x]) c.data[dst + x] = false
+            }
+        }
+        val minX = prep.minX
+        val minY = prep.minY
+        val maxX = prep.maxX
+        val maxY = prep.maxY
+        val labels = cc.labels
+        val cdat = content.data
         val dens = FloatArray(rw * rh)
         val minArea = p.textureRegionMin * g.data.size
         val kk = (k * k).toFloat()
@@ -106,9 +145,9 @@ internal object Texture {
             fun addRow(y: Int, sign: Int) {
                 val src = (y0 + y) * rw + x0
                 for (x in 0 until bw) {
-                    if (cc.labels[src + x] == l) {
+                    if (labels[src + x] == l) {
                         colR[x] += sign
-                        if (content.data[src + x]) colC[x] += sign
+                        if (cdat[src + x]) colC[x] += sign
                     }
                 }
             }
@@ -124,7 +163,7 @@ internal object Texture {
                 }
                 val src = (y0 + y) * rw + x0
                 for (x in 0 until bw) {
-                    if (cc.labels[src + x] != l) continue
+                    if (labels[src + x] != l) continue
                     val xa = max(0, x - r)
                     val xb = min(bw - 1, x + r) + 1
                     val s2 = preR[xb] - preR[xa]
@@ -137,7 +176,8 @@ internal object Texture {
             }
         }
 
-        var veto = Mask(rw, rh, BooleanArray(rw * rh) { cands.data[it] && dens[it] >= p.textureTh })
+        val textureTh = p.textureTh
+        var veto = Mask(rw, rh, BooleanArray(rw * rh) { cands.data[it] && dens[it] >= textureTh })
         if (veto.any()) {
             val vc = Cv.ccStats(veto, 8)
             // 塊級決定：候選塊的平均密度過高門檻才否決
@@ -152,14 +192,15 @@ internal object Texture {
             val keep = BooleanArray(vc.n) { l ->
                 l > 0 && vc.area[l] >= p.textureMinArea && sum[l] / max(cnt[l], 1) >= p.textureHi
             }
-            veto = Mask(rw, rh, BooleanArray(rw * rh) { keep[vc.labels[it]] })
+            val vl = vc.labels
+            veto = Mask(rw, rh, BooleanArray(rw * rh) { keep[vl[it]] })
             if (veto.any()) {
                 veto = closeSquare(veto, p.textureClose * 2 + 1)
                 for (i in veto.data.indices) if (!cands.data[i]) veto.data[i] = false
             }
         }
         if (veto.any()) {
-            val bubNearR = cropMask(bubNear, rx0, ry0, rw, rh)
+            val bubNearR = cropMask(prep.bubNear, rx0, ry0, rw, rh)
             val fillR = cropMask(fill, rx0, ry0, rw, rh)
             veto = dilateSquare(veto, p.texturePad * 2 + 1)
             for (i in veto.data.indices) if (bubNearR.data[i]) veto.data[i] = false
@@ -182,12 +223,10 @@ internal object Texture {
      * `cv2.dilate(m, np.ones((n, n)))`：方形核拆成橫線＋直線（Minkowski 分解，逐位元等價），走 lineMorph
      * 快路。補洞／外擴／跟隨三個核也刻意用方形——橢圓核要 O(W·H·kh)，這三處實測多 200 ms。
      */
-    private fun dilateSquare(m: Mask, n: Int): Mask =
-        if (n <= 1) m else Cv.dilate(Cv.dilate(m, Cv.rect(n, 1)), Cv.rect(1, n))
+    private fun dilateSquare(m: Mask, n: Int): Mask = if (n <= 1) m else Cv.dilateRectSep(m, n, n)
 
     /** `cv2.morphologyEx(m, MORPH_CLOSE, np.ones((n, n)))`。 */
-    private fun closeSquare(m: Mask, n: Int): Mask =
-        if (n <= 1) m else Cv.erode(Cv.erode(dilateSquare(m, n), Cv.rect(n, 1)), Cv.rect(1, n))
+    private fun closeSquare(m: Mask, n: Int): Mask = if (n <= 1) m else Cv.closeRectSep(m, n)
 
     private fun bbox(m: Mask): IntArray? {
         var x0 = m.w

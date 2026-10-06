@@ -136,4 +136,239 @@ class MorphPackedTest {
             }
         }
     }
+    // ── 灰階形態學（2026-10-06：緩衝重用、界內快路；下面照抄改寫前的 morphGray／slidingExtreme 當參考）──
+
+    private fun slidingRef(a: IntArray, n: Int, win: Int, wantMax: Boolean, dst: IntArray) {
+        if (win >= n) {
+            var acc = a[0]
+            for (i in 1 until n) acc = if (wantMax) max(acc, a[i]) else min(acc, a[i])
+            dst[0] = acc
+            return
+        }
+        val pre = IntArray(n)
+        val suf = IntArray(n)
+        var i = 0
+        while (i < n) {
+            val end = min(i + win, n)
+            var acc = a[i]
+            pre[i] = acc
+            for (j in i + 1 until end) {
+                acc = if (wantMax) max(acc, a[j]) else min(acc, a[j])
+                pre[j] = acc
+            }
+            acc = a[end - 1]
+            suf[end - 1] = acc
+            for (j in end - 2 downTo i) {
+                acc = if (wantMax) max(acc, a[j]) else min(acc, a[j])
+                suf[j] = acc
+            }
+            i = end
+        }
+        for (x in 0..n - win) {
+            val lo = x
+            val hi = x + win - 1
+            dst[x] = if (lo / win == hi / win) {
+                var acc = a[lo]
+                for (j in lo + 1..hi) acc = if (wantMax) max(acc, a[j]) else min(acc, a[j])
+                acc
+            } else {
+                if (wantMax) max(suf[lo], pre[hi]) else min(suf[lo], pre[hi])
+            }
+        }
+    }
+
+    private fun morphGrayRef(g: Gray, k: Kernel, wantMax: Boolean, lo: Int, hi: Int): Gray {
+        val w = g.w
+        val h = g.h
+        val out = Gray(w, h, IntArray(w * h) { if (wantMax) lo else hi })
+        val row = IntArray(w)
+        val widths = k.runStart.indices.filter { k.runEnd[it] > k.runStart[it] }.map { k.runEnd[it] - k.runStart[it] }.distinct()
+        val cache = HashMap<Int, IntArray>(widths.size)
+        for (win in widths) cache[win] = IntArray(w)
+        for (sy in 0 until h) {
+            System.arraycopy(g.data, sy * w, row, 0, w)
+            for (win in widths) slidingRef(row, w, win, wantMax, cache[win]!!)
+            for (ky in 0 until k.h) {
+                val runS = k.runStart[ky]
+                val runE = k.runEnd[ky]
+                if (runS >= runE) continue
+                val y = sy - (ky - k.ay)
+                if (y < 0 || y >= h) continue
+                val win = runE - runS
+                val slide = cache[win]!!
+                val offL = runS - k.ax
+                val obase = y * w
+                for (x in 0 until w) {
+                    val a0 = x + offL
+                    val b0 = a0 + win - 1
+                    val v = if (a0 >= 0 && b0 < w) {
+                        slide[a0]
+                    } else {
+                        val l2 = max(a0, 0)
+                        val h2 = min(b0, w - 1)
+                        if (l2 > h2) {
+                            if (wantMax) l2 else h2
+                        } else {
+                            var acc = row[l2]
+                            for (j in l2 + 1..h2) acc = if (wantMax) max(acc, row[j]) else min(acc, row[j])
+                            acc
+                        }
+                    }
+                    val cur = out.data[obase + x]
+                    out.data[obase + x] = if (wantMax) max(cur, v) else min(cur, v)
+                }
+            }
+        }
+        return out
+    }
+
+    @Test
+    fun grayMorphMatchesReference() {
+        val rnd = Random(61006)
+        val sizes = listOf(1 to 1, 1 to 9, 9 to 1, 5 to 5, 33 to 17, 64 to 40, 3 to 90, 120 to 3)
+        repeat(400) { t ->
+            val (w, h) = sizes[t % sizes.size]
+            val g = Gray(w, h, IntArray(w * h) { if (t % 3 == 0) rnd.nextInt(256) else rnd.nextInt(-100000, 100000) })
+            val k = randomKernel(rnd)
+            val tag = "#$t ${w}×$h 核 ${k.w}×${k.h}"
+            if (t % 3 == 0) {
+                assertArrayEquals("dilateGray $tag", morphGrayRef(g, k, true, 0, 255).data, Cv.dilateGray(g, k).data)
+                assertArrayEquals("erodeGray $tag", morphGrayRef(g, k, false, 0, 255).data, Cv.erodeGray(g, k).data)
+            }
+            assertArrayEquals("dilateGrayI $tag", morphGrayRef(g, k, true, Int.MIN_VALUE, Int.MAX_VALUE).data, Cv.dilateGrayI(g, k).data)
+            assertArrayEquals("erodeGrayI $tag", morphGrayRef(g, k, false, Int.MIN_VALUE, Int.MAX_VALUE).data, Cv.erodeGrayI(g, k).data)
+        }
+    }
+    // ── 線核（2026-10-06 改走位元打包；下面照抄改寫前的「最近目標距離」兩趟掃描當參考）──
+
+    private fun lineRef(m: Mask, len: Int, horizontal: Boolean, anchor: Int, dilate: Boolean): Mask {
+        val w = m.w
+        val h = m.h
+        val out = Mask(w, h)
+        val src = m.data
+        val dst = out.data
+        val a = anchor
+        val b = len - 1 - anchor
+        val target = dilate
+        val far = Int.MIN_VALUE / 2
+        if (horizontal) {
+            for (y in 0 until h) {
+                val base = y * w
+                var prev = far
+                for (x in 0 until w) {
+                    if (src[base + x] == target) prev = x
+                    dst[base + x] = x - prev <= a
+                }
+                var next = -far
+                for (x in w - 1 downTo 0) {
+                    if (src[base + x] == target) next = x
+                    if (next - x <= b) dst[base + x] = true
+                }
+            }
+        } else {
+            val prev = IntArray(w) { far }
+            for (y in 0 until h) {
+                val base = y * w
+                for (x in 0 until w) {
+                    if (src[base + x] == target) prev[x] = y
+                    dst[base + x] = y - prev[x] <= a
+                }
+            }
+            val next = IntArray(w) { -far }
+            for (y in h - 1 downTo 0) {
+                val base = y * w
+                for (x in 0 until w) {
+                    if (src[base + x] == target) next[x] = y
+                    if (next[x] - y <= b) dst[base + x] = true
+                }
+            }
+        }
+        if (!dilate) for (i in dst.indices) dst[i] = !dst[i]
+        return out
+    }
+
+    @Test
+    fun lineKernelsMatchReference() {
+        val rnd = Random(10061)
+        val sizes = listOf(1 to 1, 1 to 30, 30 to 1, 63 to 7, 64 to 64, 65 to 33, 130 to 70, 200 to 5, 5 to 200)
+        repeat(500) { t ->
+            val (w, h) = sizes[t % sizes.size]
+            val m = randomMask(rnd, w, h)
+            val n = 1 + rnd.nextInt(if (t % 4 == 0) 300 else 40)
+            val hk = Cv.rect(n, 1)
+            val vk = Cv.rect(1, n)
+            val tag = "#$t ${w}×$h n=$n"
+            val dh = lineRef(m, n, true, hk.ax, true)
+            val dv = lineRef(m, n, false, vk.ay, true)
+            val eh = lineRef(m, n, true, hk.ax, false)
+            val ev = lineRef(m, n, false, vk.ay, false)
+            assertArrayEquals("dilate H $tag", dh.data, Cv.dilate(m, hk).data)
+            assertArrayEquals("dilate V $tag", dv.data, Cv.dilate(m, vk).data)
+            assertArrayEquals("erode H $tag", eh.data, Cv.erode(m, hk).data)
+            assertArrayEquals("erode V $tag", ev.data, Cv.erode(m, vk).data)
+            assertArrayEquals("open H $tag", lineRef(eh, n, true, hk.ax, true).data, Cv.open(m, hk).data)
+            assertArrayEquals("open V $tag", lineRef(ev, n, false, vk.ay, true).data, Cv.open(m, vk).data)
+            assertArrayEquals("close H $tag", lineRef(dh, n, true, hk.ax, false).data, Cv.close(m, hk).data)
+            assertArrayEquals("close V $tag", lineRef(dv, n, false, vk.ay, false).data, Cv.close(m, vk).data)
+            val sq = lineRef(dh, n, false, vk.ay, true)
+            assertArrayEquals("dilateRectSep $tag", sq.data, Cv.dilateRectSep(m, n, n).data)
+            val cl = lineRef(lineRef(sq, n, true, hk.ax, false), n, false, vk.ay, false)
+            assertArrayEquals("closeRectSep $tag", cl.data, Cv.closeRectSep(m, n).data)
+        }
+    }
+    // ── 測地生長迭代版（2026-10-06 改走位元打包；下面照抄改寫前的逐像素八鄰居版當參考）──
+
+    private fun growRef(seed: Mask, within: Mask, iters: Int, step: Int): Mask {
+        val w = seed.w
+        val h = seed.h
+        var cur = (seed and within).data
+        var next = BooleanArray(w * h)
+        var done = 0
+        while (done < iters) {
+            val n = min(step, iters - done)
+            var changed = false
+            repeat(n) { sub ->
+                val last = sub == n - 1
+                for (y in 0 until h) {
+                    val base = y * w
+                    val up = base - w
+                    val dn = base + w
+                    for (x in 0 until w) {
+                        val i = base + x
+                        if (last && !within.data[i]) { next[i] = false; continue }
+                        if (cur[i]) { next[i] = true; continue }
+                        val l = x > 0
+                        val r = x < w - 1
+                        val hit = (l && cur[i - 1]) || (r && cur[i + 1]) ||
+                            (y > 0 && (cur[up + x] || (l && cur[up + x - 1]) || (r && cur[up + x + 1]))) ||
+                            (y < h - 1 && (cur[dn + x] || (l && cur[dn + x - 1]) || (r && cur[dn + x + 1])))
+                        next[i] = hit
+                        if (hit) changed = true
+                    }
+                }
+                val t = cur; cur = next; next = t
+            }
+            done += n
+            if (!changed) return Mask(w, h, cur)
+        }
+        return Mask(w, h, cur)
+    }
+
+    @Test
+    fun geodesicGrowMatchesReference() {
+        val rnd = Random(2026)
+        val sizes = listOf(1 to 1, 1 to 40, 40 to 1, 63 to 30, 64 to 64, 65 to 65, 129 to 33)
+        repeat(300) { t ->
+            val (w, h) = sizes[t % sizes.size]
+            val within = Mask(w, h)
+            for (i in within.data.indices) within.data[i] = rnd.nextInt(10) < 6 + t % 4
+            val seed = Mask(w, h)
+            repeat(1 + rnd.nextInt(4)) { seed.data[rnd.nextInt(w * h)] = true }
+            val iters = 1 + rnd.nextInt(30)
+            val step = 1 + rnd.nextInt(6)
+            val want = growRef(seed, within, iters, step)
+            assertArrayEquals("迭代 #$t ${w}×$h iters=$iters step=$step", want.data, Cv.geodesicGrow(seed, within, iters, step, bfs = false).data)
+            assertArrayEquals("BFS #$t ${w}×$h iters=$iters step=$step", want.data, Cv.geodesicGrow(seed, within, iters, step, bfs = true).data)
+        }
+    }
 }

@@ -533,7 +533,7 @@ internal object Regions {
         val local = sealer?.local
         if (local == null || !local.any()) return BubbleResult(bubble, cored, Mask(w, h))
         val sealed = local.andNot(bubble)
-        debug?.invoke("bubbleSealed", sealed.count())
+        debug.mark("bubbleSealed") { sealed.count() }
         return BubbleResult(bubble or local, cored, sealed)
     }
 

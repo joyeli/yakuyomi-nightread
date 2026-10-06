@@ -80,8 +80,23 @@ internal object BgObjects {
         val inpaint: LongArray? = null,
     )
 
-    private fun has(b: LongArray, i: Int): Boolean = (b[i ushr 6] ushr (i and 63)) and 1L != 0L
-    private fun unpack(b: LongArray, w: Int, h: Int): Mask = Mask(w, h, BooleanArray(w * h) { has(b, it) })
+    @Suppress("NOTHING_TO_INLINE")
+    private inline fun has(b: LongArray, i: Int): Boolean = (b[i ushr 6] ushr (i and 63)) and 1L != 0L
+
+    /** [Ring.packBits] 格式 → 遮罩（逐字展開：全 0 的字跳過）。 */
+    private fun unpack(b: LongArray, w: Int, h: Int): Mask {
+        val n = w * h
+        val m = Mask(w, h)
+        val d = m.data
+        for (wi in b.indices) {
+            val v = b[wi]
+            if (v == 0L) continue
+            val i0 = wi shl 6
+            val e = min(64, n - i0)
+            for (t in 0 until e) d[i0 + t] = (v ushr t) and 1L != 0L
+        }
+        return m
+    }
     private fun dil(m: Mask, r: Int): Mask = if (r <= 0) m.copy() else Cv.dilatePacked(m, Cv.ellipse(2 * r + 1))
 
     /** 像素索引 → 是／否（[pfShape] 的淡記號候選）。用 fun interface 不用 `(Int) -> Boolean`：後者每次呼叫都把 Int 裝箱。 */
@@ -743,7 +758,10 @@ internal object BgObjects {
     /** 「已經黑」＝研究端 `blackish`：已經塗成 bg 的像素 ∪ 原圖灰階 ≤ [ObjectRuleParams.darkG]。 */
     fun blackish(out: FImg, g: Gray, p: ObjectRuleParams, np: NightReadParams): Mask {
         val bgf = np.bg.toFloat()
-        return Mask(g.w, g.h, BooleanArray(g.data.size) { out.data[it] == bgf || g.data[it] <= p.darkG })
+        val darkG = p.darkG
+        val od = out.data
+        val gd = g.data
+        return Mask(g.w, g.h, BooleanArray(gd.size) { od[it] == bgf || gd[it] <= darkG })
     }
 
     // ── V：否決 A2 多塗的白 ─────────────────────────────────────────────
@@ -916,14 +934,23 @@ internal object BgObjects {
     internal fun gaussAt(g: Gray, k: IntArray, x: Int, y: Int): Int {
         val w = g.w
         val h = g.h
+        val gd = g.data
         val c = k.size / 2
+        val kc = k[c]
+        // 窗整個在影像內的不必反射（reflect101 在界內是恆等；整數加總與順序無關）
+        val inX = x >= c && x < w - c
         var acc = 0L
         for (j in 0 until k.size) {
             val kj = k[j]
             if (kj == 0) continue
-            val r = Cv.reflect101(y + j - c, h) * w
-            var hs = k[c] * g.data[r + x]
-            for (t in 1..c) hs += k[c + t] * (g.data[r + Cv.reflect101(x - t, w)] + g.data[r + Cv.reflect101(x + t, w)])
+            val yy = y + j - c
+            val r = (if (yy >= 0 && yy < h) yy else Cv.reflect101(yy, h)) * w
+            var hs = kc * gd[r + x]
+            if (inX) {
+                for (t in 1..c) hs += k[c + t] * (gd[r + x - t] + gd[r + x + t])
+            } else {
+                for (t in 1..c) hs += k[c + t] * (gd[r + Cv.reflect101(x - t, w)] + gd[r + Cv.reflect101(x + t, w)])
+            }
             acc += kj.toLong() * hs
         }
         return ((acc + 32768L) shr 16).toInt()

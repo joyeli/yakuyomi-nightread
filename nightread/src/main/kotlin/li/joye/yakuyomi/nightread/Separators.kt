@@ -162,8 +162,7 @@ internal object Separators {
     }
 
     /** `cv2.dilate(m, np.ones((n, n)))`：方核拆成橫＋直（逐位元等價），走 lineMorph 快路。 */
-    private fun dilateSquare(m: Mask, n: Int): Mask =
-        if (n <= 1) m else Cv.dilate(Cv.dilate(m, Cv.rect(n, 1)), Cv.rect(1, n))
+    private fun dilateSquare(m: Mask, n: Int): Mask = if (n <= 1) m else Cv.dilateRectSep(m, n, n)
 
     // ── 框線段偵測 ──────────────────────────────────────────────────────────
 
@@ -211,7 +210,7 @@ internal object Separators {
                 for (q in rowStart[y] until rowStart[y + 1]) {
                     // 半數取偶捨入：|r| < 2²² 時加減 1.5·2²³ 由 float 加法本身做 RNE（＝np.round，免轉 double）
                     val r = xc[xs[q]] + sy
-                    val ri = if (abs(r) < 4194304f) ((r + ROUND_MAGIC) - ROUND_MAGIC).toInt() else Math.rint(r.toDouble()).toInt()
+                    val ri = if (r > -4194304f && r < 4194304f) ((r + ROUND_MAGIC) - ROUND_MAGIC).toInt() else Math.rint(r.toDouble()).toInt()
                     acc[base + ri]++
                 }
             }
@@ -301,18 +300,26 @@ internal object Separators {
 
     /** 直線與頁框相交的 t 範圍（向外取整）；不相交回 null。 */
     private fun tRange(p0x: Double, p0y: Double, dx: Double, dy: Double, h: Int, w: Int): IntArray? {
-        val ts = ArrayList<Double>()
-        if (abs(dx) > 1e-9) { ts.add((0 - p0x) / dx); ts.add(((w - 1) - p0x) / dx) }
-        if (abs(dy) > 1e-9) { ts.add((0 - p0y) / dy); ts.add(((h - 1) - p0y) / dy) }
-        ts.sort()
-        val cand = ArrayList<Double>()
-        for (t in ts) {
+        // 最多四個交點：小陣列排序（Arrays.sort(double[]) 與 List<Double>.sort() 同一個全序），不裝箱
+        val ts = DoubleArray(4)
+        var nt = 0
+        if (abs(dx) > 1e-9) { ts[nt++] = (0 - p0x) / dx; ts[nt++] = ((w - 1) - p0x) / dx }
+        if (abs(dy) > 1e-9) { ts[nt++] = (0 - p0y) / dy; ts[nt++] = ((h - 1) - p0y) / dy }
+        java.util.Arrays.sort(ts, 0, nt)
+        var nc = 0
+        var lo = 0.0
+        var hi = 0.0
+        for (k in 0 until nt) {
+            val t = ts[k]
             val x = p0x + t * dx
             val y = p0y + t * dy
-            if (x >= -1 && x <= w && y >= -1 && y <= h) cand.add(t)
+            if (x >= -1 && x <= w && y >= -1 && y <= h) {
+                if (nc == 0) { lo = t; hi = t } else { lo = Math.min(lo, t); hi = Math.max(hi, t) }
+                nc++
+            }
         }
-        if (cand.size < 2) return null
-        return intArrayOf(floor(cand.min()).toInt(), ceil(cand.max()).toInt())
+        if (nc < 2) return null
+        return intArrayOf(floor(lo).toInt(), ceil(hi).toInt())
     }
 
     /** 點集主軸（`fit_pca`）：回傳 [mx, my, dx, dy, nx, ny]；d 正規化成 d.x ≥ 0（d.x≈0 時 d.y ≥ 0）。 */
@@ -355,14 +362,17 @@ internal object Separators {
         var xs = IntArray(64)
         var ys = IntArray(64)
         var n = 0
+        val nx = wk.nx
+        val ny = wk.ny
+        val win = wk.win
         for (k in a..b) {
             val t = (wk.tmin + k).toDouble()
             val bx = wk.p0x + t * wk.dx
             val by = wk.p0y + t * wk.dy
-            for (o in -wk.win..wk.win) {
+            for (o in -win..win) {
                 val off = o.toDouble()
-                val x = rint(bx + off * wk.nx)
-                val y = rint(by + off * wk.ny)
+                val x = rint(bx + off * nx)
+                val y = rint(by + off * ny)
                 if (x in 0 until w && y in 0 until h && m.data[y * w + x]) {
                     if (n == xs.size) { xs = xs.copyOf(n * 2); ys = ys.copyOf(n * 2) }
                     xs[n] = x; ys[n] = y; n++
@@ -775,10 +785,12 @@ internal object Separators {
         val out = Mask(w, h)
         val od = out.data
         var n = 0
-        for (v in g.data) if (v >= p.whiteTh) n++
+        val whiteTh = p.whiteTh
+        val gd = g.data
+        for (v in gd) if (v >= whiteTh) n++
         val q = IntArray(n)
         var tail = 0
-        fun seed(i: Int) { if (!od[i] && g.data[i] >= p.whiteTh) { od[i] = true; q[tail++] = i } }
+        fun seed(i: Int) { if (!od[i] && gd[i] >= whiteTh) { od[i] = true; q[tail++] = i } }
         for (x in 0 until w) { seed(x); seed((h - 1) * w + x) }
         for (y in 0 until h) { seed(y * w); seed(y * w + w - 1) }
         var head = 0
@@ -1283,7 +1295,8 @@ internal object Separators {
     /** 偵測到的框線（只取真證據區間）點陣化：線 ±flR 內的非白像素（`frame_raster`）。 */
     fun frameRaster(g: Gray, groups: List<Group>, p: NightReadParams): Mask {
         val m = rasterLines(g.w, g.h, groups.flatMap { groupLinesOf(it) }, p.sep.flR)
-        for (i in m.data.indices) if (g.data[i] >= p.whiteTh) m.data[i] = false
+        val whiteTh = p.whiteTh
+        for (i in m.data.indices) if (g.data[i] >= whiteTh) m.data[i] = false
         return m
     }
 

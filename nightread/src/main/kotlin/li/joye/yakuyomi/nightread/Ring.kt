@@ -31,14 +31,23 @@ internal object Ring {
     }
 
     /** 位元集合（[packBits] 同格式：第 i 像素在第 i ushr 6 字的第 i and 63 位）。 */
-    fun set(bits: LongArray, i: Int) { bits[i ushr 6] = bits[i ushr 6] or (1L shl (i and 63)) }
-    fun has(bits: LongArray?, i: Int): Boolean = bits != null && (bits[i ushr 6] ushr (i and 63)) and 1L != 0L
+    @Suppress("NOTHING_TO_INLINE")
+    inline fun set(bits: LongArray, i: Int) { bits[i ushr 6] = bits[i ushr 6] or (1L shl (i and 63)) }
+    @Suppress("NOTHING_TO_INLINE")
+    inline fun has(bits: LongArray?, i: Int): Boolean = bits != null && (bits[i ushr 6] ushr (i and 63)) and 1L != 0L
 
-    /** 遮罩 → 位元集合。 */
+    /** 遮罩 → 位元集合（逐字組好再寫）。 */
     fun packBits(m: Mask): LongArray {
         val d = m.data
-        val bits = LongArray((d.size + 63) ushr 6)
-        for (i in d.indices) if (d[i]) bits[i ushr 6] = bits[i ushr 6] or (1L shl (i and 63))
+        val n = d.size
+        val bits = LongArray((n + 63) ushr 6)
+        for (wi in bits.indices) {
+            val i0 = wi shl 6
+            val e = min(64, n - i0)
+            var v = 0L
+            for (t in 0 until e) if (d[i0 + t]) v = v or (1L shl t)
+            bits[wi] = v
+        }
         return bits
     }
 
@@ -84,8 +93,9 @@ internal object Ring {
         val d = Mask(w, h)
         var gv: Mask? = null
         var anyD = false
+        val whiteTh = p.whiteTh
         for (i in 0 until n) {
-            if (g.data[i] < p.whiteTh || charRaw.data[i] || bub.data[i]) continue       // ok＝紙白、不在原輸出、不是泡
+            if (g.data[i] < whiteTh || charRaw.data[i] || bub.data[i]) continue       // ok＝紙白、不在原輸出、不是泡
             val r = restore.data[i]
             val ru = r || out.data[i] == scene.data[i]                                 // 還原區或沒被任何一層塗過
             val wh = has(withheld, i) || has(restPre, i)
@@ -254,15 +264,17 @@ internal object Ring {
         val h = g.h
         val inkNear = Cv.dilatePacked(ink, Cv.ellipse(2 * rp.faintInkPad + 1))
         val paper = Mask(w, h)
+        val faintGray = rp.faintGray
+        val faintMin = rp.faintMin
         boxRows(w, h, rp.faintWin, { y, row ->
             val b = y * w
             for (x in 0 until w) {
                 val i = b + x
-                row[x] = if (g.data[i] < rp.faintGray && !deep.data[i] && !inkNear.data[i]) 1 else 0
+                row[x] = if (g.data[i] < faintGray && !deep.data[i] && !inkNear.data[i]) 1 else 0
             }
         }) { y, sums ->
             val b = y * w
-            for (x in 0 until w) paper.data[b + x] = sums[x] < rp.faintMin
+            for (x in 0 until w) paper.data[b + x] = sums[x] < faintMin
         }
         return paper
     }
@@ -398,11 +410,19 @@ internal object Ring {
         val w = raw.w
         val h = raw.h
         val r = k.size / 2
+        val d = raw.data
+        val inX = x >= r && x < w - r          // 窗在影像內：不必反射（加總順序不變）
         var b = 0.0
         for (i in k.indices) {
-            val row = Cv.reflect101(y + i - r, h) * w
+            val yy = y + i - r
+            val row = (if (yy >= 0 && yy < h) yy else Cv.reflect101(yy, h)) * w
             var hs = 0.0
-            for (j in k.indices) hs += k[j] * (if (raw.data[row + Cv.reflect101(x + j - r, w)]) 1.0 else 0.0)
+            if (inX) {
+                val o = row + x - r
+                for (j in k.indices) hs += k[j] * (if (d[o + j]) 1.0 else 0.0)
+            } else {
+                for (j in k.indices) hs += k[j] * (if (d[row + Cv.reflect101(x + j - r, w)]) 1.0 else 0.0)
+            }
             b += k[i] * hs
         }
         return b

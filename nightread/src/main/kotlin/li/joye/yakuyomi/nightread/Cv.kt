@@ -174,9 +174,28 @@ object Cv {
         return cur
     }
 
-    fun open(m: Mask, k: Kernel): Mask = dilate(erode(m, k), k)
+    fun open(m: Mask, k: Kernel): Mask {
+        val line = lineKernel(k)
+        if (line == 0) return openPacked(m, k)
+        // 線核：侵蝕＝¬膨脹(¬m)，中間結果留在打包格式
+        val hor = line > 0
+        val len = if (hor) line else -line
+        val an = if (hor) k.ax else k.ay
+        val e = lineOrBits(packBitsNot(m), m.w, m.h, len, hor, an)
+        notBitsInPlace(e, m.w, m.h)
+        return unpackBits(lineOrBits(e, m.w, m.h, len, hor, an), m.w, m.h)
+    }
 
-    fun close(m: Mask, k: Kernel): Mask = erode(dilate(m, k), k)
+    fun close(m: Mask, k: Kernel): Mask {
+        val line = lineKernel(k)
+        if (line == 0) return closePacked(m, k)
+        val hor = line > 0
+        val len = if (hor) line else -line
+        val an = if (hor) k.ax else k.ay
+        val d = lineOrBits(packBits(m), m.w, m.h, len, hor, an)
+        notBitsInPlace(d, m.w, m.h)
+        return unpackBitsNot(lineOrBits(d, m.w, m.h, len, hor, an), m.w, m.h)
+    }
 
     /**
      * 二值膨脹的位元打包快路：與 [dilate]（單次）**逐像素相同**（同一套取樣：輸出 (x, y) 看輸入
@@ -203,7 +222,8 @@ object Cv {
                 val x0 = i shl 6
                 val n = min(64, w - x0)
                 var v = 0L
-                for (b in 0 until n) if (d[base + x0 + b]) v = v or (1L shl b)
+                val o = base + x0
+                for (b in 0 until n) if (d[o + b]) v = v or (1L shl b)
                 out[wb + i] = v
             }
         }
@@ -249,190 +269,297 @@ object Cv {
         return out
     }
 
-    /** [packBits] 的反向。 */
+    /** [packBits] 的反向。全 0 的字跳過、全 1 的字整段填，其餘逐位元寫（不逐個找最低位）。 */
     fun unpackBits(a: LongArray, w: Int, h: Int): Mask {
         val nw = (w + 63) ushr 6
         val out = Mask(w, h)
+        val od = out.data
         for (y in 0 until h) {
             val base = y * w
             val wb = y * nw
             for (i in 0 until nw) {
-                var v = a[wb + i]
-                while (v != 0L) {
-                    val x = (i shl 6) + java.lang.Long.numberOfTrailingZeros(v)
-                    if (x < w) out.data[base + x] = true
-                    v = v and (v - 1)
+                val v = a[wb + i]
+                if (v == 0L) continue
+                val x0 = i shl 6
+                val n = min(64, w - x0)
+                val o = base + x0
+                if (v == -1L && n == 64) {
+                    java.util.Arrays.fill(od, o, o + 64, true)
+                    continue
                 }
+                for (b in 0 until n) od[o + b] = (v ushr b) and 1L != 0L
             }
         }
         return out
     }
 
-    /** [dilatePacked] 的本體：輸入輸出都是 [packBits] 的打包格式（呼叫端可以直接查位元、省掉解包）。 */
+    /** 就地取反打包位元（只取反影像內的位元：末字超出寬度的位元維持 0）。 */
+    fun notBitsInPlace(a: LongArray, w: Int, h: Int) {
+        val nw = (w + 63) ushr 6
+        val tail = if (w and 63 == 0) -1L else (1L shl (w and 63)) - 1
+        for (y in 0 until h) {
+            val b = y * nw
+            for (i in 0 until nw - 1) a[b + i] = a[b + i].inv()
+            a[b + nw - 1] = a[b + nw - 1].inv() and tail
+        }
+    }
+
+    /** 打包位元的侵蝕＝¬[dilateBits](¬src)（同 [erodePacked]；不改 [src]）。 */
+    fun erodeBits(src: LongArray, w: Int, h: Int, k: Kernel): LongArray {
+        val inv = src.copyOf()
+        notBitsInPlace(inv, w, h)
+        val d = dilateBits(inv, w, h, k)
+        notBitsInPlace(d, w, h)
+        return d
+    }
+
+    /**
+     * [dilatePacked] 的本體：輸入輸出都是 [packBits] 的打包格式（呼叫端可以直接查位元、省掉解包）。
+     *
+     * 核的每一列是一段 run：輸出列 y 的貢獻＝來源列 y − (ky − ay) 的水平區間 OR（OR_{o=lo..hi} in[x + o]，影像外當 0）。
+     * 相同 (lo, hi) 的核列只算一次區間 OR（[PackedRuns]），依序 OR 進 [acc]（OR 與順序無關，結果逐位元相同）。
+     * 整頁只配 [acc] 與幾張工作緩衝（原本每一步移位都配一張整頁 LongArray：大橢圓一次幾百張）。
+     */
     fun dilateBits(src: LongArray, w: Int, h: Int, k: Kernel): LongArray {
         val nw = (w + 63) ushr 6
         val acc = LongArray(nw * h)
-        val cache = HashMap<Long, LongArray>()
+        // 不同的 (lo, hi) 依序（核列順序）；每個 key 用到它的核列位移 dy
+        val keyLo = IntArray(k.h)
+        val keyHi = IntArray(k.h)
+        val rowKey = IntArray(k.h) { -1 }
+        var nk = 0
         for (ky in 0 until k.h) {
             val runS = k.runStart[ky]
             val runE = k.runEnd[ky]
             if (runS >= runE) continue
-            val dy = ky - k.ay
-            val offL = runS - k.ax
-            val offR = runE - 1 - k.ax
-            val hor = cache.getOrPut((offL.toLong() shl 32) or (offR.toLong() and 0xffffffffL)) {
-                packedRangeOr(src, nw, h, w, offL, offR)
-            }
-            for (y in 0 until h) {
-                val sy = y - dy
-                if (sy < 0 || sy >= h) continue
-                val o = y * nw
-                val si = sy * nw
-                for (i in 0 until nw) acc[o + i] = acc[o + i] or hor[si + i]
+            val lo = runS - k.ax
+            val hi = runE - 1 - k.ax
+            var j = 0
+            while (j < nk && (keyLo[j] != lo || keyHi[j] != hi)) j++
+            if (j == nk) { keyLo[nk] = lo; keyHi[nk] = hi; nk++ }
+            rowKey[ky] = j
+        }
+        if (nk == 0) return acc
+        // 依兩側延伸量由小到大處理（橢圓、方核兩側一起單調變大 ⇒ 單側 OR 只要往上長）
+        val order = (0 until nk).sortedWith(compareBy({ max(0, -keyLo[it]) }, { max(0, keyHi[it]) }))
+        val runs = PackedRuns(src, nw, h, w)
+        for (j in order) {
+            val hor = runs.rangeOr(keyLo[j], keyHi[j])
+            for (ky in 0 until k.h) {
+                if (rowKey[ky] != j) continue
+                val dy = ky - k.ay
+                val y0 = max(0, dy)
+                val y1 = min(h, h + dy)
+                for (y in y0 until y1) {
+                    val o = y * nw
+                    val si = (y - dy) * nw
+                    for (i in 0 until nw) acc[o + i] = acc[o + i] or hor[si + i]
+                }
             }
         }
         return acc
     }
 
     /**
-     * 打包列的水平區間 OR：out[x] = OR_{o=lo..hi} in[x + o]（範圍外視為 0）。
-     *
-     * ⚠️ 不能「先倍增出 [0, len) 再整體平移 lo」：lo < 0 時 out[0] 要讀倍增結果的第 −1 格，那一格（含 in[0..]）
-     * 沒存在陣列裡 ⇒ 左緣少一圈。所以跨 0 的區間拆成往左（負移位倍增）與往右（正移位倍增）兩半；整段在 0 的
-     * 同一側時才倍增後平移，平移方向讀到的界外格本來就是 0。
+     * 打包列的水平區間 OR（out[x] = OR_{o=lo..hi} in[x + o]，範圍外視為 0），就地增長的單側版：
+     * [right]＝OR in[x .. x+b]、[left]＝OR in[x−a .. x]，往外長 s ≤ 目前長度＋1 的一步＝一趟就地「移位再 OR」
+     * （往右讀的由左往右寫、往左讀的由右往左寫，讀到的字都還沒被改過）。單側版讀到影像外的格本來就是 0（那一側全在影像外），
+     * 所以跨 0 的區間＝left(−lo) ∪ right(hi)，不會有「先倍增再平移、左緣少一圈」的問題；整段在 0 同一側的再平移一次。
+     * 回傳的陣列在下一次 [rangeOr] 前有效（可能是內部緩衝本身）。
      */
-    private fun packedRangeOr(src: LongArray, nw: Int, h: Int, w: Int, lo: Int, hi: Int): LongArray {
-        if (lo >= 0) {                                   // 全在右側：a[x] = OR in[x .. x+len−1]，再往右讀 lo
-            val a = packedDouble(src, nw, h, w, hi - lo + 1, 1)
-            return if (lo == 0) a else shiftPacked(a, nw, h, w, lo)
-        }
-        if (hi <= 0) {                                   // 全在左側：a[x] = OR in[x−len+1 .. x]，再往左讀 −hi
-            val a = packedDouble(src, nw, h, w, hi - lo + 1, -1)
-            return if (hi == 0) a else shiftPacked(a, nw, h, w, hi)
-        }
-        val left = packedDouble(src, nw, h, w, 1 - lo, -1)
-        val right = packedDouble(src, nw, h, w, hi + 1, 1)
-        for (i in left.indices) left[i] = left[i] or right[i]
-        return left
-    }
+    private class PackedRuns(val src: LongArray, val nw: Int, val h: Int, val w: Int) {
+        private val tail = if (w and 63 == 0) -1L else (1L shl (w and 63)) - 1
+        private var right: LongArray? = null
+        private var rightB = 0
+        private var left: LongArray? = null
+        private var leftA = 0
+        private var tmp: LongArray? = null
 
-    /**
-     * 倍增：dir = 1 ⇒ out[x] = OR in[x .. x+n−1]；dir = −1 ⇒ out[x] = OR in[x−n+1 .. x]。
-     * n = 1 時回傳複本（呼叫端會就地改寫）。
-     */
-    private fun packedDouble(src: LongArray, nw: Int, h: Int, w: Int, n: Int, dir: Int): LongArray {
-        var a = src
-        var span = 1
-        while (span * 2 <= n) {
-            a = orShifted(a, a, nw, h, w, dir * span)
-            span *= 2
+        fun rangeOr(lo: Int, hi: Int): LongArray {
+            if (lo <= 0 && hi >= 0) {
+                if (lo == 0) return growRight(hi)
+                if (hi == 0) return growLeft(-lo)
+                val l = growLeft(-lo)
+                val r = growRight(hi)
+                val t = tmp ?: LongArray(src.size).also { tmp = it }
+                for (i in t.indices) t[i] = l[i] or r[i]
+                return t
+            }
+            val t = tmp ?: LongArray(src.size).also { tmp = it }
+            if (lo > 0) shiftInto(growRight(hi - lo), t, lo) else shiftInto(growLeft(hi - lo), t, hi)
+            return t
         }
-        if (span < n) a = orShifted(a, a, nw, h, w, dir * (n - span))
-        return if (a === src) src.copyOf() else a
-    }
 
-    /** x | shift(y, s)：shift 見 [shiftPacked]。 */
-    private fun orShifted(x: LongArray, y: LongArray, nw: Int, h: Int, w: Int, s: Int): LongArray {
-        val t = shiftPacked(y, nw, h, w, s)
-        for (i in t.indices) t[i] = t[i] or x[i]
-        return t
-    }
+        /** OR in[x .. x+b]。 */
+        private fun growRight(b: Int): LongArray {
+            var r = right
+            if (r == null || b < rightB) {
+                r = r ?: LongArray(src.size)
+                System.arraycopy(src, 0, r, 0, src.size)
+                right = r
+                rightB = 0
+            }
+            while (rightB < b) {
+                val s = min(b - rightB, rightB + 1)
+                orShiftRightInPlace(r, s)
+                rightB += s
+            }
+            return r
+        }
 
-    /**
-     * 打包列平移：out[x] = in[x + s]（逐列、範圍外視為 0）。s < 0 會把位元推過寬度 w，末字的尾巴要清掉，
-     * 否則下一趟往回移時會漏回影像內。
-     */
-    private fun shiftPacked(src: LongArray, nw: Int, h: Int, w: Int, s: Int): LongArray {
-        val out = LongArray(src.size)
-        val tail = if (w and 63 == 0) -1L else (1L shl (w and 63)) - 1
-        if (s >= 0) {
+        /** OR in[x−a .. x]。 */
+        private fun growLeft(a: Int): LongArray {
+            var l = left
+            if (l == null || a < leftA) {
+                l = l ?: LongArray(src.size)
+                System.arraycopy(src, 0, l, 0, src.size)
+                left = l
+                leftA = 0
+            }
+            while (leftA < a) {
+                val s = min(a - leftA, leftA + 1)
+                orShiftLeftInPlace(l, s)
+                leftA += s
+            }
+            return l
+        }
+
+        /** a[x] |= a[x + s]（s > 0；由左往右，讀的字都在寫的字右邊或就是它、還沒改）。 */
+        private fun orShiftRightInPlace(a: LongArray, s: Int) {
             val q = s ushr 6
             val r = s and 63
             for (y in 0 until h) {
                 val b = y * nw
-                for (i in 0 until nw) {
-                    val j = i + q
-                    if (j >= nw) break
-                    var v = src[b + j] ushr r
-                    if (r != 0 && j + 1 < nw) v = v or (src[b + j + 1] shl (64 - r))
-                    out[b + i] = v
+                for (i in 0 until nw - q) {
+                    val j = b + i + q
+                    var v = a[j] ushr r
+                    if (r != 0 && i + q + 1 < nw) v = v or (a[j + 1] shl (64 - r))
+                    a[b + i] = a[b + i] or v
                 }
-            }
-        } else {
-            val u = -s
-            val q = u ushr 6
-            val r = u and 63
-            for (y in 0 until h) {
-                val b = y * nw
-                for (i in 0 until nw) {
-                    val j = i - q
-                    if (j < 0) continue
-                    var v = src[b + j] shl r
-                    if (r != 0 && j - 1 >= 0) v = v or (src[b + j - 1] ushr (64 - r))
-                    out[b + i] = v
-                }
-                out[b + nw - 1] = out[b + nw - 1] and tail
             }
         }
-        return out
+
+        /** a[x] |= a[x − s]（s > 0；由右往左；末字超出寬度的位元清掉）。 */
+        private fun orShiftLeftInPlace(a: LongArray, s: Int) {
+            val q = s ushr 6
+            val r = s and 63
+            for (y in 0 until h) {
+                val b = y * nw
+                for (i in nw - 1 downTo q) {
+                    val j = b + i - q
+                    var v = a[j] shl r
+                    if (r != 0 && i - q - 1 >= 0) v = v or (a[j - 1] ushr (64 - r))
+                    if (i == nw - 1) v = v and tail
+                    a[b + i] = a[b + i] or v
+                }
+            }
+        }
+
+        /** out[x] = a[x + s]（逐列、範圍外 0；s < 0 時末字超出寬度的位元清掉）。 */
+        private fun shiftInto(a: LongArray, out: LongArray, s: Int) {
+            java.util.Arrays.fill(out, 0L)
+            if (s >= 0) {
+                val q = s ushr 6
+                val r = s and 63
+                for (y in 0 until h) {
+                    val b = y * nw
+                    for (i in 0 until nw - q) {
+                        val j = i + q
+                        var v = a[b + j] ushr r
+                        if (r != 0 && j + 1 < nw) v = v or (a[b + j + 1] shl (64 - r))
+                        out[b + i] = v
+                    }
+                }
+            } else {
+                val u = -s
+                val q = u ushr 6
+                val r = u and 63
+                for (y in 0 until h) {
+                    val b = y * nw
+                    for (i in q until nw) {
+                        val j = i - q
+                        var v = a[b + j] shl r
+                        if (r != 0 && j - 1 >= 0) v = v or (a[b + j - 1] ushr (64 - r))
+                        out[b + i] = v
+                    }
+                    out[b + nw - 1] = out[b + nw - 1] and tail
+                }
+            }
+        }
     }
 
     /**
-     * 一維長條核（1×n 或 n×1）的快路：**最近目標像素距離**兩趟掃描，成本與核長無關。
+     * 一維長條核（1×n 或 n×1）：窗＝水平 [x − a, x + b]／垂直 [y − a, y + b]（a＝[anchor]、b＝len − 1 − a），只看影像內——
+     * 膨脹＝窗內有沒有 true（影像外當 0）、侵蝕＝窗內有沒有 false（影像外當前景，同 cv2）。
      *
-     * 二值遮罩的線膨脹＝「窗內有沒有 true」、線侵蝕＝「窗內有沒有 false」（影像外：膨脹視為 0 不貢獻、
-     * 侵蝕視為前景不否決——都等於「只看影像內」）。所以只要知道每個位置往前、往後最近一個目標像素
-     * 有多遠：正向一趟記「最近的目標在左／上多遠」、反向一趟記「在右／下多遠」，任一在窗內就中。
-     *
-     * 取代 van Herk 分段極值的原因：那版每個像素要兩次整數除法（分段索引）、每行還要搬一次緩衝；
-     * 垂直方向更是逐欄跨行取值、快取全失。這版兩趟都是 row-major、垂直方向只帶一個寬度大小的
-     * 狀態陣列。格框線偵測／格框線切割／線稿密度否決加起來十幾趟線掃描，全走這裡。
+     * 走位元打包（2026-10-06；原本是「最近目標像素距離」兩趟逐像素掃描，留在測試 MorphPackedTest 當參考實作，逐像素相同）：
+     * 侵蝕＝¬膨脹(¬m)；水平的窗 OR 用 [PackedRuns]（單側就地倍增），垂直的用 [rowsOrBits]（整列一次 OR 64 px）。
+     * 格框線偵測／格框線切割／線稿密度否決加起來十幾趟線形態學，全走這裡。
      */
     private fun lineMorph(m: Mask, len: Int, horizontal: Boolean, anchor: Int, dilate: Boolean): Mask {
         val w = m.w
         val h = m.h
-        val out = Mask(w, h)
-        val src = m.data
-        val dst = out.data
-        val a = anchor                 // 窗往左／上伸 a
-        val b = len - 1 - anchor       // 窗往右／下伸 b
-        val target = dilate            // 膨脹找 true，侵蝕找 false
-        val far = Int.MIN_VALUE / 2
-        if (horizontal) {
-            for (y in 0 until h) {
-                val base = y * w
-                var prev = far
-                for (x in 0 until w) {
-                    if (src[base + x] == target) prev = x
-                    dst[base + x] = x - prev <= a
-                }
-                var next = -far
-                for (x in w - 1 downTo 0) {
-                    if (src[base + x] == target) next = x
-                    if (next - x <= b) dst[base + x] = true
-                }
-            }
-        } else {
-            val prev = IntArray(w) { far }
-            for (y in 0 until h) {
-                val base = y * w
-                for (x in 0 until w) {
-                    if (src[base + x] == target) prev[x] = y
-                    dst[base + x] = y - prev[x] <= a
-                }
-            }
-            val next = IntArray(w) { -far }
-            for (y in h - 1 downTo 0) {
-                val base = y * w
-                for (x in 0 until w) {
-                    if (src[base + x] == target) next[x] = y
-                    if (next[x] - y <= b) dst[base + x] = true
-                }
-            }
+        val src = if (dilate) packBits(m) else packBitsNot(m)
+        val r = lineOrBits(src, w, h, len, horizontal, anchor)
+        return if (dilate) unpackBits(r, w, h) else unpackBitsNot(r, w, h)
+    }
+
+    /** 打包位元的線窗 OR（[lineMorph] 的窗；影像外 0）。回傳新陣列（不是 [src]）。 */
+    private fun lineOrBits(src: LongArray, w: Int, h: Int, len: Int, horizontal: Boolean, anchor: Int): LongArray {
+        val nw = (w + 63) ushr 6
+        val a = anchor
+        val b = len - 1 - anchor
+        return if (horizontal) PackedRuns(src, nw, h, w).rangeOr(-a, b) else rowsOrBits(src, nw, h, a, b)
+    }
+
+    /** 打包位元的垂直窗 OR：out 列 y＝OR 來源列 [y − a, y + b]（影像外 0）。兩個單側就地倍增再合併。 */
+    private fun rowsOrBits(src: LongArray, nw: Int, h: Int, a: Int, b: Int): LongArray {
+        val down = src.copyOf()                 // OR 列 [y, y + b]
+        var ext = 0
+        while (ext < b) {
+            val s = min(b - ext, ext + 1)
+            val sh = s * nw
+            for (i in 0 until (h - s) * nw) down[i] = down[i] or down[i + sh]   // 由上往下：讀的列在寫的列下面、還沒改
+            ext += s
         }
-        // dst 現在＝「窗內有目標」。膨脹就是答案；侵蝕是「窗內有 false ⇒ 輸出 false」，取反。
-        if (!dilate) for (i in dst.indices) dst[i] = !dst[i]
-        return out
+        if (a == 0) return down
+        val up = src.copyOf()                   // OR 列 [y − a, y]
+        ext = 0
+        while (ext < a) {
+            val s = min(a - ext, ext + 1)
+            val sh = s * nw
+            for (i in h * nw - 1 downTo sh) up[i] = up[i] or up[i - sh]        // 由下往上
+            ext += s
+        }
+        for (i in down.indices) down[i] = down[i] or up[i]
+        return down
+    }
+
+    /**
+     * 方核（[kw]×[kh] 全 1）膨脹＝橫線 [kw]×1 再直線 1×[kh]（Minkowski 分解，與 `dilate(dilate(m, rect(kw, 1)), rect(1, kh))`
+     * 逐像素相同），兩趟都留在打包格式、只解包一次。
+     */
+    fun dilateRectSep(m: Mask, kw: Int, kh: Int): Mask {
+        val w = m.w
+        val h = m.h
+        var bits = packBits(m)
+        if (kw > 1) bits = lineOrBits(bits, w, h, kw, true, kw / 2)
+        if (kh > 1) bits = lineOrBits(bits, w, h, kh, false, kh / 2)
+        return unpackBits(bits, w, h)
+    }
+
+    /**
+     * 方核閉運算，與 `erode(erode(dilate(dilate(m, rect(n,1)), rect(1,n)), rect(n,1)), rect(1,n))` 逐像素相同
+     * （侵蝕＝¬膨脹(¬·)，全程打包）。
+     */
+    fun closeRectSep(m: Mask, n: Int): Mask {
+        val w = m.w
+        val h = m.h
+        if (n <= 1) return m.copy()
+        var bits = lineOrBits(lineOrBits(packBits(m), w, h, n, true, n / 2), w, h, n, false, n / 2)
+        notBitsInPlace(bits, w, h)
+        bits = lineOrBits(lineOrBits(bits, w, h, n, true, n / 2), w, h, n, false, n / 2)
+        return unpackBitsNot(bits, w, h)
     }
 
     /** 核是不是單一實心的 1×n（回 n）或 n×1（回 -n）；都不是回 0。 */
@@ -490,94 +617,109 @@ object Cv {
     private fun morphGray(g: Gray, k: Kernel, wantMax: Boolean, lo: Int = 0, hi: Int = 255): Gray {
         val w = g.w
         val h = g.h
-        val out = Gray(w, h, IntArray(w * h) { if (wantMax) lo else hi })
+        val od = IntArray(w * h)
+        java.util.Arrays.fill(od, if (wantMax) lo else hi)
         val row = IntArray(w)
-        val widths = k.runStart.indices
-            .filter { k.runEnd[it] > k.runStart[it] }
-            .map { k.runEnd[it] - k.runStart[it] }
-            .distinct()
-        val cache = HashMap<Int, IntArray>(widths.size)
-        for (win in widths) cache[win] = IntArray(w)
+        // 不同的 run 寬度（核列順序首見）與每個核列用哪一個
+        val widthOf = IntArray(k.h) { -1 }
+        val widths = IntArray(k.h)
+        var nW = 0
+        for (ky in 0 until k.h) {
+            val win = k.runEnd[ky] - k.runStart[ky]
+            if (win <= 0) continue
+            var j = 0
+            while (j < nW && widths[j] != win) j++
+            if (j == nW) { widths[nW] = win; nW++ }
+            widthOf[ky] = j
+        }
+        val slides = Array(nW) { IntArray(w) }
+        val pre = IntArray(w)
+        val suf = IntArray(w)
 
         // 以「來源列」為外圈：每條來源行只讀一次、每種寬度只掃一次，再散到所有用得到它的輸出列
         for (sy in 0 until h) {
             System.arraycopy(g.data, sy * w, row, 0, w)
-            for (win in widths) slidingExtreme(row, w, win, wantMax, cache[win]!!)
+            for (j in 0 until nW) slidingExtreme(row, w, widths[j], wantMax, slides[j], pre, suf)
             for (ky in 0 until k.h) {
-                val runS = k.runStart[ky]
-                val runE = k.runEnd[ky]
-                if (runS >= runE) continue
+                val wi = widthOf[ky]
+                if (wi < 0) continue
                 val y = sy - (ky - k.ay)
                 if (y < 0 || y >= h) continue
-                val win = runE - runS
-                val slide = cache[win]!!
-                val offL = runS - k.ax
+                val win = widths[wi]
+                val slide = slides[wi]
+                val offL = k.runStart[ky] - k.ax
                 val obase = y * w
-                for (x in 0 until w) {
-                    // 視窗完全在界內才用滑動極值；部分越界逐項算——cv2 的邊界是「外側不影響極值」，
-                    // 把視窗夾進有效範圍會取到不該取的值（blackhat 會立刻對不上）
-                    val a0 = x + offL
-                    val b0 = a0 + win - 1
-                    val v = if (a0 >= 0 && b0 < w) {
-                        slide[a0]
-                    } else {
-                        val lo = max(a0, 0)
-                        val hi = min(b0, w - 1)
-                        if (lo > hi) {
-                            if (wantMax) lo else hi
-                        } else {
-                            var acc = row[lo]
-                            for (j in lo + 1..hi) acc = if (wantMax) max(acc, row[j]) else min(acc, row[j])
-                            acc
-                        }
-                    }
-                    val cur = out.data[obase + x]
-                    out.data[obase + x] = if (wantMax) max(cur, v) else min(cur, v)
+                // 視窗完全在界內（x + offL ≥ 0 且 x + offL + win − 1 < w）才用滑動極值；部分越界逐項算——cv2 的邊界是
+                // 「外側不影響極值」，把視窗夾進有效範圍會取到不該取的值（blackhat 會立刻對不上）
+                val xa = max(0, -offL)
+                val xb = min(w - 1, w - win - offL)
+                if (xa > xb) {
+                    for (x in 0 until w) od[obase + x] = morphMerge(od[obase + x], partialExtreme(row, w, x + offL, win, wantMax), wantMax)
+                    continue
                 }
+                for (x in 0 until xa) od[obase + x] = morphMerge(od[obase + x], partialExtreme(row, w, x + offL, win, wantMax), wantMax)
+                if (wantMax) {
+                    for (x in xa..xb) { val v = slide[x + offL]; if (v > od[obase + x]) od[obase + x] = v }
+                } else {
+                    for (x in xa..xb) { val v = slide[x + offL]; if (v < od[obase + x]) od[obase + x] = v }
+                }
+                for (x in xb + 1 until w) od[obase + x] = morphMerge(od[obase + x], partialExtreme(row, w, x + offL, win, wantMax), wantMax)
             }
         }
-        return out
+        return Gray(w, h, od)
+    }
+
+    private fun morphMerge(cur: Int, v: Int, wantMax: Boolean): Int = if (wantMax) max(cur, v) else min(cur, v)
+
+    /**
+     * 部分越界的視窗 [a0, a0 + win − 1]：只取界內那段的極值。整段在界外時回傳界內段的端點座標（原本的寫法：核含錨點的核
+     * 不會走到，照舊保留）。
+     */
+    private fun partialExtreme(row: IntArray, w: Int, a0: Int, win: Int, wantMax: Boolean): Int {
+        val b0 = a0 + win - 1
+        val lo = max(a0, 0)
+        val hi = min(b0, w - 1)
+        if (lo > hi) return if (wantMax) lo else hi
+        var acc = row[lo]
+        for (j in lo + 1..hi) acc = if (wantMax) max(acc, row[j]) else min(acc, row[j])
+        return acc
     }
 
     /**
-     * 一維滑動極值（van Herk / Gil-Werman 的分段前綴後綴法）：結果寫進 [dst] 的前 `n - win + 1` 項。
+     * 一維滑動極值（van Herk / Gil-Werman 的分段前綴後綴法）：結果寫進 [dst] 的前 `n - win + 1` 項。[pre]／[suf] 是呼叫端的
+     * 工作緩衝（長度 ≥ n）。視窗起點剛好是分段起點時整窗就在同一段裡＝pre[hi]，否則＝極值(suf[lo], pre[hi])。
      */
-    private fun slidingExtreme(a: IntArray, n: Int, win: Int, wantMax: Boolean, dst: IntArray) {
+    private fun slidingExtreme(a: IntArray, n: Int, win: Int, wantMax: Boolean, dst: IntArray, pre: IntArray, suf: IntArray) {
         if (win >= n) {
             var acc = a[0]
             for (i in 1 until n) acc = if (wantMax) max(acc, a[i]) else min(acc, a[i])
             dst[0] = acc
             return
         }
-        val pre = IntArray(n)
-        val suf = IntArray(n)
         var i = 0
         while (i < n) {
             val end = min(i + win, n)
             var acc = a[i]
             pre[i] = acc
-            for (j in i + 1 until end) {
-                acc = if (wantMax) max(acc, a[j]) else min(acc, a[j])
-                pre[j] = acc
-            }
-            acc = a[end - 1]
-            suf[end - 1] = acc
-            for (j in end - 2 downTo i) {
-                acc = if (wantMax) max(acc, a[j]) else min(acc, a[j])
-                suf[j] = acc
+            if (wantMax) {
+                for (j in i + 1 until end) { if (a[j] > acc) acc = a[j]; pre[j] = acc }
+                acc = a[end - 1]
+                suf[end - 1] = acc
+                for (j in end - 2 downTo i) { if (a[j] > acc) acc = a[j]; suf[j] = acc }
+            } else {
+                for (j in i + 1 until end) { if (a[j] < acc) acc = a[j]; pre[j] = acc }
+                acc = a[end - 1]
+                suf[end - 1] = acc
+                for (j in end - 2 downTo i) { if (a[j] < acc) acc = a[j]; suf[j] = acc }
             }
             i = end
         }
+        var phase = 0                     // x mod win
         for (x in 0..n - win) {
-            val lo = x
-            val hi = x + win - 1
-            dst[x] = if (lo / win == hi / win) {
-                var acc = a[lo]
-                for (j in lo + 1..hi) acc = if (wantMax) max(acc, a[j]) else min(acc, a[j])
-                acc
-            } else {
-                if (wantMax) max(suf[lo], pre[hi]) else min(suf[lo], pre[hi])
-            }
+            val hiI = x + win - 1
+            dst[x] = if (phase == 0) pre[hiI] else if (wantMax) max(suf[x], pre[hiI]) else min(suf[x], pre[hiI])
+            phase++
+            if (phase == win) phase = 0
         }
     }
 
@@ -586,81 +728,121 @@ object Cv {
     /**
      * `cv2.connectedComponentsWithStats(m, connectivity)`。
      *
-     * 兩趟：先掃描序 union-find 配臨時標號，再按**首見掃描序**重新編號——cv2 的標號就是這個順序，
-     * 下游有「元件 id 當 key」的邏輯（gutter_ids / panel_ids / sticker），順序不同會對不上。
+     * 標號＝**首見掃描序**（cv2 的標號就是這個順序，下游有「元件 id 當 key」的邏輯：gutter_ids / panel_ids / sticker，
+     * 順序不同會對不上）；統計含背景 0 號（沒有背景像素時 bbox 為 0×0、位置 (0, 0)）。
+     *
+     * 游程版（2026-10-06，與原本逐像素 union-find 逐值相同）：每列切成連續 true 的游程，只在上下兩列的游程重疊（8 連通含
+     * 斜角：區間各外擴 1）時 union；元件的首見像素＝它在掃描序上的第一個游程的起點，所以按游程順序配號就是首見掃描序。
+     * 面積、bbox 逐游程累計；背景的 bbox 由每列的游程直接推（列首／列尾第一個非游程像素）。parent 只配游程數那麼長
+     * （原本是 2 B/px）、find／union 只在游程重疊時呼叫。
      */
     fun ccStats(m: Mask, connectivity: Int = 8): CC {
         val w = m.w
         val h = m.h
+        val d = m.data
         val labels = IntArray(w * h)
-        val parent = IntArray(w * h / 2 + 2)
-        var next = 1
-
-        fun find(a: Int): Int {
-            var x = a
-            while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x] }
-            return x
-        }
-
-        fun union(a: Int, b: Int) {
-            val ra = find(a)
-            val rb = find(b)
-            if (ra != rb) parent[max(ra, rb)] = min(ra, rb)
-        }
-
+        val adj = if (connectivity == 8) 1 else 0
+        // 游程：起點、終點（含）；rowFirst[y]＝第 y 列第一個游程的索引（rowFirst[h]＝總數）
+        var rs = IntArray(max(64, h * 2))
+        var re = IntArray(rs.size)
+        var parent = IntArray(rs.size)
+        val rowFirst = IntArray(h + 1)
+        var nr = 0
+        // 背景（0 號）的 bbox 與前景像素數
+        var bgLeft = Int.MAX_VALUE
+        var bgTop = Int.MAX_VALUE
+        var bgRight = Int.MIN_VALUE
+        var bgBottom = Int.MIN_VALUE
+        var fg = 0L
         for (y in 0 until h) {
-            for (x in 0 until w) {
-                val i = y * w + x
-                if (!m.data[i]) continue
-                var best = 0
-                // 已掃過的鄰居：左、上（4-連通）＋ 左上、右上（8-連通）
-                if (x > 0 && labels[i - 1] != 0) best = labels[i - 1]
-                if (y > 0 && labels[i - w] != 0) {
-                    best = if (best == 0) labels[i - w] else { union(best, labels[i - w]); min(best, labels[i - w]) }
+            rowFirst[y] = nr
+            val base = y * w
+            val p0 = if (y > 0) rowFirst[y - 1] else 0
+            val p1 = nr
+            var pj = p0
+            var x = 0
+            while (x < w) {
+                if (!d[base + x]) { x++; continue }
+                val s = x
+                while (x < w && d[base + x]) x++
+                val e = x - 1
+                if (nr == rs.size) {
+                    val cap = rs.size * 2
+                    rs = rs.copyOf(cap)
+                    re = re.copyOf(cap)
+                    parent = parent.copyOf(cap)
                 }
-                if (connectivity == 8) {
-                    if (x > 0 && y > 0 && labels[i - w - 1] != 0) {
-                        best = if (best == 0) labels[i - w - 1] else { union(best, labels[i - w - 1]); min(best, labels[i - w - 1]) }
-                    }
-                    if (x < w - 1 && y > 0 && labels[i - w + 1] != 0) {
-                        best = if (best == 0) labels[i - w + 1] else { union(best, labels[i - w + 1]); min(best, labels[i - w + 1]) }
-                    }
+                rs[nr] = s
+                re[nr] = e
+                parent[nr] = nr
+                // 上一列與 [s − adj, e + adj] 重疊的游程（上一列的游程依 x 排序）
+                while (pj < p1 && re[pj] < s - adj) pj++
+                var k = pj
+                while (k < p1 && rs[k] <= e + adj) {
+                    // union（根＝較小的游程索引；path halving）
+                    var ra = nr
+                    while (parent[ra] != ra) { parent[ra] = parent[parent[ra]]; ra = parent[ra] }
+                    var rb = k
+                    while (parent[rb] != rb) { parent[rb] = parent[parent[rb]]; rb = parent[rb] }
+                    if (ra != rb) { if (ra < rb) parent[rb] = ra else parent[ra] = rb }
+                    k++
                 }
-                if (best == 0) {
-                    if (next >= parent.size) throw IllegalStateException("標號溢位")
-                    parent[next] = next
-                    best = next
-                    next++
+                fg += e - s + 1
+                nr++
+            }
+            // 背景：這一列有沒有非前景像素、最左／最右的是哪個
+            val r0 = rowFirst[y]
+            if (nr == r0) {
+                if (w > 0) {
+                    if (0 < bgLeft) bgLeft = 0
+                    if (w - 1 > bgRight) bgRight = w - 1
+                    if (y < bgTop) bgTop = y
+                    bgBottom = y
                 }
-                labels[i] = best
+            } else if (!(nr - r0 == 1 && rs[r0] == 0 && re[r0] == w - 1)) {
+                val lx = if (rs[r0] > 0) 0 else re[r0] + 1
+                val rx = if (re[nr - 1] < w - 1) w - 1 else rs[nr - 1] - 1
+                if (lx < bgLeft) bgLeft = lx
+                if (rx > bgRight) bgRight = rx
+                if (y < bgTop) bgTop = y
+                bgBottom = y
             }
         }
+        rowFirst[h] = nr
 
-        // 第二趟：壓平 + 按首見順序重編
-        val remap = IntArray(next)
+        // 按游程（＝掃描）順序配最終標號、填標號、累計統計
+        val remap = IntArray(nr)
         var n = 1
-        for (i in labels.indices) {
-            if (labels[i] == 0) continue
-            val root = find(labels[i])
+        for (r in 0 until nr) {
+            var root = r
+            while (parent[root] != root) root = parent[root]
             if (remap[root] == 0) { remap[root] = n; n++ }
-            labels[i] = remap[root]
+            parent[r] = root
         }
-
         val left = IntArray(n) { Int.MAX_VALUE }
         val top = IntArray(n) { Int.MAX_VALUE }
         val right = IntArray(n) { Int.MIN_VALUE }
         val bottom = IntArray(n) { Int.MIN_VALUE }
         val area = IntArray(n)
         for (y in 0 until h) {
-            for (x in 0 until w) {
-                val l = labels[y * w + x]
-                area[l]++
-                if (x < left[l]) left[l] = x
+            val base = y * w
+            for (r in rowFirst[y] until rowFirst[y + 1]) {
+                val l = remap[parent[r]]
+                val s = rs[r]
+                val e = re[r]
+                java.util.Arrays.fill(labels, base + s, base + e + 1, l)
+                area[l] += e - s + 1
+                if (s < left[l]) left[l] = s
                 if (y < top[l]) top[l] = y
-                if (x > right[l]) right[l] = x
-                if (y > bottom[l]) bottom[l] = y
+                if (e > right[l]) right[l] = e
+                bottom[l] = y
             }
         }
+        area[0] = (w.toLong() * h - fg).toInt()
+        left[0] = bgLeft
+        top[0] = bgTop
+        right[0] = bgRight
+        bottom[0] = bgBottom
         val width = IntArray(n)
         val height = IntArray(n)
         for (i in 0 until n) {
@@ -1240,45 +1422,60 @@ object Cv {
             val dist = geodesicDistance(seed, within, step, iters)
             return Mask(seed.w, seed.h, BooleanArray(dist.size) { dist[it] >= 0 })
         }
-        val w = seed.w
-        val h = seed.h
-        var cur = (seed and within).data
-        var next = BooleanArray(w * h)
-        // 3×3 膨脹 + 與 within 取交集，就地做：原本每次迭代都走通用 dilate（走核的 run 分解、
-        // 配置新陣列），十次迭代就是十次全頁配置。3×3 直接看八鄰居更短也不配置。
+        // 迭代版走位元打包（2026-10-06；原本逐像素看八鄰居，留在測試 MorphPackedTest 當參考實作，逐像素相同）：
+        // 一次 3×3 膨脹＝每列左右移一位 OR、再上下三列 OR（64 px 一字）。
         //
         // ⚠️ within 的交集要照 Python 的節奏：它是 `dilate(cur, k, iterations=n) & within`，
         // 也就是**連做 n 次膨脹後才交集一次**。每次都交集會讓生長被 within 的細縫擋住，
-        // 結果完全不同（實測 MAE 0.57→0.93、紅線 0.09→0.36%）。
+        // 結果完全不同（實測 MAE 0.57→0.93、紅線 0.09→0.36%）。長不動（一批之後跟之前相同）就停：之後每批都一樣。
+        val w = seed.w
+        val h = seed.h
+        val withinB = packBits(within)
+        var cur = packBits(seed)
+        for (i in cur.indices) cur[i] = cur[i] and withinB[i]
+        var nxt = LongArray(cur.size)
+        val hor = LongArray(cur.size)
         var done = 0
         while (done < iters) {
             val n = min(step, iters - done)
-            var changed = false
-            repeat(n) { sub ->
-                val last = sub == n - 1
-                for (y in 0 until h) {
-                    val base = y * w
-                    val up = base - w
-                    val dn = base + w
-                    for (x in 0 until w) {
-                        val i = base + x
-                        if (last && !within.data[i]) { next[i] = false; continue }
-                        if (cur[i]) { next[i] = true; continue }
-                        val l = x > 0
-                        val r = x < w - 1
-                        val hit = (l && cur[i - 1]) || (r && cur[i + 1]) ||
-                            (y > 0 && (cur[up + x] || (l && cur[up + x - 1]) || (r && cur[up + x + 1]))) ||
-                            (y < h - 1 && (cur[dn + x] || (l && cur[dn + x - 1]) || (r && cur[dn + x + 1])))
-                        next[i] = hit
-                        if (hit) changed = true
-                    }
-                }
-                val t = cur; cur = next; next = t
-            }
+            System.arraycopy(cur, 0, nxt, 0, cur.size)
+            repeat(n) { dilate3Bits(nxt, hor, w, h) }
+            for (i in nxt.indices) nxt[i] = nxt[i] and withinB[i]
             done += n
-            if (!changed) return Mask(w, h, cur)   // 長不動了就停
+            val same = nxt.contentEquals(cur)
+            val t = cur; cur = nxt; nxt = t
+            if (same) break
         }
-        return Mask(w, h, cur)
+        return unpackBits(cur, w, h)
+    }
+
+    /** 打包位元就地 3×3 膨脹（影像外當 0）：[hor] 是同尺寸的工作緩衝。 */
+    private fun dilate3Bits(a: LongArray, hor: LongArray, w: Int, h: Int) {
+        val nw = (w + 63) ushr 6
+        val tail = if (w and 63 == 0) -1L else (1L shl (w and 63)) - 1
+        for (y in 0 until h) {
+            val b = y * nw
+            for (i in 0 until nw) {
+                val v = a[b + i]
+                var l = v shl 1                       // out[x] |= in[x − 1]
+                if (i > 0) l = l or (a[b + i - 1] ushr 63)
+                var r = v ushr 1                      // out[x] |= in[x + 1]
+                if (i + 1 < nw) r = r or (a[b + i + 1] shl 63)
+                hor[b + i] = v or l or r
+            }
+            hor[b + nw - 1] = hor[b + nw - 1] and tail
+        }
+        for (y in 0 until h) {
+            val b = y * nw
+            val up = b - nw
+            val dn = b + nw
+            for (i in 0 until nw) {
+                var v = hor[b + i]
+                if (y > 0) v = v or hor[up + i]
+                if (y < h - 1) v = v or hor[dn + i]
+                a[b + i] = v
+            }
+        }
     }
 
     /**
@@ -2463,9 +2660,11 @@ object Cv {
      */
     fun erodePacked(m: Mask, k: Kernel): Mask = unpackBitsNot(dilateBits(packBitsNot(m), m.w, m.h, k), m.w, m.h)
 
-    /** [close]（cv2 MORPH_CLOSE）的位元打包快路。 */
-    fun closePacked(m: Mask, k: Kernel): Mask = erodePacked(dilatePacked(m, k), k)
+    /** [close]（cv2 MORPH_CLOSE）的位元打包快路（中間結果留在打包格式，不解包再打包）。 */
+    fun closePacked(m: Mask, k: Kernel): Mask =
+        unpackBits(erodeBits(dilateBits(packBits(m), m.w, m.h, k), m.w, m.h, k), m.w, m.h)
 
-    /** [open]（cv2 MORPH_OPEN）的位元打包快路。 */
-    fun openPacked(m: Mask, k: Kernel): Mask = dilatePacked(erodePacked(m, k), k)
+    /** [open]（cv2 MORPH_OPEN）的位元打包快路（中間結果留在打包格式）。 */
+    fun openPacked(m: Mask, k: Kernel): Mask =
+        unpackBits(dilateBits(erodeBits(packBits(m), m.w, m.h, k), m.w, m.h, k), m.w, m.h)
 }

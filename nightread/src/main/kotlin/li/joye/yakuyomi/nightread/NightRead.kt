@@ -16,6 +16,18 @@ import kotlin.math.roundToInt
 /** 各階段的中間量（遮罩面積等），parity 除錯用。正式路徑傳 null。 */
 typealias NightReadDebug = (stage: String, value: Int) -> Unit
 
+/**
+ * 只要段名的除錯回呼（產品的分段計時用）：回呼物件實作這個介面時，值除了 `("tier", 檔位索引)` 一律送 0——遮罩計數等只給
+ * parity 看的值不算（每頁省十來次整頁掃描）。段名與呼叫時點跟一般的除錯回呼完全相同，輸出不受影響。
+ */
+interface NightReadStageTimer : (String, Int) -> Unit
+
+/** 送一個段點：[value] 只在一般除錯回呼時才算（[NightReadStageTimer] 送 0）。 */
+@Suppress("NOTHING_TO_INLINE")
+internal inline fun NightReadDebug?.mark(stage: String, value: () -> Int) {
+    if (this != null) invoke(stage, if (this is NightReadStageTimer) 0 else value())
+}
+
 object NightRead {
 
     /**
@@ -246,8 +258,8 @@ object NightRead {
 
         val charRaw = input.charMask
         val charMask = Regions.smoothCharMask(Regions.snapCharMask(charRaw, g, p), g, p)
-        debug?.invoke("charRaw", charRaw.count())
-        debug?.invoke("charMask", charMask.count())
+        debug.mark("charRaw") { charRaw.count() }
+        debug.mark("charMask") { charMask.count() }
         val (lh, lv) = Regions.frameLineMask(g, p)
         val frame = lh or lv
         val frameless = Regions.pageIsFrameless(lh, lv, p)
@@ -336,7 +348,7 @@ object NightRead {
             diag["t_bleed"] = 0.0
             if (layer != null) diag["sep"] = layer
         }
-        debug?.invoke("separators", layer?.sep?.count() ?: 0)
+        debug.mark("separators") { layer?.sep?.count() ?: 0 }
 
         // 灰圈收細的頁面級證據（diag 要有 "ring"＝true 才存中間遮罩與耗時，免得一般的 diag 呼叫多抱幾張整頁遮罩）
         val ringEvidence = if (p.ring.enabled) packBits(Ring.evidence(g, charRaw, p, ringDiag(diag))) else null
@@ -405,7 +417,7 @@ object NightRead {
         if (near != null) rest = rest and near
         val pre = if (p.ring.enabled) packBits(rest) else null     // 1 bit/px：合成的峰值時它還用不到
         rest = rest.andNot(a.charMask)          // 背景填色一律讓開人物（andNot 配新遮罩：pre 保持讓開之前）
-        debug?.invoke("bubbleRest", rest.count())
+        debug.mark("bubbleRest") { rest.count() }
         return BubbleRest(rest, pre)
     }
 
@@ -660,9 +672,22 @@ object NightRead {
         (p.sceneFloor + (p.dimCeil - p.sceneFloor) * it / 255.0).roundToInt().coerceIn(0, 255)
     }
 
-    /** 原圖墨度（1−亮度）×gain 夾 [0,1]：把墨線轉亮時的 alpha，邊緣天然抗鋸齒。 */
-    private fun inkAlpha(g: Gray, gain: Double): FloatArray =
-        FloatArray(g.data.size) { ((1.0 - g.data[it] / 255.0) * gain).coerceIn(0.0, 1.0).toFloat() }
+    /**
+     * 原圖墨度（1−亮度）×gain 夾 [0,1]：把墨線轉亮時的 alpha，邊緣天然抗鋸齒。值只跟灰階值有關 ⇒ 256 格查表（同一條算式逐值算，
+     * 逐位元相同），用到的像素才查，不配整頁浮點陣列。0..255 以外（不會出現，保險）照算式算。
+     */
+    private class InkAlpha(private val gain: Double) {
+        private val lut = FloatArray(256) { ((1.0 - it / 255.0) * gain).coerceIn(0.0, 1.0).toFloat() }
+        fun at(v: Int): Float = if (v in 0..255) lut[v] else ((1.0 - v / 255.0) * gain).coerceIn(0.0, 1.0).toFloat()
+    }
+
+    /** 字的 alpha：[InkAlpha]（gain＝textGamma）再過 knee（低墨度的抗鋸齒過渡壓成純黑、字本體不受影響），同樣查表。 */
+    private class TextAlpha(gamma: Double, private val knee: Double) {
+        private val ink = InkAlpha(gamma)
+        private val lut = FloatArray(256) { kneeOf(ink.at(it)) }
+        private fun kneeOf(a: Float): Float = (((a - knee) / (1.0 - knee)).coerceIn(0.0, 1.0)).toFloat()
+        fun at(v: Int): Float = if (v in 0..255) lut[v] else kneeOf(ink.at(v))
+    }
 
     /**
      * 軟性墨線遮罩：blackhat（細暗線構）乘暗度權重，再與文字筆畫取聯集。
@@ -699,12 +724,21 @@ object NightRead {
         val bgHalf = Cv.gaussianBlur(half, 4.0)
         val bg = Cv.resizeBilinear(bgHalf, g.w, g.h)
         val out = FImg(g.w, g.h)
-        for (i in out.data.indices) {
-            var gain = p.glowStrength * soft[i]
-            gain *= ((95.0 - bg.data[i]) / 95.0).coerceIn(0.0, 1.0).toFloat()
-            val base = dimmed.data[i].toFloat()
-            val lifted = min(base + gain, max(base, p.glowCap.toFloat()))
-            out.data[i] = lifted.coerceIn(0f, 255f)
+        val od = out.data
+        val bd = bg.data
+        val dd = dimmed.data
+        val glowStrength = p.glowStrength
+        val glowCap = p.glowCap.toFloat()
+        for (i in od.indices) {
+            var gain = glowStrength * soft[i]
+            // coerceIn 照它的定義展開（NaN 原樣、先比下限再比上限），debug 版省一個呼叫
+            var t = (95.0 - bd[i]) / 95.0
+            if (t < 0.0) t = 0.0 else if (t > 1.0) t = 1.0
+            gain *= t.toFloat()
+            val base = dd[i].toFloat()
+            var lifted = min(base + gain, max(base, glowCap))
+            if (lifted < 0f) lifted = 0f else if (lifted > 255f) lifted = 255f
+            od[i] = lifted
         }
         return out
     }
@@ -713,32 +747,44 @@ object NightRead {
 
     /** 留白填深 + 邊界描亮。 */
     private fun paintGutter(out: FImg, g: Gray, fill: Mask, p: NightReadParams) {
-        for (i in fill.data.indices) if (fill.data[i]) out.data[i] = p.bg.toFloat()
-        val band = Cv.dilate(fill, Cv.rect(p.stroke * 2 + 1, p.stroke * 2 + 1)).andNot(fill)
-        val a = inkAlpha(g, 1.6)
-        for (i in band.data.indices) {
-            if (band.data[i]) out.data[i] = max(out.data[i], p.bg + a[i] * (p.edgeInk - p.bg))
+        val bg = p.bg
+        val od = out.data
+        val fd = fill.data
+        for (i in fd.indices) if (fd[i]) od[i] = bg.toFloat()
+        paintEdge(out, g, Cv.dilate(fill, Cv.rect(p.stroke * 2 + 1, p.stroke * 2 + 1)), fill, p)
+    }
+
+    /** 描亮邊：[dil] ∧ ¬[inner] 的像素取 max(原值, bg ＋ 墨度(1.6) ×(edgeInk − bg))。 */
+    private fun paintEdge(out: FImg, g: Gray, dil: Mask, inner: Mask, p: NightReadParams) {
+        val a = InkAlpha(1.6)
+        val bg = p.bg
+        val span = p.edgeInk - bg
+        val od = out.data
+        val dd = dil.data
+        val id = inner.data
+        val gd = g.data
+        for (i in dd.indices) {
+            if (dd[i] && !id[i]) od[i] = max(od[i], bg + a.at(gd[i]) * span)
         }
     }
 
     /** 氣泡重繪：內部填深、文字畫亮（墨度當 alpha）、輪廓描亮。 */
     private fun paintBubbles(out: FImg, g: Gray, bubble: Mask, seg: Mask, p: NightReadParams) {
         if (!bubble.any()) return
-        for (i in bubble.data.indices) if (bubble.data[i]) out.data[i] = p.bg.toFloat()
-        val text = Cv.dilate(seg and bubble, Cv.rect(p.textPad * 2 + 1, p.textPad * 2 + 1)) and bubble
-        val a = inkAlpha(g, p.textGamma)
-        for (i in a.indices) {
-            // knee：把低墨度（字的抗鋸齒過渡）壓成純黑，字本體不受影響
-            a[i] = (((a[i] - p.textKnee) / (1.0 - p.textKnee)).coerceIn(0.0, 1.0)).toFloat()
+        val bg = p.bg
+        val od = out.data
+        val bd = bubble.data
+        for (i in bd.indices) if (bd[i]) od[i] = bg.toFloat()
+        val text = Cv.dilate(seg and bubble, Cv.rect(p.textPad * 2 + 1, p.textPad * 2 + 1))
+        // knee：把低墨度（字的抗鋸齒過渡）壓成純黑，字本體不受影響
+        val a = TextAlpha(p.textGamma, p.textKnee)
+        val span = p.ink - bg
+        val td = text.data
+        val gd = g.data
+        for (i in td.indices) {
+            if (td[i] && bd[i]) od[i] = max(od[i], bg + a.at(gd[i]) * span)
         }
-        for (i in text.data.indices) {
-            if (text.data[i]) out.data[i] = max(out.data[i], p.bg + a[i] * (p.ink - p.bg))
-        }
-        val band = Cv.dilate(bubble, Cv.rect(p.stroke * 2 + 1, p.stroke * 2 + 1)).andNot(bubble)
-        val a2 = inkAlpha(g, 1.6)
-        for (i in band.data.indices) {
-            if (band.data[i]) out.data[i] = max(out.data[i], p.bg + a2[i] * (p.edgeInk - p.bg))
-        }
+        paintEdge(out, g, Cv.dilate(bubble, Cv.rect(p.stroke * 2 + 1, p.stroke * 2 + 1)), bubble, p)
     }
 
     /**
@@ -1147,7 +1193,7 @@ object NightRead {
         debug?.invoke("paintBubbles", 0)
         // 偽泡：開口泡／字壓背景／字壓留白救回（三檔一律關：偽泡沿字往背景長，是撕裂黑塊來源之一，守護框 +2）
         val pb = if (p.pseudoBubbles) buildPseudoBubbles(g, a.regions, bubAll, seg, p) else null
-        debug?.invoke("pseudoBubble", pb?.count() ?: 0)
+        debug.mark("pseudoBubble") { pb?.count() ?: 0 }
         if (pb != null && pb.any()) paintBubbles(out, g, pb, seg, p)
         // 亮島填黑（三檔一律關：會把格內背景挖成黑塊；守護框對它零敏感）
         if (p.harmonize) harmonize(out, g, if (pb != null) bubAll or pb or gutterIn else bubAll or gutterIn, p)
@@ -1158,23 +1204,20 @@ object NightRead {
         if (lost.any()) {
             val txt = Cv.dilate(seg and lost, Cv.rect(p.textTopPad * 2 + 1, p.textTopPad * 2 + 1)) and lost
             if (txt.any()) {
-                val al = inkAlpha(g, p.textGamma)
-                for (i in al.indices) al[i] = (((al[i] - p.textKnee) / (1.0 - p.textKnee)).coerceIn(0.0, 1.0)).toFloat()
+                val al = TextAlpha(p.textGamma, p.textKnee)
+                val bg = p.bg
+                val span = p.ink - bg
                 for (i in txt.data.indices) {
                     if (!txt.data[i]) continue
-                    out.data[i] = p.bg.toFloat()
-                    out.data[i] = max(out.data[i], p.bg + al[i] * (p.ink - p.bg))
+                    out.data[i] = bg.toFloat()
+                    out.data[i] = max(out.data[i], bg + al.at(g.data[i]) * span)
                 }
             }
         }
 
         if (bubbleRest != null && bubbleRest.any()) {
             for (i in bubbleRest.data.indices) if (bubbleRest.data[i]) out.data[i] = p.bg.toFloat()
-            val rb = Cv.dilate(bubbleRest, Cv.rect(p.stroke * 2 + 1, p.stroke * 2 + 1)).andNot(bubbleRest)
-            val a2 = inkAlpha(g, 1.6)
-            for (i in rb.data.indices) {
-                if (rb.data[i]) out.data[i] = max(out.data[i], p.bg + a2[i] * (p.edgeInk - p.bg))
-            }
+            paintEdge(out, g, Cv.dilate(bubbleRest, Cv.rect(p.stroke * 2 + 1, p.stroke * 2 + 1)), bubbleRest, p)
         }
 
         // ── 人物還原（放最後 ⇒ 任何新填色機制自動受保護）──────────────────
@@ -1187,7 +1230,7 @@ object NightRead {
                 val kb = Cv.ellipse(p.textBackingR * 2 + 1)
                 restore = restore.andNot(Cv.dilate(textOnChar, kb))
             }
-            debug?.invoke("restore", restore.count())
+            debug.mark("restore") { restore.count() }
             restore
         } else {
             restoreMaskNoPseudo(a, bubAll, p, debug)
@@ -1205,7 +1248,21 @@ object NightRead {
             val al = alpha.data[i]
             out.data[i] = out.data[i] * (1f - al) + sceneKeep.data[i] * al
         }
-        return Gray(w, h, IntArray(w * h) { out.data[it].roundToInt().coerceIn(0, 255) })
+        return toGray(out)
+    }
+
+    /** 成品 float → 0..255 整數：`roundToInt().coerceIn(0, 255)` 照定義展開（NaN 一樣拋例外）。 */
+    private fun toGray(out: FImg): Gray {
+        val od = out.data
+        val res = IntArray(od.size)
+        for (i in od.indices) {
+            val f = od[i]
+            if (f.isNaN()) throw IllegalArgumentException("Cannot round NaN value.")
+            var r = Math.round(f)
+            if (r < 0) r = 0 else if (r > 255) r = 255
+            res[i] = r
+        }
+        return Gray(out.w, out.h, res)
     }
 
     /** [compose] 用完就放掉的整頁量測（參數或區域變數會被編譯後的框架一直抱到函式結束）。 */
@@ -1360,7 +1417,7 @@ object NightRead {
         } else {
             restoreBase(a, bubAll, p).also { if (a.shared) a.restoreBits = packBits(it) }
         }
-        debug?.invoke("restore", restore.count())
+        debug.mark("restore") { restore.count() }
         return restore
     }
 
@@ -1490,7 +1547,7 @@ object NightRead {
             val gv = a.gutterGvBits
             val bits = a.gutterBandBits ?: return GutterBand(null, gv)
             val cached = unpackBits(bits, a.g.w, a.g.h)
-            if (!a.frameless) debug?.invoke("gutterBand", cached.count())
+            if (!a.frameless) debug.mark("gutterBand") { cached.count() }
             return GutterBand(cached, gv)
         }
         val gb = computeGutterBand(a, gutterIn, p, debug, diag)
@@ -1504,10 +1561,14 @@ object NightRead {
 
     /**
      * 「不把人物遮罩裡的墨算線稿」重算一次的線稿密度否決（灰圈收細關＝null），1 bit/px。要在一般的否決**之前**算：兩次否決的
-     * 暫存不重疊，一般否決（合成的記憶體峰值）旁邊只多這 1 bit/px。
+     * 暫存不重疊，一般否決（合成的記憶體峰值）旁邊只多這 1 bit/px。兩次否決共用一次 [Texture.prepare]（只有 exclude 不同）。
      */
-    private fun vetoExcludingCharacters(a: Analysis, fill: Mask, p: NightReadParams): LongArray? =
-        if (!p.ring.enabled) null else packBits(Texture.veto(fill, a.g, a.frame, a.seg, a.bubbleStruct, p, exclude = a.charMask))
+    private fun vetoExcludingCharacters(a: Analysis, fill: Mask, prep: Texture.Prep?, p: NightReadParams): LongArray? =
+        if (!p.ring.enabled) null else packBits(if (prep == null) fill else Texture.decide(prep, fill, a.g, p, exclude = a.charMask))
+
+    /** 一般的線稿密度否決（與 [vetoExcludingCharacters] 共用 [Texture.prepare]；prep null＝不否決、原樣回傳 fill）。 */
+    private fun vetoShared(a: Analysis, fill: Mask, prep: Texture.Prep?, p: NightReadParams): Mask =
+        if (prep == null) fill else Texture.decide(prep, fill, a.g, p)
 
     /**
      * 線稿密度否決 [v1] 拿掉、但「不把人物遮罩裡的墨算線稿」重算（[v2]）就不會被拿掉的留白像素（研究端 `gv_wh`；沒有＝null）。
@@ -1560,8 +1621,9 @@ object NightRead {
                 if (l > 0 && maxDepth[l] <= lim) keep.data[i] = true
             }
             // 有線稿的白不是留白；出血格畫面拿掉（灰圈收細的 gv 在出血過濾之前取，同研究端）
-            val v2 = vetoExcludingCharacters(a, keep, p)
-            val v1 = Texture.veto(keep, g, a.frame, a.seg, a.bubbleStruct, p)
+            val prep = Texture.prepare(keep, g, a.frame, a.seg, a.bubbleStruct, p)
+            val v2 = vetoExcludingCharacters(a, keep, prep, p)
+            val v1 = vetoShared(a, keep, prep, p)
             val gv = gutterGv(keep, v1, v2)
             return GutterBand(bleed(v1, keep), gv)
         }
@@ -1571,11 +1633,12 @@ object NightRead {
         val band = Mask(w, h)
         for (i in band.data.indices) band.data[i] = cut.data[i] && bd[i] <= lim
         // 有線稿的白不是留白；出血格畫面拿掉（灰圈收細的 gv 在出血過濾之前取，同研究端）
-        val v2 = vetoExcludingCharacters(a, band, p)
-        val v1 = Texture.veto(band, g, a.frame, a.seg, a.bubbleStruct, p)
+        val prep = Texture.prepare(band, g, a.frame, a.seg, a.bubbleStruct, p)
+        val v2 = vetoExcludingCharacters(a, band, prep, p)
+        val v1 = vetoShared(a, band, prep, p)
         val gv = gutterGv(band, v1, v2)
         val band2 = bleed(v1, band)
-        debug?.invoke("gutterBand", band2.count())
+        debug.mark("gutterBand") { band2.count() }
         return GutterBand(band2, gv)
     }
 
@@ -1586,8 +1649,10 @@ object NightRead {
         val bd = FloatArray(w * h)
         for (y in 0 until h) {
             val base = y * w
+            val dy = if (y < h - 1 - y) y else h - 1 - y
             for (x in 0 until w) {
-                bd[base + x] = min(min(x, w - 1 - x), min(y, h - 1 - y)).toFloat()
+                val dx = if (x < w - 1 - x) x else w - 1 - x
+                bd[base + x] = (if (dx < dy) dx else dy).toFloat()
             }
         }
         if (includeFrame && frame.any()) {
