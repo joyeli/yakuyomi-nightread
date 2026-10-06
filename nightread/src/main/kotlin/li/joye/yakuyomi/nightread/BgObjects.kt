@@ -106,15 +106,44 @@ internal object BgObjects {
 
     /** 連通塊外接框長邊 ≥ [mind] 的留下（網點：長邊 < [mind] 的小點／小環）。 */
     private fun noDots(m: Mask, mind: Int): Mask {
-        val cc = Cv.ccStats(m, 8)
-        val keep = BooleanArray(cc.n) { it > 0 && max(cc.width[it], cc.height[it]) >= mind }
-        return Mask(m.w, m.h, BooleanArray(m.data.size) { keep[cc.labels[it]] })
+        // 游程標號（[Cv.ccRuns]）：外接框由游程累計（同 ccStats 的 width／height），不配整頁標號
+        val r = Cv.ccRuns(m, 8)
+        val x0 = IntArray(r.n) { Int.MAX_VALUE }
+        val x1 = IntArray(r.n) { Int.MIN_VALUE }
+        val y0 = IntArray(r.n) { Int.MAX_VALUE }
+        val y1 = IntArray(r.n) { Int.MIN_VALUE }
+        for (y in 0 until m.h) {
+            for (k in r.rowFirst[y] until r.rowFirst[y + 1]) {
+                val l = r.lab[k]
+                if (r.rs[k] < x0[l]) x0[l] = r.rs[k]
+                if (r.re[k] > x1[l]) x1[l] = r.re[k]
+                if (y < y0[l]) y0[l] = y
+                y1[l] = y
+            }
+        }
+        val keep = BooleanArray(r.n) { it > 0 && max(x1[it] - x0[it] + 1, y1[it] - y0[it] + 1) >= mind }
+        return keepRuns(m, r, keep)
     }
 
     private fun minArea(m: Mask, a: Int): Mask {
-        val cc = Cv.ccStats(m, 8)
-        val keep = BooleanArray(cc.n) { it > 0 && cc.area[it] >= a }
-        return Mask(m.w, m.h, BooleanArray(m.data.size) { keep[cc.labels[it]] })
+        val r = Cv.ccRuns(m, 8)
+        val area = IntArray(r.n)
+        for (k in 0 until r.rowFirst[m.h]) area[r.lab[k]] += r.re[k] - r.rs[k] + 1
+        val keep = BooleanArray(r.n) { it > 0 && area[it] >= a }
+        return keepRuns(m, r, keep)
+    }
+
+    /** 只留 [keep] 的元件（游程攤回遮罩）。 */
+    private fun keepRuns(m: Mask, r: Cv.CcRuns, keep: BooleanArray): Mask {
+        val out = Mask(m.w, m.h)
+        val od = out.data
+        for (y in 0 until m.h) {
+            val base = y * m.w
+            for (k in r.rowFirst[y] until r.rowFirst[y + 1]) {
+                if (keep[r.lab[k]]) java.util.Arrays.fill(od, base + r.rs[k], base + r.re[k] + 1, true)
+            }
+        }
+        return out
     }
 
     /** 8 方向（0、π/8 … 7π/8）[len] px 線核的位置（dy, dx）＝研究端 `line_offsets`（每方向去重、列優先序）。 */

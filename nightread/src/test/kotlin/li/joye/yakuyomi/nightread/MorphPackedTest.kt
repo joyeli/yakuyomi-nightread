@@ -371,4 +371,87 @@ class MorphPackedTest {
             assertArrayEquals("BFS #$t ${w}×$h iters=$iters step=$step", want.data, Cv.geodesicGrow(seed, within, iters, step, bfs = true).data)
         }
     }
+    // ── blackhat 走 morphGrayGather（2026-10-06）、distanceL2 欄方向分塊：對照改寫前的寫法 ──
+
+    @Test
+    fun blackhatMatchesScatter() {
+        val rnd = Random(7007)
+        repeat(120) { t ->
+            val w = 1 + rnd.nextInt(90)
+            val h = 1 + rnd.nextInt(90)
+            val g = Gray(w, h, IntArray(w * h) { rnd.nextInt(256) })
+            val k = if (t % 3 == 2) randomKernel(rnd) else Cv.ellipse(1 + 2 * rnd.nextInt(6))
+            val closed = morphGrayRef(morphGrayRef(g, k, true, 0, 255), k, false, 0, 255)
+            val want = IntArray(w * h) { max(0, closed.data[it] - g.data[it]) }
+            assertArrayEquals("blackhat #$t ${w}×$h 核 ${k.w}×${k.h}", want, Cv.blackhat(g, k).data)
+        }
+    }
+
+    private fun edtRef(src: FloatArray, n: Int, dst: FloatArray, v: IntArray, z: FloatArray) {
+        var k = 0
+        v[0] = 0
+        z[0] = -1e20f
+        z[1] = 1e20f
+        for (q in 1 until n) {
+            var s: Float
+            while (true) {
+                val p = v[k]
+                s = ((src[q] + q.toFloat() * q) - (src[p] + p.toFloat() * p)) / (2f * q - 2f * p)
+                if (s <= z[k]) k-- else break
+            }
+            k++
+            v[k] = q
+            z[k] = s
+            z[k + 1] = 1e20f
+        }
+        k = 0
+        for (q in 0 until n) {
+            while (z[k + 1] < q) k++
+            val p = v[k]
+            val dq = (q - p).toFloat()
+            dst[q] = dq * dq + src[p]
+        }
+    }
+
+    private fun distanceL2Ref(m: Mask): FloatArray {
+        val w = m.w
+        val h = m.h
+        val f = FloatArray(w * h) { if (m.data[it]) 1e20f else 0f }
+        val n = max(w, h)
+        val tmp = FloatArray(n)
+        val d = FloatArray(n)
+        val v = IntArray(n)
+        val z = FloatArray(n + 1)
+        for (y in 0 until h) {
+            System.arraycopy(f, y * w, tmp, 0, w)
+            edtRef(tmp, w, d, v, z)
+            System.arraycopy(d, 0, f, y * w, w)
+        }
+        for (x in 0 until w) {
+            var i = x
+            for (y in 0 until h) { tmp[y] = f[i]; i += w }
+            edtRef(tmp, h, d, v, z)
+            i = x
+            for (y in 0 until h) { f[i] = d[y]; i += w }
+        }
+        for (i in f.indices) f[i] = kotlin.math.sqrt(f[i])
+        return f
+    }
+
+    @Test
+    fun distanceL2MatchesReference() {
+        val rnd = Random(4242)
+        val sizes = listOf(1 to 1, 1 to 33, 33 to 1, 15 to 16, 16 to 17, 17 to 50, 50 to 17, 100 to 64)
+        repeat(160) { t ->
+            val (w, h) = sizes[t % sizes.size]
+            val m = randomMask(rnd, w, h)
+            val want = distanceL2Ref(m)
+            val got = Cv.distanceL2(m).data
+            for (i in want.indices) {
+                if (java.lang.Float.floatToRawIntBits(want[i]) != java.lang.Float.floatToRawIntBits(got[i])) {
+                    throw AssertionError("distanceL2 #$t ${w}×$h 第 $i 格：${want[i]} ≠ ${got[i]}")
+                }
+            }
+        }
+    }
 }

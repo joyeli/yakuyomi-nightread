@@ -588,7 +588,13 @@ object Cv {
 
     /** `cv2.morphologyEx(g, MORPH_BLACKHAT, k)` ＝ close(g) − g（灰階，結果 ≥ 0）。 */
     fun blackhat(g: Gray, k: Kernel): Gray {
-        val closed = erodeGray(dilateGray(g, k), k)
+        // 核的每一列都含錨點那一欄（橢圓、方核）時視窗不會整個落在影像外，8 位元影像上邊界的單位元（0／255 或 Int 的極值）
+        // 不影響結果：走較快的 [morphGrayGather]（逐位元相同）；其他核或值超出 0..255 照舊
+        var anchored = true
+        for (ky in 0 until k.h) if (k.runStart[ky] > k.ax || k.runEnd[ky] <= k.ax) { anchored = false; break }
+        if (anchored) for (v in g.data) if (v < 0 || v > 255) { anchored = false; break }
+        val closed = if (anchored) morphGrayGather(morphGrayGather(g, k, wantMax = true), k, wantMax = false)
+        else erodeGray(dilateGray(g, k), k)
         // 就地減（closed 是新配的）：不多配一張整頁
         val d = closed.data
         val gd = g.data
@@ -917,13 +923,27 @@ object Cv {
             edt1d(tmp, w, d, v, z)
             System.arraycopy(d, 0, f, base, w)
         }
-        // 逐列：跨列存取無法連續，只能逐格（這趟是快取不友善的那一半）
-        for (x in 0 until w) {
-            var i = x
-            for (y in 0 until h) { tmp[y] = f[i]; i += w }
-            edt1d(tmp, h, d, v, z)
-            i = x
-            for (y in 0 until h) { f[i] = d[y]; i += w }
+        // 逐列：一次搬 16 欄進欄優先的暫存（每列讀連續的 16 格，整條快取線用完），逐欄做完再一起搬回——
+        // 每一欄的運算與原本逐欄搬的寫法完全相同，只是存取順序換了（這趟原本是快取不友善的那一半）
+        val bw = 16
+        val cols = FloatArray(bw * h)
+        var x0 = 0
+        while (x0 < w) {
+            val nb = min(bw, w - x0)
+            for (y in 0 until h) {
+                val base = y * w + x0
+                for (b in 0 until nb) cols[b * h + y] = f[base + b]
+            }
+            for (b in 0 until nb) {
+                System.arraycopy(cols, b * h, tmp, 0, h)
+                edt1d(tmp, h, d, v, z)
+                System.arraycopy(d, 0, cols, b * h, h)
+            }
+            for (y in 0 until h) {
+                val base = y * w + x0
+                for (b in 0 until nb) f[base + b] = cols[b * h + y]
+            }
+            x0 += bw
         }
         // 就地開平方，省一次 2.6 MPx 的配置（這個函式是合成階段的記憶體峰值所在：留白帶的格線距離、核心填色的直線距離）；
         // 用 Float 版 sqrt 不繞 Double
@@ -2398,11 +2418,14 @@ object Cv {
             if (rowId[slot] == r) return dst
             val base = r * w
             for (i in line.indices) line[i] = src[base + xi[i]]
-            for (x in 0 until w) {
-                val m = x + c
-                var acc = k[c] * line[m]
-                for (j in 1..c) acc += k[c + j] * (line[m - j] + line[m + j])
-                dst[x] = acc
+            // 核在外、x 在內（整數加總與順序無關；內圈是同一個常數乘加，C2／ART 可以向量化）
+            val kc = k[c]
+            for (x in 0 until w) dst[x] = kc * line[x + c]
+            for (j in 1..c) {
+                val kj = k[c + j]
+                val lo = c - j
+                val hi = c + j
+                for (x in 0 until w) dst[x] += kj * (line[x + lo] + line[x + hi])
             }
             rowId[slot] = r
             return dst
@@ -2429,7 +2452,8 @@ object Cv {
 
     /**
      * `cv2.medianBlur(u8, ksize)`（ksize 奇數、uint8；BORDER_REPLICATE）：窗內 ksize² 個值排序後第 ksize²/2 個（0 起算）。
-     * 逐列滑動直方圖（16×16 兩層計數）。
+     * 逐列滑動直方圖；中位數**跟著窗走**（2026-10-06）：記著目前的中位數 m 與窗內 < m 的個數，窗移一格只調這個計數、再把 m
+     * 往上或往下挪到「< m 的不到 need、≤ m 的夠 need」為止——同一個順序統計量，逐值相同，不必每格從 0 掃直方圖。
      */
     fun medianBlur8(g: Gray, ksize: Int): Gray {
         val w = g.w
@@ -2439,31 +2463,34 @@ object Cv {
         val src = g.data
         val out = IntArray(w * h)
         val fine = IntArray(256)
-        val coarse = IntArray(16)
         val cols = IntArray(ksize)
         for (y in 0 until h) {
             java.util.Arrays.fill(fine, 0)
-            java.util.Arrays.fill(coarse, 0)
             for (dy in -r..r) cols[dy + r] = (y + dy).coerceIn(0, h - 1) * w
             // x = 0 的窗：列 −r..r（複製邊）
             for (dx in -r..r) {
                 val xx = dx.coerceIn(0, w - 1)
-                for (cb in cols) { val v = src[cb + xx]; fine[v]++; coarse[v ushr 4]++ }
+                for (cb in cols) fine[src[cb + xx]]++
             }
+            var m = 0
+            var lt = 0                              // 窗內 < m 的個數
+            while (lt + fine[m] < need) { lt += fine[m]; m++ }
+            val ob = y * w
             for (x in 0 until w) {
-                var cnt = 0
-                var cbin = 0
-                while (cnt + coarse[cbin] < need) { cnt += coarse[cbin]; cbin++ }
-                var v = cbin shl 4
-                while (cnt + fine[v] < need) { cnt += fine[v]; v++ }
-                out[y * w + x] = v
+                out[ob + x] = m
                 if (x + 1 < w) {
-                    val xo = (x - r).coerceIn(0, w - 1)
-                    val xn = (x + 1 + r).coerceIn(0, w - 1)
+                    val xo = if (x - r < 0) 0 else x - r
+                    val xn = if (x + 1 + r > w - 1) w - 1 else x + 1 + r
                     for (cb in cols) {
-                        val a = src[cb + xo]; fine[a]--; coarse[a ushr 4]--
-                        val b = src[cb + xn]; fine[b]++; coarse[b ushr 4]++
+                        val a = src[cb + xo]
+                        fine[a]--
+                        if (a < m) lt--
+                        val b = src[cb + xn]
+                        fine[b]++
+                        if (b < m) lt++
                     }
+                    while (lt >= need) { m--; lt -= fine[m] }
+                    while (lt + fine[m] < need) { lt += fine[m]; m++ }
                 }
             }
         }
@@ -2615,61 +2642,69 @@ object Cv {
 
     /**
      * 灰階形態學（不限 8 位元，外側不影響極值）＝[morphGray]（[dilateGrayI]／[erodeGrayI]）逐位元相同的另一種算法：核每列是一段
-     * run，每條來源列對每種 run（起點偏移、寬度）先算一次夾邊的滑動極值（van Herk，兩端補單位元），環形快取核高那麼多列；輸出列
-     * 逐像素取核高個值的極值。[morphGray] 是把每條來源列散佈到核高條輸出列（讀改寫 11 次），這裡每個輸出像素只寫一次。
+     * run；每條來源列（兩端補單位元）對每種 run **寬度**算「從 p 起算、寬度 W 的視窗極值」（窗起點陣列與 run 的偏移無關，偏移在
+     * 取值時才加），環形快取核高那麼多列；輸出列逐像素取核高個值的極值。[morphGray] 是把每條來源列散佈到核高條輸出列（讀改寫
+     * 11 次），這裡每個輸出像素只寫一次。
+     *
+     * 寬度由小到大用倍增求（2026-10-06；原本每種寬度各做一次 van Herk）：已有寬度 c 的窗極值 f_c，寬度 c + s（s ≤ c）的就是
+     * max(f_c[p], f_c[p + s])——兩個窗的聯集剛好是大窗。橢圓 11 的四種寬度（1、7、9、11）一列只要五趟「兩兩取極值」。
      */
     fun morphGrayGather(g: Gray, k: Kernel, wantMax: Boolean): Gray {
         val w = g.w
         val h = g.h
         val id = if (wantMax) Int.MIN_VALUE else Int.MAX_VALUE
-        // 不同的 run（offL＝runStart − ax、win）
-        val runOf = IntArray(k.h) { -1 }
-        val offs = ArrayList<Int>()
-        val wins = ArrayList<Int>()
-        for (ky in 0 until k.h) {
+        // 不同的 run 寬度（由小到大）與每個核列的寬度索引、偏移
+        val kh = k.h
+        val winOf = IntArray(kh)
+        val offOf = IntArray(kh)
+        val widths = ArrayList<Int>()
+        var pad = 0
+        for (ky in 0 until kh) {
             val win = k.runEnd[ky] - k.runStart[ky]
+            winOf[ky] = win
             if (win <= 0) continue
             val off = k.runStart[ky] - k.ax
-            var r = -1
-            for (q in offs.indices) if (offs[q] == off && wins[q] == win) { r = q; break }
-            if (r < 0) { offs.add(off); wins.add(win); r = offs.size - 1 }
-            runOf[ky] = r
+            offOf[ky] = off
+            if (win !in widths) widths.add(win)
+            pad = max(pad, max(abs(off), abs(off + win - 1)))
         }
-        val nr = offs.size
-        var pad = 0
-        for (q in 0 until nr) pad = max(pad, max(abs(offs[q]), abs(offs[q] + wins[q] - 1)))
+        widths.sort()
+        val nwid = widths.size
+        val wv = IntArray(nwid) { widths[it] }
+        val widIdx = IntArray(kh) { if (winOf[it] > 0) wv.indexOf(winOf[it]) else -1 }
         val pl = w + 2 * pad
-        val padded = IntArray(pl)
-        val pre = IntArray(pl)
-        val suf = IntArray(pl)
-        val kh = k.h
-        val cache = Array(kh) { Array(nr) { IntArray(w) } }
+        // 環形快取：每槽每種寬度一條「窗起點極值」陣列（長 pl；起點 p 的窗要整個在 [0, pl) 才有定義，取值只用得到那些）
+        val cache = Array(kh) { Array(nwid) { IntArray(pl) } }
         val cacheRow = IntArray(kh) { -1 }
+        val tmp = IntArray(pl)
         fun rowExt(sy: Int): Array<IntArray> {
             val slot = sy % kh
             val dst = cache[slot]
             if (cacheRow[slot] == sy) return dst
-            java.util.Arrays.fill(padded, id)
-            System.arraycopy(g.data, sy * w, padded, pad, w)
-            for (q in 0 until nr) {
-                val win = wins[q]
-                var i = 0
-                while (i < pl) {
-                    val end = min(i + win, pl)
-                    var acc = padded[i]
-                    pre[i] = acc
-                    for (j in i + 1 until end) { val v = padded[j]; if (if (wantMax) v > acc else v < acc) acc = v; pre[j] = acc }
-                    acc = padded[end - 1]
-                    suf[end - 1] = acc
-                    for (j in end - 2 downTo i) { val v = padded[j]; if (if (wantMax) v > acc else v < acc) acc = v; suf[j] = acc }
-                    i = end
+            // 寬度 1＝補了單位元的來源列本身
+            val base = tmp
+            java.util.Arrays.fill(base, id)
+            System.arraycopy(g.data, sy * w, base, pad, w)
+            var cur = base
+            var c = 1
+            for (q in 0 until nwid) {
+                val target = wv[q]
+                val out = dst[q]
+                if (c == target && cur === base) {
+                    System.arraycopy(base, 0, out, 0, pl)
+                    cur = out
+                    continue
                 }
-                val o = dst[q]
-                val base = pad + offs[q]
-                for (x in 0 until w) {
-                    val a = suf[x + base]
-                    val b = pre[x + base + win - 1]
-                    o[x] = if (wantMax) (if (a > b) a else b) else (if (a < b) a else b)
+                while (c < target) {
+                    val st = min(target - c, c)
+                    val lim = pl - st
+                    if (wantMax) {
+                        for (p in 0 until lim) { val a = cur[p]; val b = cur[p + st]; out[p] = if (a > b) a else b }
+                    } else {
+                        for (p in 0 until lim) { val a = cur[p]; val b = cur[p + st]; out[p] = if (a < b) a else b }
+                    }
+                    cur = out
+                    c += st
                 }
             }
             cacheRow[slot] = sy
@@ -2680,13 +2715,14 @@ object Cv {
         for (y in 0 until h) {
             java.util.Arrays.fill(cur, id)
             for (ky in 0 until kh) {
-                val r = runOf[ky]
+                val r = widIdx[ky]
                 if (r < 0) continue
                 val sy = y + (ky - k.ay)
                 if (sy < 0 || sy >= h) continue
                 val src = rowExt(sy)[r]
-                if (wantMax) { for (x in 0 until w) if (src[x] > cur[x]) cur[x] = src[x] }
-                else { for (x in 0 until w) if (src[x] < cur[x]) cur[x] = src[x] }
+                val o = pad + offOf[ky]
+                if (wantMax) { for (x in 0 until w) { val v = src[x + o]; if (v > cur[x]) cur[x] = v } }
+                else { for (x in 0 until w) { val v = src[x + o]; if (v < cur[x]) cur[x] = v } }
             }
             System.arraycopy(cur, 0, out, y * w, w)
         }
