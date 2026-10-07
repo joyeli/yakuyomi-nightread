@@ -1808,11 +1808,23 @@ object NightRead {
     private fun framedBand(a: Analysis, gutterIn: Mask, p: NightReadParams): Mask {
         val w = a.g.w
         val h = a.g.h
-        val bd = borderDistance(a.g, a.frame, includeFrame = true)
         val lim = p.safeGutterDepth * min(h, w)
         val cut = Regions.gutterFrameCut(gutterIn, a.lh, a.lv, p)
+        // 頁邊距離＝min(到頁緣, 到格框線)（[borderDistance]）；min ≤ lim ⇔ 兩者之一 ≤ lim：只在切割後的像素上比，不配整頁的距離表
+        // （2026-10-07 加速；同一組浮點比較，逐位元相同）
+        val fd = if (a.frame.any()) Cv.distanceL2(a.frame.not()).data else null
         val band = Mask(w, h)
-        for (i in band.data.indices) band.data[i] = cut.data[i] && bd[i] <= lim
+        for (y in 0 until h) {
+            val base = y * w
+            val dy = if (y < h - 1 - y) y else h - 1 - y
+            for (x in 0 until w) {
+                val i = base + x
+                if (!cut.data[i]) continue
+                val dx = if (x < w - 1 - x) x else w - 1 - x
+                val be = (if (dx < dy) dx else dy).toFloat()
+                band.data[i] = be <= lim || (fd != null && fd[i] <= lim)
+            }
+        }
         return band
     }
 
