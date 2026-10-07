@@ -197,7 +197,9 @@ without re-deriving them:
 - Intra-page parallelism (2026-10-06): `render(input, p, debug, parallel)` and
   `renderTiers(input, tiers, debug, parallel, sink)` take an `Executor`. The independent analysis branches
   (character-mask smoothing, scene curve, grey-ring evidence, sticker plan) and the「更多」background-object
-  measurement run on it, and the calling thread waits only when it needs a result. A branch the pool has not
+  measurement run on it, and the calling thread waits only when it needs a result. (Since 2026-10-07 the parts of
+  that measurement that only some pages need — object evidence, long-line band, faint-line halo around characters,
+  tone edges — are computed later, during compose, on the calling thread, and only where they are used.) A branch the pool has not
   started yet is run by the calling thread itself, so a small, busy or rejecting pool never stalls. The output is
   bit-for-bit identical to the sequential run; `null` (the old overloads) is sequential. Interrupts are ignored
   the same way as in the sequential run: a calling thread interrupted while it waits for a branch keeps waiting
