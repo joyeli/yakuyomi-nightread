@@ -197,7 +197,7 @@ internal object BgObjects {
     private fun dil(m: Mask, r: Int): Mask = if (r <= 0) m.copy() else Cv.dilatePacked(m, Cv.ellipse(2 * r + 1))
 
     /** 像素索引 → 是／否（[pfShape] 的淡記號候選）。用 fun interface 不用 `(Int) -> Boolean`：後者每次呼叫都把 Int 裝箱。 */
-    private fun interface PixelTest {
+    internal fun interface PixelTest {
         fun test(i: Int): Boolean
     }
 
@@ -517,7 +517,7 @@ internal object BgObjects {
      * [diag]（parity 除錯，context 的 diag["obj"]＝true 才傳）：`obj_gf`（長到的淡線）、`obj_gc`（閉合後）、`obj_pf_lines`（逐塊外擴之後）、
      * `obj_pf_holes`（加洞之後）、`obj_X`（交代過）。
      */
-    private fun pfShape(
+    internal fun pfShape(
         gf: Mask, xB: LongArray, mark: PixelTest?, p: ObjectRuleParams, diag: MutableMap<String, Any>? = null,
     ): LongArray {
         val w = gf.w
@@ -607,70 +607,76 @@ internal object BgObjects {
                 for (yy in 0 until wh) for (xx in 0 until ww) if (gc.data[yy * ww + xx]) gcf.data[(yy + wy0) * w + xx + wx0] = true
                 diag["obj_gc"] = gcf
             }
-            // Gc⊕3×3：窗外擴 1（Gc 在窗外是 0）
-            val pw = ww + 2
-            val gcd = Mask(pw, wh + 2)
+            // 補集（free＝¬交代過 ∧ ¬Gc）的 8 連通塊：碰到 Gc⊕3×3 的塊才看；面積 ×1920² ≤ holeLim 或不碰「交代過⊕3×3」的，落在版本 3
+            // 外圈的像素也不塗。游程標號（2026-10-07；原本從碰到 Gc⊕3×3 的像素逐塊整頁 BFS，集合相同）。三張列打包位元（頁座標）：
+            // free、交代過⊕3×3、Gc⊕3×3。
+            val nw = (w + 63) ushr 6
+            val tail = if (w and 63 == 0) -1L else (1L shl (w and 63)) - 1
+            val freeB = LongArray(nw * h)
+            val xd = LongArray(nw * h)
+            val gcdB = LongArray(nw * h)
+            val rowX = LongArray(nw)
+            for (y in 0 until h) {
+                // 交代過這一列（[Ring.packBits] 的頁面位元 → 列打包）
+                val g0 = y.toLong() * w
+                for (i in 0 until nw) {
+                    val gb = g0 + (i.toLong() shl 6)
+                    val wi = (gb ushr 6).toInt()
+                    val sh = (gb and 63).toInt()
+                    var v = xB[wi] ushr sh
+                    if (sh != 0 && wi + 1 < xB.size) v = v or (xB[wi + 1] shl (64 - sh))
+                    rowX[i] = if (i == nw - 1) v and tail else v
+                }
+                val o = y * nw
+                for (i in 0 until nw) freeB[o + i] = rowX[i].inv() and (if (i == nw - 1) tail else -1L)
+                // 交代過⊕3×3：左右移一位 OR，再 OR 進上下三列（頁外當 0）
+                for (i in 0 until nw) {
+                    val v = rowX[i]
+                    var d = v or (v shl 1) or (v ushr 1)
+                    if (i > 0) d = d or (rowX[i - 1] ushr 63)
+                    if (i + 1 < nw) d = d or (rowX[i + 1] shl 63)
+                    if (i == nw - 1) d = d and tail
+                    if (d == 0L) continue
+                    for (ny in max(0, y - 1)..min(h - 1, y + 1)) xd[ny * nw + i] = xd[ny * nw + i] or d
+                }
+            }
+            // Gc 從 free 扣掉；Gc⊕3×3（Gc 在窗外是 0）
             for (yy in 0 until wh) for (xx in 0 until ww) {
                 if (!gc.data[yy * ww + xx]) continue
-                for (dy in 0..2) for (dx in 0..2) gcd.data[(yy + dy) * pw + xx + dx] = true
-            }
-            fun gcAt(x: Int, y: Int): Boolean = x in wx0 until wx1 && y in wy0 until wy1 && gc.data[(y - wy0) * ww + x - wx0]
-            fun free(i: Int): Boolean = !has(xB, i) && !gcAt(i % w, i / w)
-            fun nearX(x: Int, y: Int): Boolean {
-                for (yy in max(0, y - 1)..min(h - 1, y + 1)) for (xx in max(0, x - 1)..min(w - 1, x + 1)) if (has(xB, yy * w + xx)) return true
-                return false
+                val y = yy + wy0
+                val x = xx + wx0
+                freeB[y * nw + (x ushr 6)] = freeB[y * nw + (x ushr 6)] and (1L shl (x and 63)).inv()
+                for (ny in max(0, y - 1)..min(h - 1, y + 1)) for (nx in max(0, x - 1)..min(w - 1, x + 1)) {
+                    gcdB[ny * nw + (nx ushr 6)] = gcdB[ny * nw + (nx ushr 6)] or (1L shl (nx and 63))
+                }
             }
             val hc = min(3840, max(960, h)).toLong()
             val holeLim = p.pfHole.toLong() * hc * hc
-            val seenF = LongArray((n + 63) ushr 6)
-            var keepPx = IntArray(256)
-            for (py in 0 until wh + 2) for (px in 0 until pw) {
-                if (!gcd.data[py * pw + px]) continue
-                val sx = px + wx0 - 1
-                val sy = py + wy0 - 1
-                if (sx < 0 || sy < 0 || sx >= w || sy >= h) continue
-                val s0 = sy * w + sx
-                if (Ring.has(seenF, s0) || !free(s0)) continue
-                // 補集的一塊（8 連通，整頁走）：面積、碰不碰交代過⊕3×3、落在版本 3 外圈的像素
-                var qe = 0
-                q[qe++] = s0
-                Ring.set(seenF, s0)
-                var qs = 0
-                var area = 0L
-                var touchX = false
-                var nk = 0
-                // 佇列當環形用：只留還沒處理的（大塊可以接近整頁）
-                var cap = q.size
-                while (qs != qe) {
-                    val i = q[qs]
-                    qs = if (qs + 1 == cap) 0 else qs + 1
-                    area++
-                    val x = i % w
-                    val y = i / w
-                    if (!touchX && nearX(x, y)) touchX = true
-                    if (old.data[i]) {
-                        if (nk == keepPx.size) keepPx = keepPx.copyOf(nk * 2)
-                        keepPx[nk++] = i
-                    }
-                    for (yy in max(0, y - 1)..min(h - 1, y + 1)) for (xx in max(0, x - 1)..min(w - 1, x + 1)) {
-                        val j = yy * w + xx
-                        if (Ring.has(seenF, j) || !free(j)) continue
-                        Ring.set(seenF, j)
-                        val next = if (qe + 1 == cap) 0 else qe + 1
-                        if (next == qs) {
-                            // 環滿：攤平成 [qs..) 再加倍
-                            val nq = IntArray(cap * 2)
-                            var m = 0
-                            var t = qs
-                            while (t != qe) { nq[m++] = q[t]; t = if (t + 1 == cap) 0 else t + 1 }
-                            q = nq; cap = nq.size; qs = 0; qe = m
-                        }
-                        q[qe] = j
-                        qe = if (qe + 1 == cap) 0 else qe + 1
-                    }
+            val r = Cv.ccRunsBits(freeB, w, h, 8)
+            val area = LongArray(r.n)
+            val seeded = BooleanArray(r.n)
+            val touchX = BooleanArray(r.n)
+            for (y in 0 until h) {
+                val o = y * nw
+                for (k in r.rowFirst[y] until r.rowFirst[y + 1]) {
+                    val l = r.lab[k]
+                    val s0 = r.rs[k]
+                    val e0 = r.re[k] + 1
+                    area[l] += (e0 - s0).toLong()
+                    if (!seeded[l] && Cv.anyBits(gcdB, o, s0, e0)) seeded[l] = true
+                    if (!touchX[l] && Cv.anyBits(xd, o, s0, e0)) touchX[l] = true
                 }
-                val small = area * (1920L * 1920L) <= holeLim
-                if (small || !touchX) for (k in 0 until nk) out.data[keepPx[k]] = true
+            }
+            val sel = BooleanArray(r.n) { it > 0 && seeded[it] && (area[it] * (1920L * 1920L) <= holeLim || !touchX[it]) }
+            // 版本 3 外圈（old）只在 gf 外接框外擴 pfHalo 裡
+            val oy0 = max(0, gy0 - p.pfHalo); val oy1 = min(h - 1, gy1 + p.pfHalo)
+            val ox0 = max(0, gx0 - p.pfHalo); val ox1 = min(w - 1, gx1 + p.pfHalo)
+            for (y in oy0..oy1) {
+                val b = y * w
+                for (k in r.rowFirst[y] until r.rowFirst[y + 1]) {
+                    if (!sel[r.lab[k]]) continue
+                    for (x in max(ox0, r.rs[k])..min(ox1, r.re[k])) if (old.data[b + x]) out.data[b + x] = true
+                }
             }
         }
         if (diag != null) diag["obj_pf_holes"] = out.copy()

@@ -896,6 +896,81 @@ object Cv {
         return CcRuns(n, rs, re, rowFirst, lab, fg, bgLeft, bgTop, bgRight, bgBottom)
     }
 
+    /**
+     * [ccRuns] 的列打包輸入版（[packBits] 格式；2026-10-07）：游程直接從位元取（[bitRuns]），不配整頁的布林遮罩。標號、游程與 [ccRuns]
+     * 相同（同一套 union-find、同一個掃描序）；背景外接框不算（欄位填 0）。
+     */
+    internal fun ccRunsBits(bits: LongArray, w: Int, h: Int, connectivity: Int = 8): CcRuns {
+        val nw = (w + 63) ushr 6
+        val adj = if (connectivity == 8) 1 else 0
+        var rs = IntArray(max(64, h * 2))
+        var re = IntArray(rs.size)
+        var parent = IntArray(rs.size)
+        val rowFirst = IntArray(h + 1)
+        val cap0 = (64 * nw + 1) / 2 + 1
+        val ts = IntArray(cap0)
+        val te = IntArray(cap0)
+        var nr = 0
+        var fg = 0L
+        for (y in 0 until h) {
+            rowFirst[y] = nr
+            val p0 = if (y > 0) rowFirst[y - 1] else 0
+            val p1 = nr
+            var pj = p0
+            val cnt = bitRuns(bits, y * nw, nw, ts, te)
+            for (q in 0 until cnt) {
+                val s = ts[q]
+                val e = te[q] - 1
+                if (nr == rs.size) {
+                    val cap = rs.size * 2
+                    rs = rs.copyOf(cap)
+                    re = re.copyOf(cap)
+                    parent = parent.copyOf(cap)
+                }
+                rs[nr] = s
+                re[nr] = e
+                parent[nr] = nr
+                while (pj < p1 && re[pj] < s - adj) pj++
+                var k = pj
+                while (k < p1 && rs[k] <= e + adj) {
+                    var ra = nr
+                    while (parent[ra] != ra) { parent[ra] = parent[parent[ra]]; ra = parent[ra] }
+                    var rb = k
+                    while (parent[rb] != rb) { parent[rb] = parent[parent[rb]]; rb = parent[rb] }
+                    if (ra != rb) { if (ra < rb) parent[rb] = ra else parent[ra] = rb }
+                    k++
+                }
+                fg += e - s + 1
+                nr++
+            }
+        }
+        rowFirst[h] = nr
+        val remap = IntArray(nr)
+        val lab = IntArray(nr)
+        var n = 1
+        for (r in 0 until nr) {
+            var root = r
+            while (parent[root] != root) root = parent[root]
+            if (remap[root] == 0) { remap[root] = n; n++ }
+            parent[r] = root
+            lab[r] = remap[root]
+        }
+        return CcRuns(n, rs, re, rowFirst, lab, fg, 0, 0, 0, 0)
+    }
+
+    /** 列打包位元第 [off] 字起那一列，在 [s, e) 裡有沒有任何一位是 1。 */
+    internal fun anyBits(bits: LongArray, off: Int, s: Int, e: Int): Boolean {
+        if (s >= e) return false
+        val a = s ushr 6
+        val b = (e - 1) ushr 6
+        val lo = -1L shl (s and 63)
+        val hi = -1L ushr (63 - ((e - 1) and 63))
+        if (a == b) return bits[off + a] and lo and hi != 0L
+        if (bits[off + a] and lo != 0L) return true
+        for (i in a + 1 until b) if (bits[off + i] != 0L) return true
+        return bits[off + b] and hi != 0L
+    }
+
     // ── 距離變換 ─────────────────────────────────────────────────────
 
     /**
