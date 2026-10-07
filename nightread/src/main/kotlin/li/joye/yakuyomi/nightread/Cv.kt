@@ -2895,20 +2895,50 @@ object Cv {
             cacheRow[slot] = sy
             return dst
         }
+        // 上下對稱的兩條核列（同寬、同偏移；橢圓、方核都是）合成一趟：兩列先取極值再併進輸出（極值與順序無關，逐值相同；
+        // 2026-10-07：不內聯的 debug 版每像素少一次迴圈，C2 不變）
+        val partner = IntArray(kh) { -1 }
+        val skip = BooleanArray(kh)
+        for (ky in 0 until kh) {
+            val k2 = kh - 1 - ky
+            if (k2 <= ky || widIdx[ky] < 0 || widIdx[k2] != widIdx[ky] || offOf[k2] != offOf[ky]) continue
+            partner[ky] = k2
+            skip[k2] = true
+        }
         val out = IntArray(w * h)
         val cur = IntArray(w)
         for (y in 0 until h) {
-            java.util.Arrays.fill(cur, id)
+            var first = true
             for (ky in 0 until kh) {
+                if (skip[ky]) continue
                 val r = widIdx[ky]
                 if (r < 0) continue
-                val sy = y + (ky - k.ay)
-                if (sy < 0 || sy >= h) continue
-                val src = rowExt(sy)[r]
                 val o = pad + offOf[ky]
-                if (wantMax) { for (x in 0 until w) { val v = src[x + o]; if (v > cur[x]) cur[x] = v } }
-                else { for (x in 0 until w) { val v = src[x + o]; if (v < cur[x]) cur[x] = v } }
+                val sy = y + (ky - k.ay)
+                val in1 = sy in 0 until h
+                val k2 = partner[ky]
+                val sy2 = if (k2 >= 0) y + (k2 - k.ay) else -1
+                val in2 = k2 >= 0 && sy2 in 0 until h
+                if (in1 && in2) {
+                    val a = rowExt(sy)[r]
+                    val b = rowExt(sy2)[r]
+                    if (wantMax) {
+                        if (first) { for (x in 0 until w) { val u = a[x + o]; val v = b[x + o]; cur[x] = if (u > v) u else v } }
+                        else { for (x in 0 until w) { val u = a[x + o]; val v = b[x + o]; val m = if (u > v) u else v; if (m > cur[x]) cur[x] = m } }
+                    } else {
+                        if (first) { for (x in 0 until w) { val u = a[x + o]; val v = b[x + o]; cur[x] = if (u < v) u else v } }
+                        else { for (x in 0 until w) { val u = a[x + o]; val v = b[x + o]; val m = if (u < v) u else v; if (m < cur[x]) cur[x] = m } }
+                    }
+                    first = false
+                } else if (in1 || in2) {
+                    val src = rowExt(if (in1) sy else sy2)[r]
+                    if (first) System.arraycopy(src, o, cur, 0, w)
+                    else if (wantMax) { for (x in 0 until w) { val v = src[x + o]; if (v > cur[x]) cur[x] = v } }
+                    else { for (x in 0 until w) { val v = src[x + o]; if (v < cur[x]) cur[x] = v } }
+                    first = false
+                }
             }
+            if (first) java.util.Arrays.fill(cur, id)
             System.arraycopy(cur, 0, out, y * w, w)
         }
         return Gray(w, h, out)
