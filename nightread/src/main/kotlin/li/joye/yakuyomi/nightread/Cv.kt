@@ -2450,6 +2450,191 @@ object Cv {
         return Gray(w, h, out)
     }
 
+    /** [gaussQ16Sparse] 的來源列：把頁面第 [r] 列在游程 [rs]／[re]（[s, e)，依序、不重疊，共 [n] 段）上的值寫進頁寬的 [dst]。 */
+    internal fun interface RowSrc {
+        fun fill(r: Int, rs: IntArray, re: IntArray, n: Int, dst: IntArray)
+    }
+
+    /** [gaussQ16Sparse] 的輸出列：頁面第 [y] 列的值在頁寬的 [v]，只在游程 [rs]／[re]（共 [n] 段）上有定義；回呼返回後緩衝會被重用。 */
+    internal fun interface RowSink {
+        fun row(y: Int, v: IntArray, rs: IntArray, re: IntArray, n: Int)
+    }
+
+    /** 灰階頁面當 [RowSrc]（逐段複製）。 */
+    internal fun grayRows(g: Gray): RowSrc = RowSrc { r, rs, re, n, dst ->
+        val base = r * g.w
+        for (k in 0 until n) System.arraycopy(g.data, base + rs[k], dst, rs[k], re[k] - rs[k])
+    }
+
+    /**
+     * 列打包位元（[packBits] 格式）的一列（從 [off] 起 [nw] 字）→ 游程 [s, e)，依序寫進 [rs]／[re]，回傳段數（跨字的段接起來）。
+     * [rs]／[re] 至少要 (64·nw + 1) / 2 格。
+     */
+    internal fun bitRuns(bits: LongArray, off: Int, nw: Int, rs: IntArray, re: IntArray): Int {
+        var cnt = 0
+        for (i in 0 until nw) {
+            var v = bits[off + i]
+            val base = i shl 6
+            while (v != 0L) {
+                val t = java.lang.Long.numberOfTrailingZeros(v)
+                val sh = v ushr t
+                val len = if (sh == -1L) 64 - t else java.lang.Long.numberOfTrailingZeros(sh.inv())
+                val st = base + t
+                val en = st + len
+                if (cnt > 0 && re[cnt - 1] == st) re[cnt - 1] = en else { rs[cnt] = st; re[cnt] = en; cnt++ }
+                val u = t + len
+                v = if (u >= 64) 0L else v and (-1L shl u)
+            }
+        }
+        return cnt
+    }
+
+    /**
+     * [gaussQ16] 只算 [need] 標的輸出像素（2026-10-07 加速）：同一套整數運算（先橫後直、REFLECT_101、橫向 Int、直向 Long、Q16 四捨
+     * 五入），只是用不到的位置不算，有算的值與整頁版逐位元相同。[need]＝頁面第 [ny0] 列起 [nrows] 列的列打包位元（每列 (w+63)/64 字，
+     * 頁寬）；[k]＝[gaussW] 的核。來源列由 [src] 只填要的欄；每個有 need 的輸出列（y 遞增）交給 [sink]。
+     *
+     * 要的範圍：橫向那一趟只在「need 直向外擴核半徑 c」的列、那一列 need 的欄算；來源只要再橫向外擴 c 的欄。反射到頁內的列／欄
+     * （頁緣 REFLECT_101）離原位不超過 c，一定落在外擴的範圍裡，所以夾在頁內的外擴就夠。橫向結果留 2c+1 列的環形緩衝（同 [gaussQ16]）。
+     */
+    internal fun gaussQ16Sparse(w: Int, h: Int, k: IntArray, need: LongArray, ny0: Int, nrows: Int, src: RowSrc, sink: RowSink) {
+        if (nrows <= 0 || w <= 0) return
+        val c = k.size / 2
+        val nw = (w + 63) ushr 6
+        // 橫向要算的位置＝need 直向外擴 c（夾在頁內）
+        val hy0 = max(0, ny0 - c)
+        val hy1 = min(h, ny0 + nrows + c)
+        val hn = LongArray(nw * (hy1 - hy0))
+        var any = false
+        for (yi in 0 until nrows) {
+            val o = yi * nw
+            var nz = false
+            for (i in 0 until nw) if (need[o + i] != 0L) { nz = true; break }
+            if (!nz) continue
+            any = true
+            val y = ny0 + yi
+            for (r in max(hy0, y - c)..min(hy1 - 1, y + c)) {
+                val ro = (r - hy0) * nw
+                for (i in 0 until nw) hn[ro + i] = hn[ro + i] or need[o + i]
+            }
+        }
+        if (!any) return
+        val cap = (64 * nw + 1) / 2 + 1
+        val rs = IntArray(cap)
+        val re = IntArray(cap)
+        val hs = IntArray(cap)
+        val he = IntArray(cap)
+        val ss = IntArray(cap)
+        val se = IntArray(cap)
+        val nr = 2 * c + 1
+        val rows = arrayOfNulls<IntArray>(nr)
+        val rowId = IntArray(nr) { -1 }
+        val srcRow = IntArray(w)
+        val line = IntArray(w + 2 * c)
+        val kc = k[c]
+        fun hrow(r: Int): IntArray {
+            val slot = r % nr
+            val dst = rows[slot] ?: IntArray(w).also { rows[slot] = it }
+            if (rowId[slot] == r) return dst
+            val n = bitRuns(hn, (r - hy0) * nw, nw, hs, he)
+            // 來源要的欄：每段外擴 c（夾在頁內），接起來
+            var m = 0
+            for (q in 0 until n) {
+                val a = max(0, hs[q] - c)
+                val b = min(w, he[q] + c)
+                if (m > 0 && a <= se[m - 1]) { if (b > se[m - 1]) se[m - 1] = b } else { ss[m] = a; se[m] = b; m++ }
+            }
+            src.fill(r, ss, se, m, srcRow)
+            for (q in 0 until n) {
+                val s0 = hs[q]
+                val len = he[q] - s0
+                // line[i]＝來源第 reflect101(s0 − c + i) 欄（同 [gaussQ16] 的 line，只取這一段要的）
+                val ll = len + 2 * c
+                val a = s0 - c
+                var i = 0
+                while (i < ll && a + i < 0) { line[i] = srcRow[reflect101(a + i, w)]; i++ }
+                val mid = min(ll, w - a)
+                if (mid > i) { System.arraycopy(srcRow, a + i, line, i, mid - i); i = mid }
+                while (i < ll) { line[i] = srcRow[reflect101(a + i, w)]; i++ }
+                // 核在外、x 在內（同 [gaussQ16]）
+                for (x in 0 until len) dst[s0 + x] = kc * line[x + c]
+                for (j in 1..c) {
+                    val kj = k[c + j]
+                    val lo = c - j
+                    val hi = c + j
+                    for (x in 0 until len) dst[s0 + x] += kj * (line[x + lo] + line[x + hi])
+                }
+            }
+            rowId[slot] = r
+            return dst
+        }
+        val acc = LongArray(w)
+        val out = IntArray(w)
+        for (yi in 0 until nrows) {
+            val y = ny0 + yi
+            val n = bitRuns(need, yi * nw, nw, rs, re)
+            if (n == 0) continue
+            val hc = hrow(y)
+            val kcl = kc.toLong()
+            for (q in 0 until n) for (x in rs[q] until re[q]) acc[x] = kcl * hc[x]
+            for (j in 1..c) {
+                val kj = k[c + j].toLong()
+                if (kj == 0L) continue
+                val ha = hrow(reflect101(y - j, h))
+                val hb = hrow(reflect101(y + j, h))
+                for (q in 0 until n) for (x in rs[q] until re[q]) acc[x] += kj * (ha[x] + hb[x])
+            }
+            for (q in 0 until n) for (x in rs[q] until re[q]) out[x] = ((acc[x] + 32768L) shr 16).toInt()
+            sink.row(y, out, rs, re, n)
+        }
+    }
+
+    /**
+     * [medianBlur8] 當 [gaussQ16Sparse] 的來源：只算要的欄（每段從段首的窗起算、再沿段滑動；同一個順序統計量，逐值相同）。
+     */
+    internal class MedianRows(private val g: Gray, private val ksize: Int) : RowSrc {
+        private val fine = IntArray(256)
+        private val cols = IntArray(ksize)
+
+        override fun fill(r: Int, rs: IntArray, re: IntArray, n: Int, dst: IntArray) {
+            val w = g.w
+            val h = g.h
+            val rr = ksize / 2
+            val need = ksize * ksize / 2 + 1
+            val src = g.data
+            for (dy in -rr..rr) cols[dy + rr] = (r + dy).coerceIn(0, h - 1) * w
+            for (q in 0 until n) {
+                val s0 = rs[q]
+                val e0 = re[q]
+                java.util.Arrays.fill(fine, 0)
+                for (dx in -rr..rr) {
+                    val xx = (s0 + dx).coerceIn(0, w - 1)
+                    for (cb in cols) fine[src[cb + xx]]++
+                }
+                var m = 0
+                var lt = 0
+                while (lt + fine[m] < need) { lt += fine[m]; m++ }
+                for (x in s0 until e0) {
+                    dst[x] = m
+                    if (x + 1 < e0) {
+                        val xo = if (x - rr < 0) 0 else x - rr
+                        val xn = if (x + 1 + rr > w - 1) w - 1 else x + 1 + rr
+                        for (cb in cols) {
+                            val a = src[cb + xo]
+                            fine[a]--
+                            if (a < m) lt--
+                            val b = src[cb + xn]
+                            fine[b]++
+                            if (b < m) lt++
+                        }
+                        while (lt >= need) { m--; lt -= fine[m] }
+                        while (lt + fine[m] < need) { lt += fine[m]; m++ }
+                    }
+                }
+            }
+        }
+    }
+
     /**
      * `cv2.medianBlur(u8, ksize)`（ksize 奇數、uint8；BORDER_REPLICATE）：窗內 ksize² 個值排序後第 ksize²/2 個（0 起算）。
      * 逐列滑動直方圖；中位數**跟著窗走**（2026-10-06）：記著目前的中位數 m 與窗內 < m 的個數，窗移一格只調這個計數、再把 m
