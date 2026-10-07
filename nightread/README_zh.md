@@ -16,7 +16,7 @@
 
 Android library，minSdk 26、compileSdk 37、Java 17，也設了 group 與 version，所以呼叫端用 Gradle composite build（`includeBuild`）就能接，Yakuyomi fork 就是這樣接的。
 
-只留一個模組是刻意的。`:nightread` 除了 `kotlin.math` 什麼都沒 import，連 `android.graphics` 都不碰：這樣管線才跑得起 JVM 單元測試（拿 Python fixture 對比就是這麼做的），也讓它可以被任何 JVM 專案直接拿走。人物遮罩在別處算：Yakuyomi 是在 [yakuyomi-engine](https://github.com/joyeli/yakuyomi-engine) 用 NCNN 跑那兩顆分割模型（`CsegSegmenter` 與 `YoloSegSegmenter`，見[人物遮罩模型](#人物遮罩模型)），這個 repo 只吃算好的遮罩。這裡原本有個 `:nightread-ort` 模組用 ONNX Runtime 跑同兩顆模型，搬到 NCNN 後就拿掉了。
+只留一個模組是刻意的。`:nightread` 除了 `kotlin.math` 什麼都沒 import，連 `android.graphics` 都不碰：這樣管線才跑得起 JVM 單元測試（拿 Python fixture 對比就是這麼做的），也讓它可以被任何 JVM 專案直接拿走。人物遮罩在別處算：Yakuyomi 是在 [yakuyomi-engine](https://github.com/joyeli/yakuyomi-engine) 的 `:nightread-android` 模組用 NCNN 跑那兩顆分割模型（`CsegSegmenter` 與 `YoloSegSegmenter`，見[人物遮罩模型](#人物遮罩模型)），這個 repo 只吃算好的遮罩。這裡原本有個 `:nightread-ort` 模組用 ONNX Runtime 跑同兩顆模型，搬到 NCNN 後就拿掉了。
 
 ## 快速開始
 
@@ -90,7 +90,7 @@ fun render(
 
 ### 文字偵測不在這個 repo 裡
 
-夜讀不含偵測器。`seg` 與 `regions` 得自己準備。我們自己用的是 manga-image-translator 的 DBNet，透過 yakuyomi-engine 取得，但管線本身不依賴它：任何能輸出「文字區域遮罩 + 文字區 bbox」的來源都行，只要符合下面的格式要求。
+夜讀不含偵測器。`seg` 與 `regions` 得自己準備。我們自己用的是 manga-image-translator 的 DBNet，透過 yakuyomi-engine 取得，但管線本身不依賴它：任何能輸出「文字區域遮罩 + 文字區 bbox」的來源都行，只要符合下面的格式要求。在 yakuyomi-engine 裡，DBNet 的 `Detector` 在 `:inference-core` 模組，`:nightread-android` 的 `NightReadRenderer` 拿它產生 `seg` 與 `regions`（人物遮罩來自分割器），見[在 Android 上使用夜讀](../README_zh.md#在-android-上使用夜讀)。這條路不需要翻譯引擎。
 
 ## 格式要求
 
@@ -115,7 +115,7 @@ gray = (R * 299 + G * 587 + B * 114 + 500) / 1000
 人物遮罩是必要輸入，但這個 repo 不算它。Yakuyomi 是在 yakuyomi-engine 算的，兩顆模型都跑 NCNN——與引擎的偵測、去字同一個後端：
 
 ```kotlin
-// yakuyomi-engine；兩個都實作 CharSegmenter { fun segment(page: Bitmap): BooleanArray }
+// yakuyomi-engine 的 :nightread-android；兩個都實作 CharSegmenter { fun segment(page: Bitmap): BooleanArray }
 val yolo = YoloSegSegmenter(yoloParamPath, yoloBinPath)
 val cseg = CsegSegmenter(csegParamPath, csegBinPath)
 val a = yolo.segment(pageBitmap)

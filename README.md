@@ -59,6 +59,63 @@ whole bubble is missed. Both the night version and the normal one are images com
 switching is a file-pointer swap, zero computation. The full measurements of the three recipes and the
 settled product shape are in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
+## Using night reading on Android
+
+This repo is the pure-Kotlin pipeline only. On Android it also needs text detection (DBNet) and the
+character mask (two NCNN segmenters). Yakuyomi's implementation of both is in yakuyomi-engine, split so that
+night reading does **not** need the translation engine:
+
+| yakuyomi-engine module | What it brings |
+|---|---|
+| `:nightread-android` | `NightReadRenderer` (Bitmap in, dark Bitmap out) and the character segmenters. Depends on the two below. |
+| `:inference-core` | the NCNN native layer (`libyakuyomi_ncnn.so`), the DBNet `Detector`, grouping, `ModelDownloader` |
+| this library | the rebuild itself, pulled in by `:nightread-android` through `api` |
+
+The translation module, `:engine`, is not involved.
+
+To use it in an app:
+
+1. Add yakuyomi-engine as a git submodule with `--recursive` (it carries this repo as its own submodule).
+2. In `settings.gradle.kts`: `includeBuild("yakuyomi-engine")`.
+3. In the app: `implementation("li.joye.yakuyomi:nightread-android:0.5.0")`. The version is a placeholder;
+   the composite build substitutes the source.
+
+Requirements: arm64-v8a only; NDK 28.2.13676358 and CMake 3.22.1 installed (`:inference-core` builds
+`libyakuyomi_ncnn.so` from source); minSdk 26.
+
+Models: from yakuyomi-engine's
+[`models.json`](https://github.com/joyeli/yakuyomi-engine/blob/main/models.json), role `detector`
+(`dbnet_detect.ncnn.param` + `.bin`) and role `charseg` (`manga_seg_s` and `cartoonseg`, `.param` + `.bin`
+each), about 300 MB together. `ModelDownloader.fetchManifest()` filtered to those two roles, then
+`ensure(...)`, downloads and checks them. Load them from a local path; do not read weights into the JVM heap
+with `readBytes()`. The two segmentation models carry their own terms (YOLO11-seg: Ultralytics AGPL-3.0;
+redistributed for research and non-commercial use, taken down on a rights holder's request): see
+[the engine's model notes](https://github.com/joyeli/yakuyomi-engine/blob/main/docs/MODELS.md#night-reading-models).
+
+```kotlin
+import li.joye.yakuyomi.engine.Detector
+import li.joye.yakuyomi.engine.NightReadRenderer
+import li.joye.yakuyomi.nightread.NightTier
+
+Detector(dir.resolve("dbnet_detect.ncnn.param").path).use { detector ->
+    val seg = NightReadRenderer.charSegmenter(
+        dir.resolve("manga_seg_s.ncnn.param").path,
+        dir.resolve("cartoonseg.ncnn.param").path,
+    ) ?: error("no character-segmentation model")
+    seg.use {
+        detector.warmUp(); it.warmUp()   // first-time native init on one thread, before running pages concurrently
+        val night = NightReadRenderer.render(page, detector, it, NightTier.L2.apply())
+    }
+}
+```
+
+Two things to know. The Android classes are in the Kotlin package `li.joye.yakuyomi.engine`, not
+`li.joye.yakuyomi.nightread` (they used to live in the engine module). And a page over 3.5 MPx is scaled down
+first, so the output then has the scaled size. The full guide, including several tiers in one pass, threading
+and memory, is
+[`nightread-android/README.md`](https://github.com/joyeli/yakuyomi-engine/blob/main/nightread-android/README.md)
+in yakuyomi-engine.
+
 ## The red line
 
 **Never paint over a face, a hand, a white sleeve or white hair.** The only acceptable failure is "not dark
@@ -88,7 +145,7 @@ percentage points of light area; with the mask the same pipeline sits at 18.
 | `docs/` | Architecture, parameter reference, decision log. |
 
 Character-mask inference is not in this repo. Yakuyomi computes it in
-[yakuyomi-engine](https://github.com/joyeli/yakuyomi-engine) with two NCNN segmenters, `CsegSegmenter`
+[yakuyomi-engine](https://github.com/joyeli/yakuyomi-engine)'s `:nightread-android` module with two NCNN segmenters, `CsegSegmenter`
 (CartoonSegmentation's RTMDet-Ins) and `YoloSegSegmenter` (YOLO11-seg `manga_seg_s`), and feeds the union of
 the two fp16 masks to the pipeline; int8 was measured on device and rejected. The former `nightread-ort`
 module, which ran the same two models through ONNX Runtime, went away with that move, so nothing here depends

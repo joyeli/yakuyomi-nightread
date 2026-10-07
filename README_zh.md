@@ -45,6 +45,58 @@ CartoonSegmentation 126 MB）。偵測省不掉是量過才定的：連偵測一
 漏掉。夜讀版與正常版都是事先算好的圖，切換只是換檔案指標，零計算。三種配方的完整量測與定案的
 產品形狀見 [`docs/ARCHITECTURE_zh.md`](docs/ARCHITECTURE_zh.md)。
 
+## 在 Android 上使用夜讀
+
+這個 repo 只有純 Kotlin 的管線。在 Android 上還需要文字偵測（DBNet）和人物遮罩（兩顆 NCNN 分割器）。
+Yakuyomi 的實作在 yakuyomi-engine，而且拆成夜讀**不需要**翻譯引擎：
+
+| yakuyomi-engine 模組 | 帶來什麼 |
+|---|---|
+| `:nightread-android` | `NightReadRenderer`（給 Bitmap、回暗色 Bitmap）與人物分割器。依賴下面兩個。 |
+| `:inference-core` | NCNN 原生層（`libyakuyomi_ncnn.so`）、DBNet `Detector`、分群、`ModelDownloader` |
+| 本函式庫 | 重建本身，由 `:nightread-android` 以 `api` 帶進來 |
+
+翻譯模組 `:engine` 完全不需要。
+
+接進 app：
+
+1. 把 yakuyomi-engine 加成 git submodule，要加 `--recursive`（它裡面還有本 repo 的 submodule）。
+2. `settings.gradle.kts`：`includeBuild("yakuyomi-engine")`。
+3. app：`implementation("li.joye.yakuyomi:nightread-android:0.5.0")`。版號只是佔位，composite build 會換成原始碼。
+
+條件：只出 arm64-v8a；要裝 NDK 28.2.13676358 與 CMake 3.22.1（`:inference-core` 從原始碼編
+`libyakuyomi_ncnn.so`）；minSdk 26。
+
+模型：yakuyomi-engine 的
+[`models.json`](https://github.com/joyeli/yakuyomi-engine/blob/main/models.json) 裡 role `detector`
+（`dbnet_detect.ncnn.param` + `.bin`）和 role `charseg`（`manga_seg_s` 與 `cartoonseg`，各 `.param` + `.bin`），
+合計約 300 MB。用 `ModelDownloader.fetchManifest()` 篩出這兩個 role 再呼叫 `ensure(...)`，就會下載並驗證。
+要用本機路徑載入，別用 `readBytes()` 把權重讀進 JVM heap。兩顆人物分割模型各有條件（YOLO11-seg 是
+Ultralytics AGPL-3.0；以研究與非商業用途散布、權利人要求即下架），見
+[引擎的模型說明](https://github.com/joyeli/yakuyomi-engine/blob/main/docs/MODELS_zh.md#夜讀模型)。
+
+```kotlin
+import li.joye.yakuyomi.engine.Detector
+import li.joye.yakuyomi.engine.NightReadRenderer
+import li.joye.yakuyomi.nightread.NightTier
+
+Detector(dir.resolve("dbnet_detect.ncnn.param").path).use { detector ->
+    val seg = NightReadRenderer.charSegmenter(
+        dir.resolve("manga_seg_s.ncnn.param").path,
+        dir.resolve("cartoonseg.ncnn.param").path,
+    ) ?: error("沒有人物分割模型")
+    seg.use {
+        detector.warmUp(); it.warmUp()   // 原生的首次初始化在單緒做完，之後才能多頁並行
+        val night = NightReadRenderer.render(page, detector, it, NightTier.L2.apply())
+    }
+}
+```
+
+兩件事要知道。Android 這邊的類別在 Kotlin 套件 `li.joye.yakuyomi.engine`，不是 `li.joye.yakuyomi.nightread`
+（它們原本在引擎模組裡）。頁面超過 3.5 MPx 會先縮，輸出就是縮後的尺寸。完整說明（一次產好幾檔、執行緒、
+記憶體）見 yakuyomi-engine 的
+[`nightread-android/README_zh.md`](https://github.com/joyeli/yakuyomi-engine/blob/main/nightread-android/README_zh.md)。
+
 ## 紅線
 
 **絕不塗到臉、手、白衣、白髮。** 唯一可接受的失敗是「不夠暗」。這條線用量的，不用看的：
@@ -74,7 +126,7 @@ CartoonSegmentation 126 MB）。偵測省不掉是量過才定的：連偵測一
 | `docs/` | 架構、參數表、決策記錄。 |
 
 人物遮罩的推論不在這個 repo。Yakuyomi 是在 [yakuyomi-engine](https://github.com/joyeli/yakuyomi-engine)
-用兩顆 NCNN 分割器算的：`CsegSegmenter`（CartoonSegmentation 的 RTMDet-Ins）與 `YoloSegSegmenter`
+的 `:nightread-android` 模組用兩顆 NCNN 分割器算的：`CsegSegmenter`（CartoonSegmentation 的 RTMDet-Ins）與 `YoloSegSegmenter`
 （YOLO11-seg `manga_seg_s`），兩顆 fp16 遮罩取聯集餵給管線；int8 真機量過、判死。原本用 ONNX Runtime
 跑同兩顆模型的 `nightread-ort` 模組已隨之移除，這裡不再有任何東西依賴 ONNX Runtime。研究腳本仍用
 Python `onnxruntime` 跑 `.onnx` 匯出檔，那是 NCNN 移植拿來對照的桌面參考實作，不是產品。

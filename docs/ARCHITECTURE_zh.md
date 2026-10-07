@@ -19,7 +19,8 @@
 
 結論是，要讓頁面本身變暗又不毀畫面，必須先認出頁面的語意分區，再逐區重建。這也是這個專案和
 [yakuyomi-engine](https://github.com/joyeli/yakuyomi-engine) 的關係：它只吃引擎的文字偵測輸出，
-其餘自己算。
+其餘自己算。在 Android 上，引擎的夜讀那一半是 `:nightread-android` 模組，依賴共用的 `:inference-core`
+（NCNN、DBNet），不依賴翻譯引擎。
 
 ## 一頁的資料流
 
@@ -270,7 +271,7 @@ Python 是規格本。Kotlin 移植的驗收方式是對同一批 fixture 逐位
 上機的模型配方已經定了：人物遮罩＝兩顆 NCNN fp16 模型取聯集，合計 146MB——CartoonSegmentation 的
 RTMDet-Ins（`cartoonseg.ncnn`，126MB）與 YOLO11-seg（`manga_seg_s.ncnn`，20.4MB），測試機一頁約
 1.2～1.4 s。int8 量過、判死：cseg 過 `ncnn2int8` 後零實例（工具鏈問題、不是校準），YOLO11-seg int8
-只在本來就 0.4 s 的遮罩上省 7%。推論在 yakuyomi-engine（`CsegSegmenter`、`YoloSegSegmenter`），
+只在本來就 0.4 s 的遮罩上省 7%。推論在 yakuyomi-engine 的 `:nightread-android` 模組（`CsegSegmenter`、`YoloSegSegmenter`），
 不在這裡：這個 library 只吃遮罩。偵測沿用引擎既有的 DBNet，不另外花空間。
 
 API 也已經對齊：`research/nightread.py` 的 `run_page` 新增 `regions` 與 `seg` 參數，外部提供就

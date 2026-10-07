@@ -23,7 +23,9 @@ it: bubble white and paper white are the same pixel value, and at the pixel leve
 So darkening the page itself without wrecking the art means identifying the page's semantic regions first,
 then rebuilding region by region. That is also the relationship to
 [yakuyomi-engine](https://github.com/joyeli/yakuyomi-engine): this project consumes the engine's text
-detection output and computes everything else itself.
+detection output and computes everything else itself. On Android the engine's night-reading side is the
+`:nightread-android` module, which depends on the shared `:inference-core` (NCNN, DBNet) and not on the
+translation engine.
 
 ## Per-page data flow
 
@@ -344,7 +346,7 @@ The model recipe for the device is settled: the character mask is the union of t
 together, CartoonSegmentation's RTMDet-Ins (`cartoonseg.ncnn`, 126 MB) and YOLO11-seg (`manga_seg_s.ncnn`,
 20.4 MB), at about 1.2–1.4 s per page on the test device. int8 was measured and rejected: the cseg graph comes
 out of `ncnn2int8` producing zero instances (a toolchain failure, not calibration), and YOLO11-seg int8 saves
-7% on a mask that already takes 0.4 s. The inference lives in yakuyomi-engine (`CsegSegmenter`,
+7% on a mask that already takes 0.4 s. The inference lives in yakuyomi-engine's `:nightread-android` module (`CsegSegmenter`,
 `YoloSegSegmenter`), not here: this library only consumes the mask. Detection reuses the engine's existing
 DBNet, so it costs nothing extra.
 

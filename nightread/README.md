@@ -31,7 +31,7 @@ Keeping it to one module is deliberate. `:nightread` imports nothing but `kotlin
 `android.graphics`: that keeps the pipeline runnable under plain JVM unit tests (which is how it is checked
 against the Python fixtures) and lets any JVM project take it as is. The character mask is computed
 elsewhere: Yakuyomi runs the two segmentation models with NCNN inside
-[yakuyomi-engine](https://github.com/joyeli/yakuyomi-engine) (`CsegSegmenter` and `YoloSegSegmenter`, see
+[yakuyomi-engine](https://github.com/joyeli/yakuyomi-engine)'s `:nightread-android` module (`CsegSegmenter` and `YoloSegSegmenter`, see
 [Character-mask models](#character-mask-models)), and this repo only consumes the resulting mask. There used
 to be a `:nightread-ort` module here running the same two models through ONNX Runtime; it went away with the
 move to NCNN.
@@ -112,6 +112,10 @@ fun render(
 Night reading ships no detector. `seg` and `regions` are yours to produce. Yakuyomi uses the DBNet detector
 from manga-image-translator through yakuyomi-engine, but nothing in the pipeline depends on that: any source
 that can emit a text-region mask and text-region boxes works, as long as it meets the format rules below.
+In yakuyomi-engine the DBNet `Detector` is in the `:inference-core` module, and `NightReadRenderer` in
+`:nightread-android` builds `seg` and `regions` from it (and the character mask from the segmenters) — see
+[Using night reading on Android](../README.md#using-night-reading-on-android). That path does not need the
+translation engine.
 
 ## Input format
 
@@ -143,7 +147,7 @@ The character mask is a required input, and this repo does not compute it. Yakuy
 yakuyomi-engine, where the two models run on NCNN, the same backend as the engine's detector and inpainter:
 
 ```kotlin
-// yakuyomi-engine; both implement CharSegmenter { fun segment(page: Bitmap): BooleanArray }
+// yakuyomi-engine's :nightread-android; both implement CharSegmenter { fun segment(page: Bitmap): BooleanArray }
 val yolo = YoloSegSegmenter(yoloParamPath, yoloBinPath)
 val cseg = CsegSegmenter(csegParamPath, csegBinPath)
 val a = yolo.segment(pageBitmap)
