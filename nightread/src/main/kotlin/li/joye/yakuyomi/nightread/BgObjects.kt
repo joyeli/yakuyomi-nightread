@@ -295,11 +295,34 @@ internal object BgObjects {
         val h = img.h
         val d = img.data
         val out = Mask(w, h)
+        // 陣列＋索引迴圈（for-in List 在不內聯的 debug 版每個候選像素配一個 Iterator）；每方向的位移先換成線性偏移（dy·w＋dx），
+        // 離頁緣夠遠（≥ 核半徑）的像素不必反射（2026-10-07 加速；同樣的整數加總，逐位元相同）
+        val nd = offs.size
+        val oa = Array(nd) { offs[it] }
+        var rad = 0
+        for (o in oa) { var j = 0; while (j < o.size) { rad = max(rad, max(abs(o[j]), abs(o[j + 1]))); j += 2 } }
+        val lin = Array(nd) { k -> val o = oa[k]; IntArray(o.size / 2) { o[2 * it] * w + o[2 * it + 1] } }
+        val npt = IntArray(nd) { oa[it].size / 2 }
         for (y in 0 until h) {
+            val inY = y >= rad && y < h - rad
             for (x in 0 until w) {
                 val i = y * w + x
                 if (!cand.data[i]) continue
-                for (o in offs) {
+                if (inY && x >= rad && x < w - rad) {
+                    var q = 0
+                    while (q < nd) {
+                        val li = lin[q]
+                        var s = 0L
+                        var j = 0
+                        while (j < li.size) { s += d[i + li[j]]; j++ }
+                        if (s * den > num * npt[q]) { out.data[i] = true; break }
+                        q++
+                    }
+                    continue
+                }
+                var q = 0
+                while (q < nd) {
+                    val o = oa[q]
                     var s = 0L
                     var j = 0
                     while (j < o.size) {
@@ -310,7 +333,8 @@ internal object BgObjects {
                         s += d[ry * w + rx]
                         j += 2
                     }
-                    if (s * den > num * (o.size / 2)) { out.data[i] = true; break }
+                    if (s * den > num * npt[q]) { out.data[i] = true; break }
+                    q++
                 }
             }
         }
