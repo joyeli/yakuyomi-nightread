@@ -84,12 +84,12 @@ internal object BgObjects {
     ) {
         private var eB: LongArray? = null
         private var longzB: LongArray? = null
-
-        /** 否決與脈絡共用的「人物⊕3 ∪ 泡⊕7 ∪ 格框線⊕2…」（[xsOf]；第一個用到的算，1 bit/px）與它算自哪幾張遮罩。 */
-        internal var xsB: LongArray? = null
-        internal var xsSrc: Array<Mask>? = null
         private var phaloB: LongArray? = null
         private var phaloDone = false
+
+        /** 否決與脈絡共用的「人物⊕3 ∪ 泡⊕7 ∪ 格框線⊕3」（[xsOf]；第一個用到的算，1 bit/px）與它算自哪幾張遮罩。 */
+        internal var xsB: LongArray? = null
+        internal var xsSrc: Array<Mask>? = null
 
         /** 物件證據（細暗線｜σ4 Canny｜亮記號，扣 X3、去 < 15 px）。 */
         val e: LongArray
@@ -138,8 +138,12 @@ internal object BgObjects {
     private fun eOf(c: Context, p: ObjectRuleParams): LongArray {
         val n = c.w * c.h
         val sp = c.spark
+        val ink = c.ink
+        val te = c.toneE
+        val br = c.bright
+        val x3 = c.x3
         return Ring.packBits(minArea(Mask(c.w, c.h, BooleanArray(n) {
-            (has(c.ink, it) || has(c.toneE, it) || (has(c.bright, it) && (sp == null || !has(sp, it)))) && !has(c.x3, it)
+            (has(ink, it) || has(te, it) || (has(br, it) && (sp == null || !has(sp, it)))) && !has(x3, it)
         }), p.evMinArea))
     }
 
@@ -148,7 +152,9 @@ internal object BgObjects {
         val w = c.w
         val h = c.h
         val n = w * h
-        val ink = Mask(w, h, BooleanArray(n) { has(c.ink, it) && !has(c.x3, it) })
+        val inkB = c.ink
+        val x3 = c.x3
+        val ink = Mask(w, h, BooleanArray(n) { has(inkB, it) && !has(x3, it) })
         val cc = Cv.ccStats(ink, 8)
         val keep = BooleanArray(cc.n) { it > 0 && max(cc.width[it], cc.height[it]) >= p.longLen }
         if (p.fxSparks) straightLines(cc, w, keep, p.fx.longStraight)
@@ -290,7 +296,7 @@ internal object BgObjects {
      * [cand] 上的像素：任一方向的線核平均 > num/den（Σ_線上 img ×den > num ×點數；BORDER_REFLECT_101；整數）＝研究端 `line_mean_gt`
      * 在 [cand] 上的值（研究端整頁算再 ∧ cand）。
      */
-    private fun lineMeanGt(img: Gray, offs: List<IntArray>, num: Long, den: Long, cand: Mask): Mask {
+    internal fun lineMeanGt(img: Gray, offs: List<IntArray>, num: Long, den: Long, cand: Mask): Mask {
         val w = img.w
         val h = img.h
         val d = img.data

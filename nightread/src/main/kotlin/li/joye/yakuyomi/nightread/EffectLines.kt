@@ -510,21 +510,25 @@ internal object EffectLines {
      * 二維整數高斯（先橫後直，每趟 Σ w·v 後四捨五入右移 16；REFLECT_101）＝研究端 `_conv_q`。[a] 是 rows×cols。
      * 對稱核：兩邊對稱的兩個值先相加再乘一次（Long 整數運算，與加總順序無關）。
      */
-    private fun convQ(a: LongArray, rows: Int, cols: Int, k: IntArray): LongArray {
+    internal fun convQ(a: LongArray, rows: Int, cols: Int, k: IntArray): LongArray {
         val c = k.size / 2
         val h1 = LongArray(rows * cols)
         val xi = IntArray(cols + 2 * c) { Cv.reflect101(it - c, cols) }
         val line = LongArray(cols + 2 * c)
         val kc = k[c].toLong()
+        // 核在外、x 在內（2026-10-07 加速；整數加總與順序無關，逐值相同）
+        val accRow = LongArray(cols)
         for (y in 0 until rows) {
             val b = y * cols
             for (i in line.indices) line[i] = a[b + xi[i]]
-            for (x in 0 until cols) {
-                val m = x + c
-                var acc = kc * line[m]
-                for (j in 1..c) acc += k[c + j].toLong() * (line[m - j] + line[m + j])
-                h1[b + x] = (acc + 32768L) shr 16
+            for (x in 0 until cols) accRow[x] = kc * line[x + c]
+            for (j in 1..c) {
+                val kj = k[c + j].toLong()
+                val lo = c - j
+                val hi = c + j
+                for (x in 0 until cols) accRow[x] += kj * (line[x + lo] + line[x + hi])
             }
+            for (x in 0 until cols) h1[b + x] = (accRow[x] + 32768L) shr 16
         }
         val out = LongArray(rows * cols)
         for (y in 0 until rows) {
@@ -547,7 +551,7 @@ internal object EffectLines {
      * 結構張量＝研究端 `tensor`，在窗 [wx0,wx1)×[r0,r1)（列是頁面座標）上算：blackhat（[cand] 上，其餘 0）→ σ1 → 3×3 Sobel →
      * 平方／乘積右移 16（四捨五入）→ σ[EffectLineParams.si]。回傳 (Jxx, Jyy, Jxy)，各 (r1−r0)×(wx1−wx0)。
      */
-    private fun tensor(bh: Gray, cand: Mask, wx0: Int, wx1: Int, r0: Int, r1: Int, k1: IntArray, k4: IntArray): Array<LongArray> {
+    internal fun tensor(bh: Gray, cand: Mask, wx0: Int, wx1: Int, r0: Int, r1: Int, k1: IntArray, k4: IntArray): Array<LongArray> {
         val pw = bh.w
         val cols = wx1 - wx0
         val rows = r1 - r0
@@ -560,13 +564,16 @@ internal object EffectLines {
         val pxx = LongArray(rows * cols)
         val pyy = LongArray(rows * cols)
         val pxy = LongArray(rows * cols)
+        // 左右鄰的反射欄先算好（不內聯的 debug 版每格兩次 reflect101 呼叫）
+        val xmI = IntArray(cols) { Cv.reflect101(it - 1, cols) }
+        val xpI = IntArray(cols) { Cv.reflect101(it + 1, cols) }
         for (y in 0 until rows) {
             val ym = Cv.reflect101(y - 1, rows) * cols
             val y0 = y * cols
             val yp = Cv.reflect101(y + 1, rows) * cols
             for (x in 0 until cols) {
-                val xm = Cv.reflect101(x - 1, cols)
-                val xp = Cv.reflect101(x + 1, cols)
+                val xm = xmI[x]
+                val xp = xpI[x]
                 val gx = (f[ym + xp] + 2 * f[y0 + xp] + f[yp + xp]) - (f[ym + xm] + 2 * f[y0 + xm] + f[yp + xm])
                 val gy = (f[yp + xm] + 2 * f[yp + x] + f[yp + xp]) - (f[ym + xm] + 2 * f[ym + x] + f[ym + xp])
                 pxx[y0 + x] = (gx * gx + 32768L) shr 16
