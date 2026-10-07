@@ -2768,19 +2768,37 @@ object Cv {
         val dx = Array(3) { IntArray(w) }
         val dy = Array(3) { IntArray(w) }
         val mag = Array(3) { IntArray(w + 2) }      // [x + 1]；兩側各一格 0
+        // 來源列右移後的值（兩側各補一格複製邊）與它的橫向 [1 2 1] 和，三列環形快取：每條來源列只算一次（原本每格重讀八個鄰居、
+        // 各右移一次；2026-10-07 加速，同一組整數運算、逐值相同）
+        val srow = Array(3) { IntArray(w + 2) }
+        val hsum = Array(3) { IntArray(w) }
+        val srowId = intArrayOf(-1, -1, -1)
+        val vsum = IntArray(w + 2)
+        fun srcRow(r: Int): Int {
+            val sl = r % 3
+            if (srowId[sl] == r) return sl
+            val sr = srow[sl]
+            val b = r * w
+            for (x in 0 until w) sr[x + 1] = src[b + x] shr shift
+            sr[0] = sr[1]
+            sr[w + 1] = sr[w]
+            val hs = hsum[sl]
+            for (x in 0 until w) hs[x] = sr[x] + 2 * sr[x + 1] + sr[x + 2]
+            srowId[sl] = r
+            return sl
+        }
         fun row(y: Int, slot: Int) {
-            val ym = max(0, y - 1) * w
-            val y0 = y * w
-            val yp = min(h - 1, y + 1) * w
+            val su = srcRow(max(0, y - 1))
+            val sm = srcRow(y)
+            val sd = srcRow(min(h - 1, y + 1))
+            val u = srow[su]; val m = srow[sm]; val d = srow[sd]
+            val hu = hsum[su]; val hd = hsum[sd]
             val ddx = dx[slot]; val ddy = dy[slot]; val mm = mag[slot]
+            // 直向 [1 2 1] 和（補過邊的欄）：gx＝右欄和 − 左欄和；gy＝下列橫向和 − 上列橫向和
+            for (x in 0 until w + 2) vsum[x] = u[x] + 2 * m[x] + d[x]
             for (x in 0 until w) {
-                val xm = max(0, x - 1)
-                val xp = min(w - 1, x + 1)
-                val a = src[ym + xm] shr shift; val b = src[ym + x] shr shift; val c = src[ym + xp] shr shift
-                val d = src[y0 + xm] shr shift; val f = src[y0 + xp] shr shift
-                val e = src[yp + xm] shr shift; val gg = src[yp + x] shr shift; val k = src[yp + xp] shr shift
-                val gx = (c + 2 * f + k) - (a + 2 * d + e)
-                val gy = (e + 2 * gg + k) - (a + 2 * b + c)
+                val gx = vsum[x + 2] - vsum[x]
+                val gy = hd[x] - hu[x]
                 ddx[x] = gx; ddy[x] = gy
                 mm[x + 1] = abs(gx) + abs(gy)
             }
