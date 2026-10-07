@@ -51,6 +51,10 @@ internal object BgObjects {
      *
      * [e]、[longz]、[phalo] 只在亮背景區有區過門之後（或效果線區塗法）才用到，用到才算（2026-10-07 加速；28 頁裡 12 頁整段不必算）：
      * 都是 [context] 輸入與上面幾張位元遮罩的純函式，晚算不改任何位元。晚算要的材料（[Later]）多留幾張 1 bit/px。
+     *
+     * **限單一執行緒**：晚算的屬性與 [xsOf] 的快取都是一般欄位、沒有同步。建好之後只能在一條執行緒上用（產品＝合成那條；頁內並行時
+     * 分析分支算好、經 [NightRead.Branch.join] 交給合成執行緒，join 之後才第一次讀，有 happens-before）。兩條執行緒同時第一次讀可能
+     * 重算，也可能在另一邊放掉材料之後拿到 null。用完呼叫 [finish]。
      */
     class Context internal constructor(
         val w: Int,
@@ -117,6 +121,17 @@ internal object BgObjects {
         /** 三樣都算好了：晚算的材料放掉。 */
         private fun release() {
             if (eB != null && longzB != null && phaloDone) later = null
+        }
+
+        /**
+         * 這一檔用完（[NightRead] 合成在亮背景區塗黑之後）：放掉晚算的材料、[xsOf] 的快取與它記的來源遮罩（修剪前的泡、格框線各
+         * 1 B/px）。Context 有時比分析活得久（頁內並行時分析分支的結果還留在執行緒池佇列裡），不放掉就陪著多佔。之後不得再讀
+         * [e]／[longz]／[phalo]。
+         */
+        internal fun finish() {
+            later = null
+            xsB = null
+            xsSrc = null
         }
     }
 
@@ -1232,50 +1247,12 @@ internal object BgObjects {
     }
 
     /**
-     * 研究端 `light_fill`：在貼紙層（含否決）之後的 [out] 上把無物件的亮背景塗黑（就地改）。[chroma] 可 null（當 0）；[bubble]＝修剪前的泡。
-     * [darkOverride]＝「已經黑」的覆寫（函式層 parity 用：餵研究端那一邊的；null＝[blackish]）。[regions]＝字區外接框（字畫亮只限
-     * 碰到字框的字塊，[ObjectRuleParams.textNeedsRegion]）。fill 生長完先扣人物旁的淡線外圈（[Context.phalo]）。
+     * [lightFill] 的核心塗法（核心、封縫閉運算、核心所在塊的標號、兩次生長；裁到過門區外接框外擴做，見 [lightFill] 裡的說明），回傳
+     * 整頁的 fill。獨立成函式只為記憶體（2026-10-07 加速審查）：裁切的暫存（pc、core、dEv、b、生長中間量）原本是 [lightFill] 的區域
+     * 變數，直譯與 debuggable 的框架會把死掉的區域變數抱到函式結束，疊在後面 [dropContext] 的標號表上（亮背景塗黑面積大的頁最低 heap
+     * 多 2–29 MB）；放在這裡，回傳時就放掉。運算與順序照舊，逐位元相同。
      */
-    fun lightFill(
-        out: FImg, g: Gray, ctx: Context, charMask: Mask, charRaw: Mask, bubble: Mask, frame: Mask, seg: Mask, chroma: Gray?,
-        regions: List<TextRegion>, p: ObjectRuleParams, np: NightReadParams, diag: MutableMap<String, Any>?,
-        darkOverride: Mask? = null,
-    ) {
-        val w = g.w
-        val h = g.h
-        val n = w * h
-        // 記憶體：跨階段要留的遮罩存 1 bit/px；σ2.5 亮度用的時候才算、用完就丟（研究端整頁算一次，值相同）
-        val darkB: LongArray
-        val l0B: LongArray
-        run {
-            val dark = darkOverride ?: blackish(out, g, p, np)
-            if (diag != null && diag["obj"] == true) diag["obj_dark"] = dark
-            darkB = Ring.packBits(dark)
-            val l0 = Mask(w, h, BooleanArray(n) { has(ctx.light, it) && !has(ctx.x, it) && !dark.data[it] })
-            l0B = Ring.packBits(l0)
-        }
-        val fx = ctx.fx
-        // 效果線場的標號：地盤被格框線與已經黑（格溝）切開的連通塊（一致性以「格內的一片場」為單位）
-        val tcomp = if (fx == null) null else fieldLabels(fx, unpack(darkB, w, h), frame, w, h)
-        val rp = regionsPassed(g, ctx, Cv.openPacked(unpack(l0B, w, h), Cv.ellipse(5)), chroma, p, tcomp, diag)
-        val passed = rp.passed
-        // 效果線區（A）：在核心塗法之前另走一條；之後「已經黑」加上它塗到 ≤ 40 的像素（原型重算成品 ≤ 40；查表後確定）
-        val fxpf = rp.fxpf
-        val fxp = if (fx != null && fxpf != null && fxpf.any()) fxPaint(out, g, ctx, fx, fxpf, unpack(darkB, w, h), p, np) else null
-        if (diag != null) diag["obj_fxpaint"] = fxp ?: Mask(w, h)
-        if (fxp != null) {
-            val lut = inkLut(np.bg, p.fx.lineV, true)
-            for (i in 0 until n) if (fxp.data[i] && lut[g.data[i]] <= 40f) Ring.set(darkB, i)
-        }
-        if (!passed.any()) return
-        // 用到才算的三張（[Context]）：在下面幾張整頁暫存（距離表、標號）配置之前算，暫存不疊在一起
-        val ph = ctx.phalo
-        val lz = ctx.longz
-        val cE = ctx.e
-        // 核心（離證據 > rLoc）、封縫閉運算、核心所在塊的標號、兩次生長：結果只落在過門區，裁到過門區外接框外擴 cm 做（2026-10-07 加速；
-        // 逐位元相同）。距離：5×5 chamfer 每步成本（1、1.4、2.1969）不小於它跨過的切比雪夫距離（1、1、2），≤ rLoc 的值的最短路整條在
-        // rLoc px 內，裁切只會讓 > rLoc 的值變大，`> rLoc` 不變。封縫：dEv＝ev⊕1、閉合半徑 seal ⇒ 過門像素只看 2·seal＋1 px 內的 ev。
-        // 標號只用來整塊留或丟，塊 ⊆ 過門區。生長本來就裁到 within 的外接框。
+    private fun coreFill(passed: Mask, cE: LongArray, lz: LongArray, ctx: Context, p: ObjectRuleParams, w: Int, h: Int): Mask {
         var px0 = w; var py0 = h; var px1 = -1; var py1 = -1
         for (y in 0 until h) {
             val rb = y * w
@@ -1333,13 +1310,75 @@ internal object BgObjects {
             val f1 = growCropped(core, b, p.rLoc + 6)
             growCropped(f1, Mask(cw, ch, BooleanArray(cn) { pc.data[it] && !dEv.data[it] }), p.seal + 3)
         }
-        var fill = Mask(w, h)
+        val fill = Mask(w, h)
         for (yy in 0 until ch) System.arraycopy(fillC.data, yy * cw, fill.data, (yy + cy0) * w + cx0, cw)
-        if (ph != null) for (i in 0 until n) if (has(ph, i)) fill.data[i] = false     // 人物旁的淡線外圈不塗（複核 1）
-        val dark = unpack(darkB, w, h)
+        return fill
+    }
+
+    /**
+     * [lightFill] 的兩道剔除（脈絡 [dropContext]、孤島 [dropIslands]）。獨立成函式同 [coreFill]：脈絡的 fill 標號（4 B/px）與暫存
+     * 回傳時就放掉，不陪著後面的縫補黑。
+     */
+    private fun drops(
+        g: Gray, fill0: Mask, l0B: LongArray, dark: Mask, ctx: Context, charMask: Mask, charRaw: Mask, bubble: Mask, frame: Mask,
+        p: ObjectRuleParams, diag: MutableMap<String, Any>?,
+    ): Mask {
+        var fill = fill0
         var ccFill: CC? = null
         if (fill.any()) dropContext(g, fill, l0B, dark, ctx, charMask, charRaw, bubble, frame, p, diag).let { fill = it.fill; ccFill = it.cc }
         if (fill.any()) fill = dropIslands(g, fill, dark, charMask, charRaw, bubble, ctx.inpaint, p, diag, ccFill)
+        return fill
+    }
+
+    /**
+     * 研究端 `light_fill`：在貼紙層（含否決）之後的 [out] 上把無物件的亮背景塗黑（就地改）。[chroma] 可 null（當 0）；[bubble]＝修剪前的泡。
+     * [darkOverride]＝「已經黑」的覆寫（函式層 parity 用：餵研究端那一邊的；null＝[blackish]）。[regions]＝字區外接框（字畫亮只限
+     * 碰到字框的字塊，[ObjectRuleParams.textNeedsRegion]）。fill 生長完先扣人物旁的淡線外圈（[Context.phalo]）。
+     */
+    fun lightFill(
+        out: FImg, g: Gray, ctx: Context, charMask: Mask, charRaw: Mask, bubble: Mask, frame: Mask, seg: Mask, chroma: Gray?,
+        regions: List<TextRegion>, p: ObjectRuleParams, np: NightReadParams, diag: MutableMap<String, Any>?,
+        darkOverride: Mask? = null,
+    ) {
+        val w = g.w
+        val h = g.h
+        val n = w * h
+        // 記憶體：跨階段要留的遮罩存 1 bit/px；σ2.5 亮度用的時候才算、用完就丟（研究端整頁算一次，值相同）
+        val darkB: LongArray
+        val l0B: LongArray
+        run {
+            val dark = darkOverride ?: blackish(out, g, p, np)
+            if (diag != null && diag["obj"] == true) diag["obj_dark"] = dark
+            darkB = Ring.packBits(dark)
+            val l0 = Mask(w, h, BooleanArray(n) { has(ctx.light, it) && !has(ctx.x, it) && !dark.data[it] })
+            l0B = Ring.packBits(l0)
+        }
+        val fx = ctx.fx
+        // 效果線場的標號：地盤被格框線與已經黑（格溝）切開的連通塊（一致性以「格內的一片場」為單位）
+        val tcomp = if (fx == null) null else fieldLabels(fx, unpack(darkB, w, h), frame, w, h)
+        val rp = regionsPassed(g, ctx, Cv.openPacked(unpack(l0B, w, h), Cv.ellipse(5)), chroma, p, tcomp, diag)
+        val passed = rp.passed
+        // 效果線區（A）：在核心塗法之前另走一條；之後「已經黑」加上它塗到 ≤ 40 的像素（原型重算成品 ≤ 40；查表後確定）
+        val fxpf = rp.fxpf
+        val fxp = if (fx != null && fxpf != null && fxpf.any()) fxPaint(out, g, ctx, fx, fxpf, unpack(darkB, w, h), p, np) else null
+        if (diag != null) diag["obj_fxpaint"] = fxp ?: Mask(w, h)
+        if (fxp != null) {
+            val lut = inkLut(np.bg, p.fx.lineV, true)
+            for (i in 0 until n) if (fxp.data[i] && lut[g.data[i]] <= 40f) Ring.set(darkB, i)
+        }
+        if (!passed.any()) return
+        // 用到才算的三張（[Context]）：在下面幾張整頁暫存（距離表、標號）配置之前算，暫存不疊在一起
+        val ph = ctx.phalo
+        val lz = ctx.longz
+        val cE = ctx.e
+        // 核心（離證據 > rLoc）、封縫閉運算、核心所在塊的標號、兩次生長：結果只落在過門區，裁到過門區外接框外擴 cm 做（2026-10-07 加速；
+        // 逐位元相同）。距離：5×5 chamfer 每步成本（1、1.4、2.1969）不小於它跨過的切比雪夫距離（1、1、2），≤ rLoc 的值的最短路整條在
+        // rLoc px 內，裁切只會讓 > rLoc 的值變大，`> rLoc` 不變。封縫：dEv＝ev⊕1、閉合半徑 seal ⇒ 過門像素只看 2·seal＋1 px 內的 ev。
+        // 標號只用來整塊留或丟，塊 ⊆ 過門區。生長本來就裁到 within 的外接框。
+        var fill = coreFill(passed, cE, lz, ctx, p, w, h)
+        if (ph != null) for (i in 0 until n) if (has(ph, i)) fill.data[i] = false     // 人物旁的淡線外圈不塗（複核 1）
+        val dark = unpack(darkB, w, h)
+        fill = drops(g, fill, l0B, dark, ctx, charMask, charRaw, bubble, frame, p, diag)
         if (p.seam && fill.any()) {
             // 規則版本 4 縫補黑（q1）：兩階光影的交界被 σ4 Canny 當成調子邊，塗黑區在那裡留一條灰虛線 ⇒ 閉合補得起來、整條沒有
             // 細暗線／亮記號／谷、原圖都亮的細縫補黑

@@ -1360,6 +1360,7 @@ object NightRead {
             BgObjects.lightFill(out, g, objCtx, a.charMask, a.charRaw, a.bubbleUntrim, a.frame, seg, a.chroma, a.regions, p.obj, p, diag)
             debug?.invoke("objLightFill", 0)
         }
+        objCtx?.finish()                        // 晚算的材料與否決／脈絡共用的超區快取放掉（Context 有時比分析活得久）
         objHolder.ctx = null                    // 量測到此用完：不陪著後面的泡重繪／灰圈收細（那裡是合成的峰值）
         // 灰圈收細：背景填黑（留白／格溝／貼紙／亮背景區）到此為止塗成 BG 的像素（1 bit/px，到人物還原前才攤開）
         val ringBg = if (ring == null) null else {
@@ -1501,7 +1502,10 @@ object NightRead {
         if (di != null && dv != null) {
             for (k in di.indices) { val i = di[k]; if (back.data[i]) out.data[i] = dv[k] }
         } else {
-            for (i in 0 until n) if (back.data[i]) out.data[i] = prePaintValue(i, a, gutterBand, p)
+            // 格溝全空時 [prePaintValue] 不改值：在迴圈外判一次（原本每個像素都整頁掃一次 any() ⇒ 格溝遮罩在但全空的頁是平方級，
+            // 擾動頁實測 180 s；逐位元相同）
+            val sepNz = a.sep?.takeIf { it.any() }
+            for (i in 0 until n) if (back.data[i]) out.data[i] = prePaintValue(i, a, gutterBand, sepNz, p)
         }
         val vids = HashSet<Int>()
         for (i in 0 until n) if (vet.data[i]) { val l = a.wc.cc.labels[i]; if (l > 0 && l !in stdKeep) vids.add(l) }
@@ -1685,9 +1689,10 @@ object NightRead {
 
     /**
      * 貼紙層之前的成品值（[compose] 的「場景曲線 → 留白帶 → 格溝／頁邊」）在像素 [i] 的值，由場景曲線與兩層遮罩重建（逐個浮點運算
-     * 照 [paintGutter]：填 bg、外擴方核 2·stroke+1 的邊帶取 max(原值, bg ＋ 墨度 ×(edgeInk − bg))）。
+     * 照 [paintGutter]：填 bg、外擴方核 2·stroke+1 的邊帶取 max(原值, bg ＋ 墨度 ×(edgeInk − bg))）。[sep]＝格溝／頁邊遮罩，沒有或
+     * 全空＝null（呼叫端在迴圈外判一次；[compose] 也只在非空時塗）。
      */
-    private fun prePaintValue(i: Int, a: Analysis, band: LongArray?, p: NightReadParams): Float {
+    private fun prePaintValue(i: Int, a: Analysis, band: LongArray?, sep: Mask?, p: NightReadParams): Float {
         val w = a.g.w
         val h = a.g.h
         var v = a.scene.data[i]
@@ -1705,8 +1710,7 @@ object NightRead {
             if (f(i)) v = p.bg.toFloat()
             if (edge(f)) v = max(v, p.bg + ink * (p.edgeInk - p.bg))
         }
-        val sep = a.sep
-        if (sep != null && sep.any()) {
+        if (sep != null) {
             val f = { j: Int -> sep.data[j] }
             if (f(i)) v = p.bg.toFloat()
             if (edge(f)) v = max(v, p.bg + ink * (p.edgeInk - p.bg))

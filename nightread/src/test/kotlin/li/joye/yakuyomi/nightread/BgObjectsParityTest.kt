@@ -269,6 +269,43 @@ class BgObjectsParityTest {
                 assertEquals("$page 區 ${f.take(4)} 沒過效果墨門就不量調子邊", "", k[5])
             }
         }
+        checkProductPath(page, a, p, veto, out, rows, d2)
         return Triple(veto, fill, fxp)
+    }
+
+    /**
+     * 產品路徑（2026-10-07 加速審查）：上面的量測用 diag["obj"] 建 Context，會整頁算調子邊緣、三張晚算的當場算（[BgObjects.Context.forceAll]），
+     * 走不到產品的 toneCount、晚算的屬性、「其他條件不過就不算」。這裡用 diag＝null 建 Context：
+     * ① lightFill 帶不含 "obj" 的除錯紀錄（逐區特徵照算、走 toneCount 與晚算）→ 否決、四張遮罩、逐區特徵與上面（[forced]）逐值相同；
+     * ② 再建一份、lightFill 不帶除錯紀錄（其他條件不過的區不算調子邊緣與 σ2.5）→ 成品與上面逐位元相同。
+     */
+    private fun checkProductPath(
+        page: String, a: NightRead.Analysis, p: NightReadParams, veto: Mask, outForced: FImg, rowsForced: List<String>,
+        forced: Map<String, Any>,
+    ) {
+        val dark = readMask("page/${page}_obj_dark.png")
+        val ctx = BgObjects.context(a.g, a.charMask, a.charRaw, a.bubbleUntrim, a.seg, a.frame, p.obj, null, a.inpaint)
+        val veto2 = BgObjects.vetoBlocks(a.g, readMask("page/${page}_obj_extra.png"), readMask("page/${page}_obj_stddark.png"),
+            ctx, a.charMask, a.charRaw, a.bubbleUntrim, a.frame, a.regions, p.obj, null)
+        assertMask("$page 產品路徑 否決", veto, veto2)
+        val out = FImg(a.g.w, a.g.h, FloatArray(a.g.data.size) { 128f })
+        val d3 = HashMap<String, Any>()
+        BgObjects.lightFill(out, a.g, ctx, a.charMask, a.charRaw, a.bubbleUntrim, a.frame, a.seg, a.chroma, a.regions, p.obj, p, d3,
+            darkOverride = dark)
+        val empty = Mask(a.g.w, a.g.h)
+        for (k in listOf("obj_fill", "obj_band", "obj_txt", "obj_seam", "obj_fxpaint")) {
+            assertMask("$page 產品路徑 $k", forced[k] as Mask? ?: empty, d3[k] as Mask? ?: empty)
+        }
+        @Suppress("UNCHECKED_CAST")
+        assertEquals("$page 產品路徑 逐區特徵", rowsForced, d3["obj_rows"] as List<String>)
+        assertArrayEquals("$page 產品路徑 成品（帶除錯紀錄）", outForced.data, out.data, 0f)
+        val ctxN = BgObjects.context(a.g, a.charMask, a.charRaw, a.bubbleUntrim, a.seg, a.frame, p.obj, null, a.inpaint)
+        val outN = FImg(a.g.w, a.g.h, FloatArray(a.g.data.size) { 128f })
+        BgObjects.lightFill(outN, a.g, ctxN, a.charMask, a.charRaw, a.bubbleUntrim, a.frame, a.seg, a.chroma, a.regions, p.obj, p, null,
+            darkOverride = dark)
+        var diff = 0
+        for (i in outN.data.indices) if (outN.data[i].toRawBits() != outForced.data[i].toRawBits()) diff++
+        println("  $page 產品路徑（不帶除錯紀錄）：成品不同 $diff px")
+        assertEquals("$page 產品路徑 成品（不帶除錯紀錄）逐位元", 0, diff)
     }
 }
