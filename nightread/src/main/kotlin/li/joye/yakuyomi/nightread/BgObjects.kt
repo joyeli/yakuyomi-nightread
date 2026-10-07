@@ -1214,45 +1214,73 @@ internal object BgObjects {
             for (i in 0 until n) if (fxp.data[i] && lut[g.data[i]] <= 40f) Ring.set(darkB, i)
         }
         if (!passed.any()) return
-        val passedB = Ring.packBits(passed)
         // 用到才算的三張（[Context]）：在下面幾張整頁暫存（距離表、標號）配置之前算，暫存不疊在一起
         val ph = ctx.phalo
         val lz = ctx.longz
         val cE = ctx.e
+        // 核心（離證據 > rLoc）、封縫閉運算、核心所在塊的標號、兩次生長：結果只落在過門區，裁到過門區外接框外擴 cm 做（2026-10-07 加速；
+        // 逐位元相同）。距離：5×5 chamfer 每步成本（1、1.4、2.1969）不小於它跨過的切比雪夫距離（1、1、2），≤ rLoc 的值的最短路整條在
+        // rLoc px 內，裁切只會讓 > rLoc 的值變大，`> rLoc` 不變。封縫：dEv＝ev⊕1、閉合半徑 seal ⇒ 過門像素只看 2·seal＋1 px 內的 ev。
+        // 標號只用來整塊留或丟，塊 ⊆ 過門區。生長本來就裁到 within 的外接框。
+        var px0 = w; var py0 = h; var px1 = -1; var py1 = -1
+        for (y in 0 until h) {
+            val rb = y * w
+            for (x in 0 until w) if (passed.data[rb + x]) {
+                if (x < px0) px0 = x
+                if (x > px1) px1 = x
+                if (y < py0) py0 = y
+                py1 = y
+            }
+        }
+        val cm = max(p.rLoc + 2, 2 * p.seal + 2)
+        val cx0 = max(0, px0 - cm); val cy0 = max(0, py0 - cm); val cx1 = min(w, px1 + 1 + cm); val cy1 = min(h, py1 + 1 + cm)
+        val cw = cx1 - cx0
+        val ch = cy1 - cy0
+        val cn = cw * ch
+        val pc = Mask(cw, ch)
         val b: Mask
         val core: Mask
-        val dEvB: LongArray
+        val dEv: Mask
         run {
             val cToneE = ctx.toneE
             val cX3 = ctx.x3
-            val ev = Mask(w, h, BooleanArray(n) { has(cE, it) || (has(cToneE, it) && !has(cX3, it)) })
+            val ev = Mask(cw, ch)
+            for (yy in 0 until ch) {
+                val rb = (yy + cy0) * w + cx0
+                val cb = yy * cw
+                for (xx in 0 until cw) {
+                    val i = rb + xx
+                    ev.data[cb + xx] = has(cE, i) || (has(cToneE, i) && !has(cX3, i))
+                    pc.data[cb + xx] = passed.data[i]
+                }
+            }
             core = run {
                 val t = Cv.chamfer5Padded(ev.not())
                 val r = p.rLoc * Q
-                val sw = w + 4
-                val c = passed
-                for (y in 0 until h) for (x in 0 until w) {
-                    val i = y * w + x
-                    c.data[i] = c.data[i] && t[(y + 2) * sw + x + 2] > r && !has(lz, i)
+                val sw = cw + 4
+                val c = pc.copy()
+                for (yy in 0 until ch) for (xx in 0 until cw) {
+                    val j = yy * cw + xx
+                    c.data[j] = c.data[j] && t[(yy + 2) * sw + xx + 2] > r && !has(lz, (yy + cy0) * w + xx + cx0)
                 }
                 c
             }
-            val dEv = dil(ev, 1)
-            dEvB = Ring.packBits(dEv)
+            dEv = dil(ev, 1)
             val sealed = Cv.closePacked(dEv, Cv.ellipse(2 * p.seal + 1))
-            b = Mask(w, h, BooleanArray(n) { has(passedB, it) && !sealed.data[it] })
+            b = Mask(cw, ch, BooleanArray(cn) { pc.data[it] && !sealed.data[it] })
         }
-        var fill = run {
+        val fillC = run {
             val ccB = Cv.ccStats(b, 8)
             val cnt = IntArray(ccB.n)
-            for (i in 0 until n) if (core.data[i]) cnt[ccB.labels[i]]++
+            for (j in 0 until cn) if (core.data[j]) cnt[ccB.labels[j]]++
             val lim = p.coreMin * h * w
             val keep = BooleanArray(ccB.n) { it > 0 && cnt[it] >= lim }
-            for (i in 0 until n) core.data[i] = core.data[i] && keep[ccB.labels[i]]
-            core
+            for (j in 0 until cn) core.data[j] = core.data[j] && keep[ccB.labels[j]]
+            val f1 = growCropped(core, b, p.rLoc + 6)
+            growCropped(f1, Mask(cw, ch, BooleanArray(cn) { pc.data[it] && !dEv.data[it] }), p.seal + 3)
         }
-        fill = growCropped(fill, b, p.rLoc + 6)
-        fill = growCropped(fill, Mask(w, h, BooleanArray(n) { has(passedB, it) && !has(dEvB, it) }), p.seal + 3)
+        var fill = Mask(w, h)
+        for (yy in 0 until ch) System.arraycopy(fillC.data, yy * cw, fill.data, (yy + cy0) * w + cx0, cw)
         if (ph != null) for (i in 0 until n) if (has(ph, i)) fill.data[i] = false     // 人物旁的淡線外圈不塗（複核 1）
         val dark = unpack(darkB, w, h)
         if (fill.any()) fill = dropContext(g, fill, l0B, dark, ctx, charMask, charRaw, bubble, frame, p, diag)
