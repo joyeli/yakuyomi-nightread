@@ -81,15 +81,20 @@ To use it in an app:
    the composite build substitutes the source.
 
 Requirements: arm64-v8a only; NDK 28.2.13676358 and CMake 3.22.1 installed (`:inference-core` builds
-`libyakuyomi_ncnn.so` from source); minSdk 26.
+`libyakuyomi_ncnn.so` from source); minSdk 26. Each included build looks for the Android SDK on its own, so
+either set `ANDROID_HOME`, or put a `local.properties` with `sdk.dir=...` in both `yakuyomi-engine/` and
+`yakuyomi-engine/yakuyomi-nightread/` (the app's own `local.properties` is not read there).
 
 Models: from yakuyomi-engine's
 [`models.json`](https://github.com/joyeli/yakuyomi-engine/blob/main/models.json), role `detector`
 (`dbnet_detect.ncnn.param` + `.bin`) and role `charseg` (`manga_seg_s` and `cartoonseg`, `.param` + `.bin`
 each), about 300 MB together. `ModelDownloader.fetchManifest()` filtered to those two roles, then
-`ensure(...)`, downloads and checks them. Load them from a local path; do not read weights into the JVM heap
-with `readBytes()`. The two segmentation models carry their own terms (YOLO11-seg: Ultralytics AGPL-3.0;
-redistributed for research and non-commercial use, taken down on a rights holder's request): see
+`ensure(...)`, downloads and checks them. Both are `suspend` functions, so call them from a coroutine (the
+app needs its own kotlinx-coroutines dependency for that; `:inference-core` uses it internally without
+exporting it), and `:inference-core` brings OkHttp and kotlinx-coroutines into the APK at runtime either way.
+Load the models from a local path; do not read weights into the JVM heap with `readBytes()`. The two
+segmentation models carry their own terms (YOLO11-seg: Ultralytics AGPL-3.0; redistributed for research and
+non-commercial use, taken down on a rights holder's request): see
 [the engine's model notes](https://github.com/joyeli/yakuyomi-engine/blob/main/docs/MODELS.md#night-reading-models).
 
 ```kotlin
@@ -182,5 +187,8 @@ is reproducible from the source alone.
 ## License
 
 GPL-3.0, same as the rest of Yakuyomi. The research pipeline uses the m-i-t DBNet detector (GPL-3.0) through
-yakuyomi-engine; the character-mask models carry their own licences (CartoonSegmentation is MIT, YOLO11-seg
-is AGPL-3.0); the rebuild algorithm itself is original.
+yakuyomi-engine; the character-mask models carry their own terms (YOLO11-seg is Ultralytics AGPL-3.0;
+CartoonSegmentation's repository has no LICENSE file, while the Hugging Face card of its original checkpoint
+says MIT and the ONNX conversion we start from states nothing — details in
+[the engine's model notes](https://github.com/joyeli/yakuyomi-engine/blob/main/docs/MODELS.md#night-reading-models));
+the rebuild algorithm itself is original.

@@ -65,12 +65,16 @@ Yakuyomi 的實作在 yakuyomi-engine，而且拆成夜讀**不需要**翻譯引
 3. app：`implementation("li.joye.yakuyomi:nightread-android:0.5.0")`。版號只是佔位，composite build 會換成原始碼。
 
 條件：只出 arm64-v8a；要裝 NDK 28.2.13676358 與 CMake 3.22.1（`:inference-core` 從原始碼編
-`libyakuyomi_ncnn.so`）；minSdk 26。
+`libyakuyomi_ncnn.so`）；minSdk 26。每個 included build 各自找 Android SDK，所以要嘛設 `ANDROID_HOME`，
+要嘛在 `yakuyomi-engine/` 和 `yakuyomi-engine/yakuyomi-nightread/` 各放一份寫了 `sdk.dir=...` 的
+`local.properties`（app 自己那份在那兩處讀不到）。
 
 模型：yakuyomi-engine 的
 [`models.json`](https://github.com/joyeli/yakuyomi-engine/blob/main/models.json) 裡 role `detector`
 （`dbnet_detect.ncnn.param` + `.bin`）和 role `charseg`（`manga_seg_s` 與 `cartoonseg`，各 `.param` + `.bin`），
 合計約 300 MB。用 `ModelDownloader.fetchManifest()` 篩出這兩個 role 再呼叫 `ensure(...)`，就會下載並驗證。
+兩個都是 `suspend` 函式，要在協程裡呼叫（app 自己要有 kotlinx-coroutines 依賴；`:inference-core` 內部有用、
+但沒有匯出給呼叫端）；另外不管用不用，`:inference-core` 在 runtime 都會把 OkHttp 和 kotlinx-coroutines 帶進 APK。
 要用本機路徑載入，別用 `readBytes()` 把權重讀進 JVM heap。兩顆人物分割模型各有條件（YOLO11-seg 是
 Ultralytics AGPL-3.0；以研究與非商業用途散布、權利人要求即下架），見
 [引擎的模型說明](https://github.com/joyeli/yakuyomi-engine/blob/main/docs/MODELS_zh.md#夜讀模型)。
@@ -159,5 +163,7 @@ python3 nightread_guard.py out/run
 ## 授權
 
 GPL-3.0，與 Yakuyomi 其餘部分相同。研究管線透過 yakuyomi-engine 使用 m-i-t 的 DBNet 偵測器
-（GPL-3.0）；人物遮罩模型各有授權（CartoonSegmentation 是 MIT，YOLO11-seg 是 AGPL-3.0）；
+（GPL-3.0）；人物遮罩模型各有條件（YOLO11-seg 是 Ultralytics AGPL-3.0；CartoonSegmentation 的 repo
+沒有 LICENSE 檔，它原始權重的 Hugging Face 模型卡寫 MIT，我們轉檔所用的 ONNX 版則什麼都沒寫，細節見
+[引擎的模型說明](https://github.com/joyeli/yakuyomi-engine/blob/main/docs/MODELS_zh.md#夜讀模型)）；
 重建演算法本身是原創。
