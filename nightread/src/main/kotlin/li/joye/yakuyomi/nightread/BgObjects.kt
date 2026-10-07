@@ -84,6 +84,10 @@ internal object BgObjects {
     ) {
         private var eB: LongArray? = null
         private var longzB: LongArray? = null
+
+        /** 否決與脈絡共用的「人物⊕3 ∪ 泡⊕7 ∪ 格框線⊕2…」（[xsOf]；第一個用到的算，1 bit/px）與它算自哪幾張遮罩。 */
+        internal var xsB: LongArray? = null
+        internal var xsSrc: Array<Mask>? = null
         private var phaloB: LongArray? = null
         private var phaloDone = false
 
@@ -175,6 +179,20 @@ internal object BgObjects {
         val x3 = c.x3
         return pfShape(gf, c.x, if (cr != null && bo != null) PixelTest { i -> (has(bo, i) || has(cr, i)) && !has(x3, i) } else null,
             p, diag)
+    }
+
+    /**
+     * 人物（收邊後 ∪ 原輸出）⊕3 ∪ 泡⊕7 ∪ 格框線⊕3（[vetoBlocks] 的超區與 [dropContext] 的脈絡都扣它；1 bit/px）。同一份量測、同幾張遮罩
+     * 只算一次（2026-10-07 加速；原本兩邊各算一次）。
+     */
+    private fun xsOf(ctx: Context, charMask: Mask, charRaw: Mask, bubble: Mask, frame: Mask): LongArray {
+        val src = ctx.xsSrc
+        val cached = ctx.xsB
+        if (cached != null && src != null && src[0] === charMask && src[1] === charRaw && src[2] === bubble && src[3] === frame) return cached
+        val xs = Ring.packBits(dil(charMask or charRaw, 3).orInPlace(dil(bubble, 7)).orInPlace(dil(frame, 3)))
+        ctx.xsB = xs
+        ctx.xsSrc = arrayOf(charMask, charRaw, bubble, frame)
+        return xs
     }
 
     @Suppress("NOTHING_TO_INLINE")
@@ -897,8 +915,8 @@ internal object BgObjects {
         val sd = stdDark.andNot(extra)
         val wc = Cv.closePacked(Mask(w, h, BooleanArray(n) { g.data[it] >= WHITE_TH && !sd.data[it] }), Cv.ellipse(2 * p.vetoRc + 1))
         run {
-            val xs = dil(charMask or charRaw, 3).orInPlace(dil(bubble, 7)).orInPlace(dil(frame, 3))
-            for (i in 0 until n) if (xs.data[i] || sd.data[i]) wc.data[i] = false
+            val xs = xsOf(ctx, charMask, charRaw, bubble, frame)
+            for (i in 0 until n) if (has(xs, i) || sd.data[i]) wc.data[i] = false
         }
         val sdd = dil(sd, 2)
         val info = if (diag != null) ArrayList<String>() else null
@@ -1289,8 +1307,9 @@ internal object BgObjects {
         for (yy in 0 until ch) System.arraycopy(fillC.data, yy * cw, fill.data, (yy + cy0) * w + cx0, cw)
         if (ph != null) for (i in 0 until n) if (has(ph, i)) fill.data[i] = false     // 人物旁的淡線外圈不塗（複核 1）
         val dark = unpack(darkB, w, h)
-        if (fill.any()) fill = dropContext(g, fill, l0B, dark, ctx, charMask, charRaw, bubble, frame, p, diag)
-        if (fill.any()) fill = dropIslands(g, fill, dark, charMask, charRaw, bubble, ctx.inpaint, p, diag)
+        var ccFill: CC? = null
+        if (fill.any()) dropContext(g, fill, l0B, dark, ctx, charMask, charRaw, bubble, frame, p, diag).let { fill = it.fill; ccFill = it.cc }
+        if (fill.any()) fill = dropIslands(g, fill, dark, charMask, charRaw, bubble, ctx.inpaint, p, diag, ccFill)
         if (p.seam && fill.any()) {
             // 規則版本 4 縫補黑（q1）：兩階光影的交界被 σ4 Canny 當成調子邊，塗黑區在那裡留一條灰虛線 ⇒ 閉合補得起來、整條沒有
             // 細暗線／亮記號／谷、原圖都亮的細縫補黑
@@ -1746,7 +1765,7 @@ internal object BgObjects {
     private fun dropContext(
         g: Gray, fill: Mask, l0B: LongArray, dark: Mask, ctx: Context, charMask: Mask, charRaw: Mask, bubble: Mask, frame: Mask,
         p: ObjectRuleParams, diag: MutableMap<String, Any>?,
-    ): Mask {
+    ): Dropped {
         val w = g.w
         val h = g.h
         val n = w * h
@@ -1777,8 +1796,8 @@ internal object BgObjects {
         if (white.any { it }) {
             val sc = Cv.closePacked(Mask(w, h, BooleanArray(n) { has(l0B, it) || fill.data[it] }), Cv.ellipse(2 * p.vetoRc + 1))
             run {
-                val xs = dil(charMask or charRaw, 3).orInPlace(dil(bubble, 7)).orInPlace(dil(frame, 3)).orInPlace(dark)
-                for (i in 0 until n) if (xs.data[i]) sc.data[i] = false
+                val xs = xsOf(ctx, charMask, charRaw, bubble, frame)
+                for (i in 0 until n) if (has(xs, i) || dark.data[i]) sc.data[i] = false
             }
             val blk = dil(Mask(w, h, BooleanArray(n) { dark.data[it] && g.data[it] >= 128 }), 8)
             val cE = ctx.e
@@ -1829,8 +1848,13 @@ internal object BgObjects {
             }
         }
         if (diag != null) diag["obj_ctx"] = info!!
-        return Mask(w, h, BooleanArray(n) { fill.data[it] && !drop[ccF.labels[it]] })
+        val res = Mask(w, h, BooleanArray(n) { fill.data[it] && !drop[ccF.labels[it]] })
+        // 一塊都沒拿掉＝孤島判斷要的標號就是這一份（同一張遮罩、同一套標號），不必再標一次
+        return Dropped(res, if (drop.any { it }) null else ccF)
     }
+
+    /** [dropContext] 的結果：拿掉之後的 fill，與一塊都沒拿掉時它的標號（給 [dropIslands]；有拿掉＝null）。 */
+    private class Dropped(val fill: Mask, val cc: CC?)
 
     /**
      * 孤島：小塊又 [ObjectRuleParams.islandTouch] px 內碰不到塗黑的（泡不算）；或外緣多半貼著人物遮罩；或（規則版本 4 q4，
@@ -1839,12 +1863,12 @@ internal object BgObjects {
      */
     private fun dropIslands(
         g: Gray, fill: Mask, dark: Mask, charMask: Mask, charRaw: Mask, bubble: Mask, inpaint: LongArray?, p: ObjectRuleParams,
-        diag: MutableMap<String, Any>?,
+        diag: MutableMap<String, Any>?, ccPre: CC? = null,
     ): Mask {
         val w = g.w
         val h = g.h
         val n = w * h
-        val ccF = Cv.ccStats(fill, 8)
+        val ccF = ccPre ?: Cv.ccStats(fill, 8)
         val drop = BooleanArray(ccF.n)
         val bd = dil(bubble, 8)
         val info = if (diag != null) ArrayList<String>() else null

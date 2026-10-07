@@ -1141,9 +1141,9 @@ internal object Separators {
 
     /** 所有群組兩兩配對 → 溝帶（長的那條當 a）。回傳逐對結果（含被拒的，供統計／除錯）。 */
     private fun separatorPairs(g: Gray, groups: List<Group>, wmax: Double, ovlMin: Double, bridge: Double,
-                               seg: Mask?, p: NightReadParams): List<PairRes> {
-        // 兩張整頁遮罩只在第一對過了幾何門檻時才算（多數頁只有少數對、有的頁一對都沒有）
-        val textd by lazy { seg?.let { dilateSquare(it, 2 * p.sep.textDil + 1) } }
+                               segD: Lazy<Mask?>, p: NightReadParams): List<PairRes> {
+        // 兩張整頁遮罩只在第一對過了幾何門檻時才算（多數頁只有少數對、有的頁一對都沒有）；字⊕textDil 與頁邊遮罩共用（[separators]）
+        val textd by segD
         val outside by lazy { outsideWhite(g, p) }
         val pairs = ArrayList<PairRes>()
         for (i in groups.indices) {
@@ -1405,7 +1405,7 @@ internal object Separators {
      * 頁邊＝從頁緣沿軸向往內、途中只經過白／字／泡、在 maxd 內撞到一條頁邊框線（或其封口延長線）的那一段白
      * （`margin_mask`）。行程要連成 ≥ run_min 的段、亮而不白的像素不能多、撞到的若是溝的框線而另一側是溝就不算。
      */
-    private fun marginMask(g: Gray, groups: List<Group>, seg: Mask?, bubble: Mask?, trusted: Set<Int>,
+    private fun marginMask(g: Gray, groups: List<Group>, segD: Lazy<Mask?>, bubble: Mask?, trusted: Set<Int>,
                            stripPre: Mask, p: NightReadParams, extra: List<Group> = emptyList()): Mask {
         val w = g.w
         val h = g.h
@@ -1414,8 +1414,9 @@ internal object Separators {
         val white = g.ge(p.whiteTh)
         val okm = g.ge(p.sep.marginOkTh)
         var txd = Mask(w, h)
-        if (seg != null) {
-            txd = dilateSquare(seg, 2 * p.sep.textDil + 1)
+        val sd = segD.value
+        if (sd != null) {
+            txd = sd
             okm.orInPlace(txd)
         }
         var bub = Mask(w, h)
@@ -1618,14 +1619,16 @@ internal object Separators {
         }
         debug?.put("ogroups", ogroups)
         debug?.put("t_group", (System.nanoTime() - tGroup) / 1e6)
+        // 字⊕textDil：溝對與頁邊遮罩共用（只讀；2026-10-07 加速，原本兩邊各算一次）
+        val segD = lazy(LazyThreadSafetyMode.NONE) { seg?.let { dilateSquare(it, 2 * p.sep.textDil + 1) } }
         val pairs = timed(debug, "pairs") {
-            separatorPairs(g, groups, p.sep.wmaxFrac * sh, p.sep.ovlFrac * p.sep.lenFrac * sh, p.sep.bridgeFrac * sh, seg, p)
+            separatorPairs(g, groups, p.sep.wmaxFrac * sh, p.sep.ovlFrac * p.sep.lenFrac * sh, p.sep.bridgeFrac * sh, segD, p)
         }
         val trusted = HashSet<Int>()
         val stripPre = Mask(w, h)
         for (q in pairs) if (q.acc) { trusted.add(q.i); trusted.add(q.j); q.mask!!.orInto(stripPre) }
         debug?.put("stripPre", stripPre)
-        var mar = timed(debug, "margin") { marginMask(g, groups, seg, bubble, trusted, stripPre, p, ogroups) }
+        var mar = timed(debug, "margin") { marginMask(g, groups, segD, bubble, trusted, stripPre, p, ogroups) }
         debug?.put("marginRaw", mar)
         val strip = timed(debug, "network") { networkFilter(pairs, mar, g, p) }
         debug?.put("stripNet", strip)
