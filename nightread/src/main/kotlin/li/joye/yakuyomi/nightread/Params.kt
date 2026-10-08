@@ -958,7 +958,8 @@ enum class StickerMode {
  *   L3＝SIMPLE rough ≤ 20、無面積下限，再加「更多」新規則 A2（產品「更多」，2026-10-02 起）。
  * keep 集合在結構上巢狀（L1 ⊆ L2 ⊆ L3：[Sticker.filterPlan]，A2 只加不減）；值的由來見 docs/DECISIONS.md「背景填黑三檔」
  * 與「「更多」新規則 A2」。
- * [key] 是 fork 偏好 `nightread_fill_level` 與夜讀檔名（`.night.l1.webp`…）用的字串。
+ * [key] 是 fork 偏好 `nightread_fill_level` 用的字串（產品只出 l2／l3；夜讀檔名是 `.night.std.webp`／`.night.more.webp`，
+ * 舊版的 `.night.l1.webp`…只供相容讀取）。
  */
 enum class NightTier(
     val key: String,

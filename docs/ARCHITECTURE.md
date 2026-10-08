@@ -380,7 +380,7 @@ research/              desktop pipeline (the spec)
   nightread_ring.py      character ring thinning
   nightread_obj.py       "More" background-object rule
   nightread_fx.py        effect lines and sparkles
-  nightread_batch.py     run the 11 fixture pages, print the light-area table
+  nightread_batch.py     run the 11 fixture pages, print the white-area table (whiteB / whiteA)
   nightread_guard.py     the red-line test: 732 guard boxes
   nightread_translated.py  night reading on translated pages: the three detection-material recipes
   charmask.py            character-mask probe (cseg / yoloseg / union)

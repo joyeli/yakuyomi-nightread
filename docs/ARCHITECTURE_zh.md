@@ -296,7 +296,7 @@ research/              桌面管線（規格）
   nightread_ring.py      人物外灰圈收細
   nightread_obj.py       「更多」背景物件規則
   nightread_fx.py        效果線與閃光
-  nightread_batch.py     跑 11 張 fixture、印亮區表
+  nightread_batch.py     跑 11 張 fixture、印白面積表（whiteB／whiteA）
   nightread_guard.py     紅線測試：732 個守護框
   nightread_translated.py  譯後頁跑夜讀：三種偵測素材配方
   charmask.py            人物遮罩探針（cseg / yoloseg / 聯集）
