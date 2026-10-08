@@ -18,9 +18,11 @@ requirement.
 
 ![Six stages of the rebuild](docs/img/showcase.webp)
 
-**Status: desktop research.** Nothing ships yet. The pipeline has converged — 1351 lines of Python, 11
-violations out of 688 scored guard boxes — and the remaining work is the Kotlin port. Decisions and current numbers
-live in [`docs/DECISIONS.md`](docs/DECISIONS.md).
+**Status: shipping.** `nightread/` is a complete Kotlin port, checked against the Python spec by parity tests,
+and runs in Yakuyomi 0.23.0 (2026-10-08) through yakuyomi-engine's `:nightread-android`. The product has two
+levels, Standard and More; the current rules version is 4. On the 688 scored guard boxes the full pipeline has
+11 violations and both product levels 10 (the Kotlin library: 11 / 9 / 9). Decisions and current numbers live
+in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 
 ## Why a rebuild and not a filter
 
@@ -43,12 +45,16 @@ Full walkthrough in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md); every tunabl
 This section describes how Yakuyomi itself uses night reading. The pipeline does not require translation;
 the ordering below is a product decision.
 
-Night reading runs after translation: what it rebuilds is the finished page, with the translated text
-already typeset into the bubbles. Computed before translation it would be looking at the original text, and
-the translation pasted in afterwards would land as black type on a dark bubble. So OCR, translation,
+Night reading does not need translation: untranslated chapters can get night pages right after download.
+For translated chapters it runs after translation: what it rebuilds is the finished page, with the translated
+text already typeset into the bubbles. Computed before translation it would be looking at the original text,
+and the translation pasted in afterwards would land as black type on a dark bubble. So OCR, translation,
 inpainting and typesetting, the bulk of the translation cost, are all saved; the finished page only needs
 detection run again, plus a night-reading-only character mask (two NCNN fp16 models in the engine, 146 MB
-together: YOLO11-seg 20.4 MB and CartoonSegmentation 126 MB). That detection cannot be saved was settled by
+together: YOLO11-seg 20.4 MB and CartoonSegmentation 126 MB). The product also hands over two pieces of the
+translation material: the original text boxes, merged with what DBNet finds again (short translated text is
+often missed by detection), and, since rules version 4, the inpaint mask (`NightReadInput.inpaintMask`).
+That detection cannot be saved was settled by
 measurement: skipping it as well and using the typesetter's own exact
 strokes scores best of the three recipes (text 239.3, contrast +223.2), and was then overturned by looking
 at the output. Exact strokes cannot seed the bubble core fill (on one bubble the detected text region
@@ -129,8 +135,9 @@ and any output that darkens more than 15% of a box's originally-white pixels is 
 because visual inspection was proven unreliable — crops that looked clean were overturned once every box was
 measured.
 
-Reaching the red line needs a semantic character mask. Pure geometry tops out at 37 violations and costs 14
-percentage points of light area; with the mask the same pipeline sits at 18.
+Reaching the red line needs a semantic character mask. Pure geometry topped out at 37 violations (on the 665
+boxes of the time) and cost 14 percentage points of light area; with the mask the full pipeline is at 11 of
+today's 688 scored boxes.
 
 ## Layout
 
@@ -139,14 +146,17 @@ percentage points of light area; with the mask the same pipeline sits at 18.
 | `research/nightread.py` | The whole pipeline, one page at a time. Every parameter is in one block at the top of the file. |
 | `research/nightread_sep.py` | Any-angle gutter and margin detection (white between two near-parallel frame lines is a gutter); compose paints it above the character mask. |
 | `research/nightread_bleed.py` | Bleed-panel filter: margin pieces whose outer ring touches artwork are dropped (skies and floors no longer torn into jagged black). |
+| `research/nightread_ring.py` | Character ring thinning: where a drawn outline separates background from figure, the black grows up to it. |
+| `research/nightread_obj.py` + `nightread_fx.py` | The "More" background-object rule, and effect lines / sparkles that do not count as objects. |
 | `research/charmask.py` | The character-mask probe (CartoonSegmentation, YOLO11-seg, and their union). Its output is a **required input** to the pipeline. |
 | `research/nightread_batch.py` | Run the 11 fixture pages, print the light-area table. |
 | `research/nightread_guard.py` + `nightread_guard.json` | The red-line test: 732 hand-annotated foreground boxes. |
 | `research/nightread_translated.py` | The translated-page material-sharing check: run night reading on the engine's finished page, compare the three detection-material recipes. |
 | `research/make_showcase.py` | The six-stage showcase sheets. |
-| `research/pipeline_diagram.py` | The pipeline-stage figure at the top of this file. |
-| `fixtures/pages/` | The 11 test pages. `fixtures/baseline/` holds reference outputs for regression. |
-| `nightread/` | The Kotlin library. The whole pipeline is ported and passes parity tests against the Python fixtures. Android library with **no `android.graphics` and no inference framework**; `kotlin.math` is all the source imports, so the tests run on a plain JVM. Integration guide in [`nightread/README.md`](nightread/README.md). |
+| `research/pipeline_diagram.py` | The pipeline-stage figure in *Why a rebuild and not a filter*. |
+| `research/make_*_fixture.py` | Regenerate the Kotlin test resources in `nightread/src/test/resources/`. |
+| `fixtures/pages/` | The 11 test pages. `fixtures/charmask/` holds the character masks for the 11 pages. `fixtures/baseline/tiers/<L1\|L2\|L3\|MORE>/` holds the per-level reference outputs that `TierParityTest` compares against. The `*_final.png` files directly under `fixtures/baseline/` are full-pipeline outputs from 2026-09-17 (dab92ab) and are no longer updated. |
+| `nightread/` | The Kotlin library. The whole pipeline is ported and passes parity tests against the Python fixtures. Android library with **no `android.graphics` and no inference framework**; the source imports nothing beyond the Kotlin and JDK standard libraries (`kotlin.math`, `java.math`, `java.util.concurrent`), so the tests run on a plain JVM. Integration guide in [`nightread/README.md`](nightread/README.md). |
 | `docs/` | Architecture, parameter reference, decision log. |
 
 Character-mask inference is not in this repo. Yakuyomi computes it in
@@ -165,8 +175,13 @@ m-i-t grouping spec). Point `YAKU_ENGINE_CLONE` at a checkout of yakuyomi-engine
 
 That dependency belongs to the scripts, not to the pipeline: they call the engine's DBNet to produce `seg`
 and `regions`. Supply those two yourself and no engine is involved.
-`run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None)` skips detection when both are
-passed, which is the same shape as the Kotlin `NightReadInput`.
+`run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None, diag=None, inpaint=None)` skips
+detection when both are passed, which is the same shape as the Kotlin `NightReadInput`.
+
+The character masks for the 11 fixture pages are already in `fixtures/charmask/`; set
+`NIGHTREAD_CHARMASK=$PWD/../fixtures/charmask` and skip step 1. Regenerating them needs `cartoonseg.onnx` and
+`manga_seg_s.onnx` in `research/out/models/` and Python `onnxruntime`. Dependencies: `research/requirements.txt`
+plus the engine's `parity/` environment.
 
 ```bash
 cd research
@@ -181,8 +196,9 @@ NIGHTREAD_CHARMASK=$PWD/out/char_combine python3 nightread_batch.py -o out/run
 python3 nightread_guard.py out/run
 ```
 
-`NIGHTREAD_CHARMASK` is the only environment variable. Every other parameter is edited in the file, so a run
-is reproducible from the source alone.
+`NIGHTREAD_CHARMASK` is the only required environment variable. The product levels and each rule's switch are
+environment variables too (see the top of [`docs/PARAMETERS.md`](docs/PARAMETERS.md)); everything else is
+edited in the file, so a run reproduces from the source.
 
 ## License
 

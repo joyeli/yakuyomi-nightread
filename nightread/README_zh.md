@@ -16,7 +16,7 @@
 
 Android library，minSdk 26、compileSdk 37、Java 17，也設了 group 與 version，所以呼叫端用 Gradle composite build（`includeBuild`）就能接，Yakuyomi fork 就是這樣接的。
 
-只留一個模組是刻意的。`:nightread` 除了 `kotlin.math` 什麼都沒 import，連 `android.graphics` 都不碰：這樣管線才跑得起 JVM 單元測試（拿 Python fixture 對比就是這麼做的），也讓它可以被任何 JVM 專案直接拿走。人物遮罩在別處算：Yakuyomi 是在 [yakuyomi-engine](https://github.com/joyeli/yakuyomi-engine) 的 `:nightread-android` 模組用 NCNN 跑那兩顆分割模型（`CsegSegmenter` 與 `YoloSegSegmenter`，見[人物遮罩模型](#人物遮罩模型)），這個 repo 只吃算好的遮罩。這裡原本有個 `:nightread-ort` 模組用 ONNX Runtime 跑同兩顆模型，搬到 NCNN 後就拿掉了。
+只留一個模組是刻意的。`:nightread` 只用 Kotlin 與 JDK 標準庫（`kotlin.math`、`java.math`、`java.util.concurrent`），連 `android.graphics` 都不碰：這樣管線才跑得起 JVM 單元測試（拿 Python fixture 對比就是這麼做的），也讓它可以被任何 JVM 專案直接拿走。人物遮罩在別處算：Yakuyomi 是在 [yakuyomi-engine](https://github.com/joyeli/yakuyomi-engine) 的 `:nightread-android` 模組用 NCNN 跑那兩顆分割模型（`CsegSegmenter` 與 `YoloSegSegmenter`，見[人物遮罩模型](#人物遮罩模型)），這個 repo 只吃算好的遮罩。這裡原本有個 `:nightread-ort` 模組用 ONNX Runtime 跑同兩顆模型，搬到 NCNN 後就拿掉了。
 
 ## 快速開始
 
@@ -52,7 +52,10 @@ val regions: List<TextRegion> = yourTextBoxes()         // TextRegion(x0, y0, x1
 val charMask: Mask = yourCharacterMask(w, h)            // Mask(w, h)，true＝人物
 
 // 5. 重繪。
-val result: NightReadResult = NightRead.render(NightReadInput(gray, seg, regions, charMask, chroma))
+val result: NightReadResult = NightRead.render(
+    NightReadInput(gray, seg, regions, charMask, chroma),
+    NightTier.L2.apply(),   // 標準；NightTier.L3.apply() 是更多。預設的 NightReadParams() 是研究端完整管線。
+)
 
 // 6. 暗色頁，每像素 0..255，尺寸與輸入相同。
 val dark = result.out
@@ -63,7 +66,7 @@ val outPixels = IntArray(w * h) {
 val nightBitmap = Bitmap.createBitmap(outPixels, w, h, Bitmap.Config.ARGB_8888)
 ```
 
-進入點只有一個：
+入口都在無狀態的 `NightRead` 上：`render(input, p, debug)` 產一檔；`render(input, p, debug, parallel)` 多一個選用的 `Executor`（見「生命週期與執行緒」）；`renderTiers(input, tiers, debug, sink)` 與 `renderTiers(input, tiers, debug, parallel, sink)` 分析一次、依序把多檔交給 `sink`（與前一檔相同的傳 `null`）。各檔參數用 `NightTier.L1/L2/L3.apply(base)` 產生；規則版本是 `NightRead.RULES_VERSION`（見[規則版本](#規則版本)）。
 
 ```kotlin
 fun render(
@@ -128,11 +131,13 @@ val charMask = Mask(w, h, BooleanArray(w * h) { a[it] || b[it] })
 | 模型 | 檔案 | 大小（fp16） | 角色 | 授權 |
 |---|---|---|---|---|
 | YOLO11-seg | `manga_seg_s.ncnn.param` + `.bin` | 20.4 MB | 定案配方的基底，也是單獨跑時最省的一顆 | **AGPL-3.0**（Ultralytics） |
-| CartoonSegmentation（RTMDet-Ins） | `cartoonseg.ncnn.param` + `.bin` | 126 MB | 可選，加了更準 | MIT |
+| CartoonSegmentation（RTMDet-Ins） | `cartoonseg.ncnn.param` + `.bin` | 126 MB | 可選，加了更準 | 沒寫明：repo 沒有 LICENSE 檔；原始權重的 Hugging Face 模型卡寫 MIT，ONNX 轉檔版沒寫 |
+
+Yakuyomi 以研究與非商業用途散布兩顆的 NCNN 轉檔，權利人要求即下架；見[引擎的模型說明](https://github.com/joyeli/yakuyomi-engine/blob/main/docs/MODELS_zh.md#夜讀模型)。
 
 量測定了三件事：
 
-- **只用 YOLO11-seg 也能跑**，代價是守護框違規從 18 升到 27。
+- **只用 YOLO11-seg 也能跑**，代價是守護框違規變多：當時量的是 18 → 25（2026-09-21，那時 665 框）。
 - **全 fp16、不用 int8**：CartoonSegmentation 過 `ncnn2int8` 後零實例（是工具鏈在這張圖上壞掉，不是校準問題）；YOLO11-seg int8 只在本來就 0.4 s 的遮罩上快 7%。兩者都是真機量的。先前「CartoonSegmentation 的 ONNX int8 版會過度覆蓋、把泡吃掉」那條，在裝置上已不跑 ONNX 之後就無關了。
 - **聯集一頁 1.2～1.4 s**（測試機 Snapdragon 8 Gen 3），權重 146 MB。
 
@@ -158,14 +163,15 @@ val charMask = Mask(w, h, BooleanArray(w * h) { a[it] || b[it] })
 - 只要分段計時的呼叫端讓回呼實作 `NightReadStageTimer`：段名與順序不變，遮罩計數那幾段的值送 0（不算那十來次整頁掃描）。
 - 頁內並行（2026-10-06）：`render(input, p, debug, parallel)`、`renderTiers(input, tiers, debug, parallel, sink)` 多一個 `Executor`。分析裡彼此獨立的分支（人物收邊平滑、場景曲線、灰圈證據、貼紙計畫）與「更多」的背景物件量測丟給它跑，主執行緒用到時才等（2026-10-07 起，量測裡只有部分頁用得到的物件證據、長線帶、人物旁淡線外圈、調子邊緣改成合成時在主執行緒上、只在用得到的地方算）；分支還沒開始就由主執行緒自己跑，所以池子小、滿或拒收都不會乾等。輸出與依序版逐位元相同；`null`（舊的多載）＝依序。中斷跟依序版一樣不理會：主執行緒等分支時被中斷照等，回傳前把中斷旗標補回去。代價是 heap 尖峰：2.6 MPx 頁約多 11–27 MB（最多約 10.4 B/px，跟排程有關），所以多頁並行、heap 預算緊的時候通常不划算；開了每頁至少估 70 B/px（見 `docs/DECISIONS.md`「加速四批」）。
 - 產生 `charMask` 的分割器不歸這個模組管。在 yakuyomi-engine 裡它們各持一個 NCNN net、都是 `AutoCloseable`：建一次、跨頁重複用、用完 close。
+- 耗時：一次分析產兩檔，桌面 JVM 單緒每頁約 1.3 s（65 頁平均），Snapdragon 8 Gen 3 的 debug 版約 7 s（由桌面 debug 代理估算）；人物遮罩在手機上另加 1.2～1.4 s。各批數字見 `docs/DECISIONS.md`「加速第五批」。
 
 ## 參數
 
-`NightReadParams` 是一個 data class，裝著這個模組的 125 個參數，外加四組巢狀參數：任意角度格溝 `sep: SeparatorParams`（57 個）、出血格過濾 `bleed: BleedParams`（28 個）、漏泡封縫 `bubbleSeal: BubbleSealParams`（6 個）與「更多」新規則 A2 `more: MoreRuleParams`（19 個），合計 235 個。預設值就是定案值。巢狀是不得已：平鋪進來建構子會超過 JVM 的 255 個參數槽（`Double` 佔兩槽），類別載入就 `ClassFormatError`。逐項說明見 [`docs/PARAMETERS_zh.md`](../docs/PARAMETERS_zh.md)，那份涵蓋整條管線；沒進 `NightReadParams` 的在模組外面——偵測遮罩的二值化門檻、只用於回報的白面積統計門檻、偽泡生長的參照邊（Kotlin 版固定取長邊），以及純研究開關 `BUBBLE_REQUIRE_CLEAN`。
+`NightReadParams` 是一個 data class，本體 132 個參數，外加六組巢狀：任意角度格溝 `sep: SeparatorParams`（57）、出血格過濾 `bleed: BleedParams`（28）、漏泡封縫 `bubbleSeal: BubbleSealParams`（6）、「更多」新規則 A2 `more: MoreRuleParams`（19）、人物外灰圈收細 `ring: RingParams`（23）、「更多」背景物件規則 `obj: ObjectRuleParams`（72，裡面再巢狀效果線 `fx: EffectLineParams`，42），合計 379 個。預設值就是定案值。巢狀是不得已：平鋪進來建構子會超過 JVM 的 255 個參數槽（`Double` 佔兩槽），類別載入就 `ClassFormatError`。逐項說明見 [`docs/PARAMETERS_zh.md`](../docs/PARAMETERS_zh.md)，那份涵蓋整條管線；沒進 `NightReadParams` 的在模組外面——偵測遮罩的二值化門檻、只用於回報的白面積統計門檻、偽泡生長的參照邊（Kotlin 版固定取長邊），以及純研究開關 `BUBBLE_REQUIRE_CLEAN`。
 
 改它等於改演算法，不是調風格。門檻之間是連動的：分區方案建立在白元件的判斷上，動了前面一段的值，後面每一段都會跟著變。
 
-唯一設計成給呼叫端設的一組是**背景填黑三檔**（多少白該黑；`docs/PARAMETERS_zh.md`「背景填黑三檔」）：`stickerMode`（`StickerMode.ALL`／`SIMPLE`／`PLAIN`）、`stickerRoughMax`、`stickerSimpleMinFrac`、`stickerPlainRingR`、`stickerPlainArtMax`、`stickerPlainFrameDil`、`stickerPlainFaintMax`、`stickerPlainFaintHalo`、`pseudoBubbles`、`harmonize`。預設（`ALL`、兩個開關都開）＝研究端完整管線，fixture 與守護框基線釘在這上面；產品三檔是呼叫端傳進來的參數組：
+設計成給呼叫端設的有兩組。一是輸出亮度（`bg`、`ink`、`edgeInk`、`strokeObjV`、`dimCeil`、`glowCap`；見 `docs/PARAMETERS_zh.md`「輸出位準」）：Yakuyomi 的亮度預設與滑桿就是設在 base `NightReadParams` 上。二是**背景填黑檔位**（多少白該黑；`docs/PARAMETERS_zh.md`「背景填黑三檔」）：`stickerMode`（`StickerMode.ALL`／`SIMPLE`／`PLAIN`）、`stickerRoughMax`、`stickerSimpleMinFrac`、`stickerPlainRingR`、`stickerPlainArtMax`、`stickerPlainFrameDil`、`stickerPlainFaintMax`、`stickerPlainFaintHalo`、`pseudoBubbles`、`harmonize`。預設（`ALL`、兩個開關都開）＝研究端完整管線，fixture 與守護框基線釘在這上面；三檔是呼叫端傳進來的參數組：
 
 | 檔 | `NightReadParams(...)` |
 |---|---|
@@ -200,6 +206,14 @@ val charMask = Mask(w, h, BooleanArray(w * h) { a[it] || b[it] })
 
 漏泡封縫（`bubbleSeal`，半徑 `r = 1`；研究端 `NIGHTREAD_BUBBLE_SEAL_R`）三檔也一律開：泡只因框上 1–2 px 的縫與背景連在一起而被拒時，
 把縫封起來、再走一次泡路徑，救回的只進泡的重繪層。`BubbleSealParams(r = 0)`＝加入前的輸出。見 `docs/PARAMETERS_zh.md`「漏泡封縫」。
+
+## 規則版本
+
+`NightRead.RULES_VERSION`（現在是 4）：同一頁、同一組亮度，產品兩檔的成品只要會變就加 1。呼叫端把它跟每頁夜讀檔一起記下，版本較舊的頁就是舊版、可重新產生。`RulesVersionGuardTest` 每個版本記一個 SHA-256 摘要，涵蓋產品兩檔在一組 fixture 頁上的成品（版本 4 起八頁，其中兩頁是合成頁），輸出變了卻沒加版本就失敗；已交出的版本凍結。歷史與規則見 `docs/DECISIONS.md`「規則版本」。
+
+## 測試
+
+`./gradlew :nightread:testDebugUnitTest` 跑全部 JVM 測試：原語與整頁對 Python fixture 的 parity、三檔基線、規則版本守門、頁內並行、熱點計時。`-PtestGroup=fast|guard|parallel|profile` 只跑一組；CI（`.github/workflows/ci.yml`）在 push 到 `main` 與每個 PR 時四組平行跑。測試 JVM 要 1 GB heap（設在 `build.gradle.kts`）。
 
 ## 紅線
 

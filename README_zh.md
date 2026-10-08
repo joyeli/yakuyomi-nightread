@@ -14,8 +14,10 @@
 
 ![重建的六個階段](docs/img/showcase.webp)
 
-**現況：桌面研究。** 還沒有東西上機。管線已經收斂——1351 行 Python、688 個計分的守護框裡 11 框違規
-——剩下的是 Kotlin 移植。所有決策與當前數字見 [`docs/DECISIONS.md`](docs/DECISIONS.md)。
+**現況：已上機。** `nightread/` 的 Kotlin 移植已完成，有對 Python 規格的 parity 測試；隨 Yakuyomi 0.23.0
+（2026-10-08）出貨，經 yakuyomi-engine 的 `:nightread-android` 接進閱讀器。產品兩檔：標準、更多；目前規則
+版本 4。688 個計分的守護框裡，完整管線 11 框違規、產品兩檔各 10 框（Kotlin 函式庫 11／9／9）。所有決策與
+當前數字見 [`docs/DECISIONS.md`](docs/DECISIONS.md)。
 
 ## 為什麼是重繪，不是濾鏡
 
@@ -35,10 +37,12 @@
 
 這節講的是 Yakuyomi 自己怎麼用夜讀。管線本身不要求翻譯，下面的順序是產品決策。
 
-夜讀接在翻譯之後，吃的是已經貼好譯文的成品頁；在翻譯前算，夜讀看到的是原文，譯文貼上去就成了
-黑字壓在黑底上。因此 OCR、翻譯、去字、排版這些翻譯的大宗成本全部省掉，成品頁只要重跑偵測，
-再加一份夜讀專屬的人物遮罩（引擎裡兩顆 NCNN fp16 模型，合計 146 MB：YOLO11-seg 20.4 MB 加
-CartoonSegmentation 126 MB）。偵測省不掉是量過才定的：連偵測一起省、改用排版器自己畫的精確筆畫，指標反而最好
+夜讀不需要翻譯：沒翻譯的章下載完就能產生夜讀版。翻譯過的章則接在翻譯之後，吃的是已經貼好譯文的
+成品頁；在翻譯前算，夜讀看到的是原文，譯文貼上去就成了黑字壓在黑底上。因此 OCR、翻譯、去字、排版
+這些翻譯的大宗成本全部省掉，成品頁只要重跑偵測，再加一份夜讀專屬的人物遮罩（引擎裡兩顆 NCNN fp16
+模型，合計 146 MB：YOLO11-seg 20.4 MB 加 CartoonSegmentation 126 MB）。產品還會從翻譯素材多帶兩樣
+進來：原文字框（與重跑 DBNet 的結果取聯集，譯後的短中文常常偵測不到），以及規則版本 4 起的去字遮罩
+（`NightReadInput.inpaintMask`）。偵測省不掉是量過才定的：連偵測一起省、改用排版器自己畫的精確筆畫，指標反而最好
 （字 239.3、對比 +223.2），卻被看圖否決。精確筆畫當不了氣泡核心
 填色的種子（某顆泡的偵測文字區覆蓋 90%，精確筆畫只有 32% 是黑），泡會填不滿、右下角留一塊灰；
 裝飾性的手寫字又完全不在任何文字區內，排版器只知道自己畫了什麼，看不到沒被翻譯的字，整顆泡會
@@ -109,8 +113,8 @@ Detector(dir.resolve("dbnet_detect.ncnn.param").path).use { detector ->
 
 這套測試存在的理由是**目視驗證被證明不可靠**——看過裁圖說「完整」的區域，逐框量測後全被推翻。
 
-要達到紅線必須有人物語意遮罩。純幾何最好也只能到 37 框違規，還要付 14 個百分點的亮區代價；
-有遮罩之後同一條管線是 18 框。
+要達到紅線必須有人物語意遮罩。純幾何最好也只能到 37 框違規（當時的 665 框），還要付 14 個百分點的
+亮區代價；有遮罩之後，完整管線現在是 688 個計分框裡 11 框。
 
 ## 佈局
 
@@ -119,14 +123,17 @@ Detector(dir.resolve("dbnet_detect.ncnn.param").path).use { detector ->
 | `research/nightread.py` | 整條管線，一次一頁。所有參數集中在檔頭一個區塊。 |
 | `research/nightread_sep.py` | 任意角度格溝／頁邊偵測（兩條近平行框線夾住的白＝溝），compose 在人物之上塗它。 |
 | `research/nightread_bleed.py` | 出血格過濾：留白帶裡外圈碰到畫的塊拿掉（天空、地面不再被切成鋸齒黑塊）。 |
+| `research/nightread_ring.py` | 人物外灰圈收細：有畫出輪廓線把背景與人物隔開的地方，黑長到線。 |
+| `research/nightread_obj.py` + `nightread_fx.py` | 「更多」背景物件規則，以及不算物件的效果線與閃光。 |
 | `research/charmask.py` | 人物遮罩探針（CartoonSegmentation、YOLO11-seg、兩者聯集）。它的輸出是管線的**必要輸入**。 |
 | `research/nightread_batch.py` | 跑 11 張 fixture、印亮區表。 |
 | `research/nightread_guard.py` + `nightread_guard.json` | 紅線測試：732 個人工標註前景框。 |
 | `research/nightread_translated.py` | 譯文頁的素材共用驗證：對翻譯引擎的成品頁跑夜讀，比較三種偵測素材共用配方。 |
 | `research/make_showcase.py` | 六階段成果展示圖。 |
-| `research/pipeline_diagram.py` | 本頁上方那張管線階段圖。 |
-| `fixtures/pages/` | 11 張測試頁。`fixtures/baseline/` 是回歸用的參考輸出。 |
-| `nightread/` | Kotlin library。整條管線已經移植完成，並通過對 Python fixture 的 parity 測試。Android library，**不依賴 `android.graphics`、也不綁任何推論框架**；原始碼只 import `kotlin.math`，所以測試在一般 JVM 上就跑得起來。接法見 [`nightread/README_zh.md`](nightread/README_zh.md)。 |
+| `research/pipeline_diagram.py` | 「為什麼是重繪」一節那張管線階段圖。 |
+| `research/make_*_fixture.py` | 重產 `nightread/src/test/resources/` 的 Kotlin 測試資源。 |
+| `fixtures/pages/` | 11 張測試頁。`fixtures/charmask/` 是 11 頁的人物遮罩。`fixtures/baseline/tiers/<L1\|L2\|L3\|MORE>/` 是 TierParityTest 比對的各檔參考輸出；`fixtures/baseline/` 最上層的 `*_final.png` 是 2026-09-17（dab92ab）的完整管線輸出，之後沒再更新。 |
+| `nightread/` | Kotlin library。整條管線已經移植完成，並通過對 Python fixture 的 parity 測試。Android library，**不依賴 `android.graphics`、也不綁任何推論框架**；原始碼只用 Kotlin 與 JDK 標準庫（`kotlin.math`、`java.math`、`java.util.concurrent`），所以測試在一般 JVM 上就跑得起來。接法見 [`nightread/README_zh.md`](nightread/README_zh.md)。 |
 | `docs/` | 架構、參數表、決策記錄。 |
 
 人物遮罩的推論不在這個 repo。Yakuyomi 是在 [yakuyomi-engine](https://github.com/joyeli/yakuyomi-engine)
@@ -142,8 +149,12 @@ Python `onnxruntime` 跑 `.onnx` 匯出檔，那是 NCNN 移植拿來對照的�
 用它 `parity/` 的同一套 Python 環境即可。
 
 這個依賴屬於腳本，不屬於管線：腳本是拿引擎的 DBNet 產出 `seg` 與 `regions`。這兩樣自己準備好，
-就完全用不到引擎。`run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None)`
+就完全用不到引擎。`run_page(page_path, outdir=OUT_DEFAULT, col_w=1000, regions=None, seg=None, diag=None, inpaint=None)`
 兩個都傳進去就跳過偵測，形狀與 Kotlin 的 `NightReadInput` 相同。
+
+11 張測試頁的人物遮罩已經放在 `fixtures/charmask/`，設 `NIGHTREAD_CHARMASK=$PWD/../fixtures/charmask` 就可跳過
+第 1 步；要重產得把 `cartoonseg.onnx`、`manga_seg_s.onnx` 放進 `research/out/models/`，並裝 Python `onnxruntime`。
+套件見 `research/requirements.txt` 加引擎 `parity/` 的環境。
 
 ```bash
 cd research
@@ -158,7 +169,8 @@ NIGHTREAD_CHARMASK=$PWD/out/char_combine python3 nightread_batch.py -o out/run
 python3 nightread_guard.py out/run
 ```
 
-`NIGHTREAD_CHARMASK` 是唯一的環境變數。其餘參數都在檔案裡改，這樣每次跑都能從原始碼重現。
+必要的環境變數只有 `NIGHTREAD_CHARMASK`；產品檔位與各規則的開關也走環境變數（見
+[`docs/PARAMETERS_zh.md`](docs/PARAMETERS_zh.md) 開頭），其餘參數在檔案裡改，這樣每次跑都能從原始碼重現。
 
 ## 授權
 

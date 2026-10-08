@@ -50,18 +50,19 @@ flowchart TB
 
     subgraph SYN [Rebuild: how each region is drawn]
         direction TB
-        SC[scene curve<br/><small>linear, order-preserving</small>] --> GUT[fill the gutter]
+        FT[fill-level filter<br/><small>Standard / More choose which white goes black</small>] --> SC[scene curve<br/><small>linear, order-preserving</small>]
+        SC --> GUT[fill the gutter<br/><small>+ any-angle separators, bleed-panel filter</small>]
         GUT --> STK[sticker-style background<br/><small>fill dark + white outline on the figure</small>]
         STK --> OBJ[background-object rule, More only<br/><small>veto white between objects, blacken object-free light background</small>]
         OBJ --> BB[bubbles<br/><small>dark ground, strokes lit</small>]
-        BB --> PB[pseudo-bubbles<br/><small>open bubbles, text over art</small>]
-        PB --> HM[head-tone harmonization]
+        BB --> PB[pseudo-bubbles<br/><small>open bubbles, text over art<br/>full pipeline only, off in Standard and More</small>]
+        PB --> HM[head-tone harmonization<br/><small>full pipeline only, off in Standard and More</small>]
         HM --> RST[residual fill<br/><small>the ring outside the bubble frame</small>]
         RST --> RNG[ring thinning<br/><small>black grows to drawn outlines</small>]
         RNG --> RES[restore characters + anti-aliasing]
     end
 
-    ANA --> SC
+    ANA --> FT
     RES --> OUT([dark page])
 ```
 
@@ -127,7 +128,9 @@ keep only the wide region still connected to the text, then reclaim back to the 
 through a gap in the bubble outline, and face white connected in through the seam at a chin, are both cut off
 at the neck — geometric protection, not threshold protection.
 
-There is one more area ratio: the bubble core may not exceed 2.5 times the square of the text box's long side.
+There is one more area ratio: the bubble core may not exceed 6 times the square of the text box's long side
+(2.5 until 2026-09-26: on translated pages a long Japanese line becomes two to four Chinese characters, the text
+box shrinks, and real bubbles were rejected).
 A real bubble is packed with text; a component where text sits on a cheek is a whole sheet of skin. The
 denominator is the long side squared rather than the text box area, because a single vertical line of text has
 a box only one line wide, and the area form would blow past the ratio spuriously.
@@ -204,7 +207,8 @@ two pixels only. That kills the jaggies without producing a gradient the origina
 
 ## Where it sits in the product
 
-Night reading is downstream of translation, not a parallel branch.
+For a translated page night reading is downstream of translation; an untranslated page goes straight from the
+source to night reading.
 
 **Order: night reading runs after translation finishes.** What it processes is the finished page with the
 translated text already typeset onto it, not the original. Computed before translation, night reading sees the
@@ -228,10 +232,11 @@ because 60.4% of the pixels in that mask are the bubble white around the glyphs 
 readability means filtering the non-stroke pixels out first.
 
 **What can be borrowed from translation.** Saved: OCR, translation, text removal and typesetting, which is the
-bulk of translation's cost. Not saved: **detection**. The character mask is night reading's own cost, about
-10.5 MB if only YOLO11-seg is used (nine more guard-box
-violations), or 238 MB with CartoonSegmentation alongside it. CartoonSegmentation cannot be quantized:
-its int8 build needs the score threshold dropped far enough that the mask over-covers and eats bubbles.
+bulk of translation's cost. Not saved: **detection**. The character mask is night reading's own cost: two NCNN
+fp16 models, 146 MB together (YOLO11-seg 20.4 MB, CartoonSegmentation 126 MB), about 1.2–1.4 s per page on the
+test device. YOLO11-seg alone also works, with more guard-box violations (18 → 25 when measured, 2026-09-21).
+int8 is out: CartoonSegmentation comes out of `ncnn2int8` producing no instances, and YOLO11-seg int8 saves only
+7%.
 
 **Why detection cannot be saved.** Three recipes, measured:
 
@@ -255,8 +260,11 @@ mask cannot give. It is a region rather than strokes, so it can serve directly a
 all of the text.
 
 B and A come out identical, because one DBNet forward pass produces the region and the stroke mask together,
-so sharing the text regions saves no time. There is no reason to store extra material for sharing's sake
-either.
+so sharing the text regions saves no time. Detection is still rerun, but two things from the translation
+material are now passed in as well (2026-09-26 and rules version 4): the original text boxes, unioned with
+DBNet's regions, because short translated text is often not detected again; and the inpaint mask, so small
+clean blocks left by inpainting are not painted in More. The reader saves both per page while night reading is
+on.
 
 **The settled product shape.**
 
@@ -264,6 +272,8 @@ either.
 flowchart LR
     SRC([source page]) --> TR[translation<br/><small>detection → OCR → translate → text removal → typeset</small>]
     TR --> DAY([finished page])
+    SRC -->|untranslated| NR
+    TR -.->|text boxes, inpaint mask| NR
     DAY --> NR[night reading<br/><small>detection → character mask → region-wise rebuild</small>]
     NR --> NIGHT([night version])
     DAY <-->|switch: swap the file pointer, zero computation| NIGHT
@@ -272,15 +282,15 @@ flowchart LR
 The night version and the normal version switch freely, because both are images that have already been
 computed.
 
-**All three fill levels are produced at once.** The reader can switch between L1, L2 and L3 while reading, so
-generation has to have all three ready. `NightRead.render` is split into a level-independent analysis
+**Both product levels are produced at once.** The reader switches between Standard (L2) and More (L3) while
+reading, so generation prepares both; L1 stays for research. `NightRead.render` is split into a level-independent analysis
 (`analyze`: paper white, character mask, frame lines, white components, bubbles and leak sealing, the sticker
 plan, the scene curve, any-angle separators) and a per-level composition (`composeTier`: the fill-level filter,
-gutter band, stickers, bubbles, residual fill, character restore). `render` is exactly analyze → filter →
+gutter band, stickers, background-object rule (More), bubbles, residual fill, ring thinning, character restore). `render` is exactly analyze → filter →
 compose, so there is one code path. `renderTiers` runs the analysis once and streams the levels one at a time
-to a sink; a level whose kept-component set equals the previous level's is not composed at all and arrives as
-null, because the output depends on the levels only through that set. The three parameter sets come from
-`NightTier.apply(base)`. Each level's output is bit-for-bit identical to a single-level `render`, and the
+to a sink; a level whose composition key (keep, promoted components, the keep before A2, and More's drawing
+settings) matches the previous level's is not composed and arrives as null, because the output depends on the
+levels only through that key. The parameter sets come from `NightTier.apply(base)`. Each level's output is bit-for-bit identical to a single-level `render`, and the
 lowest heap the streaming version runs in is the same as for one level. The independent analysis branches can
 run on an `Executor` the caller supplies (intra-page parallelism: same output, higher peak heap; see "加速四批" in
 DECISIONS).
@@ -298,8 +308,9 @@ overturned once every box was measured. Eyeballing does not count; the numbers d
 
 ## Layer priority
 
-Manga stacks as **text > bubble > character > background**. Text and bubbles sit on top, so they outrank
-protecting the character.
+Manga stacks as **text > bubble > gutter/margin > character > background**. Text and bubbles sit on top, so
+they outrank protecting the character. Gutters and page margins found by the any-angle separators are painted
+over the character mask (2026-09-27).
 
 The principle cannot be implemented bluntly. Simply letting the bubble beat the character breaks 17 guard
 boxes, because the bubble mask overflows: when text is written on a face, the mask grows from the text out
@@ -328,27 +339,29 @@ Two implementations do work:
 | Metric | Value |
 |---|---|
 | Guard-box violations | Python: full pipeline 11 / 688; product "Standard" (L2) 10; product "More" (L3 + rule A2) 10; L1 10; L3 without A2 10. Kotlin: 11 / 9 / 9 (full / Standard / More). 2026-10-03, after the guard-box redraw |
-| Light area (share of the output at ≥110) | 38.6% |
-| Pipeline | 1351 lines of Python |
+| Light area (share of the output at ≥110) | 38.0% (mean per page over the 11 fixtures, full pipeline, 2026-10-08) |
+| Pipeline | Rules version 4; Kotlin library in production since Yakuyomi 0.23.0 |
 
 ## Desktop research and the device port
 
 | | Research (`research/`, Python) | Device (`nightread/`, Kotlin) |
 |---|---|---|
-| Role | the spec, and acceptance | the future product |
+| Role | the spec, and acceptance | the product library |
 | Stack | numpy / cv2 / onnxruntime | Kotlin only: no inference framework, no `android.graphics` |
-| State | converged, bit-for-bit reproducible | only the API contract in `Cv.kt` |
+| State | converged, bit-for-bit reproducible | complete; parity tests against the Python fixtures; rules version 4, guarded by `RulesVersionGuardTest` |
 
-Python is the spec. The Kotlin port is accepted by comparing it bit for bit against the same fixtures, which
-is also why `nightread/` deliberately avoids `android.graphics`: JVM tests have to be able to run it.
+Python is the spec. The Kotlin port is accepted by parity tests against the same fixtures: many stages and
+masks must match pixel for pixel, whole pages within a small tolerance (Python's distance transform is a chamfer
+approximation, Kotlin's is exact Euclidean). That is also why `nightread/` deliberately avoids
+`android.graphics`: JVM tests have to be able to run it.
 
 The model recipe for the device is settled: the character mask is the union of two NCNN fp16 models, 146 MB
 together, CartoonSegmentation's RTMDet-Ins (`cartoonseg.ncnn`, 126 MB) and YOLO11-seg (`manga_seg_s.ncnn`,
 20.4 MB), at about 1.2–1.4 s per page on the test device. int8 was measured and rejected: the cseg graph comes
 out of `ncnn2int8` producing zero instances (a toolchain failure, not calibration), and YOLO11-seg int8 saves
 7% on a mask that already takes 0.4 s. The inference lives in yakuyomi-engine's `:nightread-android` module (`CsegSegmenter`,
-`YoloSegSegmenter`), not here: this library only consumes the mask. Detection reuses the engine's existing
-DBNet, so it costs nothing extra.
+`YoloSegSegmenter`), not here: this library only consumes the mask. Detection reuses the engine's DBNet, so it costs no extra space
+for someone who also translates; night reading alone downloads it too (about 153 MB).
 
 The API is aligned too: `run_page` in `research/nightread.py` takes `regions` and `seg` parameters, and
 supplying them from outside skips detection, the same shape as `NightReadInput` on the Kotlin side. On translated pages both
@@ -359,16 +372,24 @@ the rebuild.
 ## Repo layout
 
 ```
-research/           desktop pipeline (the spec)
-  nightread.py        the whole pipeline, one page at a time
-  nightread_sep.py    any-angle gutters and margins
-  nightread_bleed.py  bleed-panel filter
-  nightread_batch.py  run the 11 fixture pages, print the light-area table
-  nightread_guard.py  the red-line test: 732 guard boxes
-  charmask.py         character-mask probe (cseg / yoloseg / union)
-  make_showcase.py    six-stage result sheet
-fixtures/pages/     the 11 test pages
-fixtures/baseline/  current outputs, for regression
-nightread/          the future Kotlin library (only the API contract so far)
-docs/               this file, the parameter reference, the decision record
+research/              desktop pipeline (the spec)
+  nightread.py           the whole pipeline, one page at a time
+  nightread_sep.py       any-angle gutters and margins
+  nightread_bleed.py     bleed-panel filter
+  nightread_ring.py      character ring thinning
+  nightread_obj.py       "More" background-object rule
+  nightread_fx.py        effect lines and sparkles
+  nightread_batch.py     run the 11 fixture pages, print the light-area table
+  nightread_guard.py     the red-line test: 732 guard boxes
+  nightread_translated.py  night reading on translated pages: the three detection-material recipes
+  charmask.py            character-mask probe (cseg / yoloseg / union)
+  make_showcase.py       six-stage result sheet
+  pipeline_diagram.py    the pipeline-stage figure
+  make_*_fixture.py      Kotlin test resources
+fixtures/pages/        the 11 test pages
+fixtures/charmask/     their character masks
+fixtures/baseline/     tiers/: per-level baselines for TierParityTest
+nightread/             the Kotlin library (production)
+.github/workflows/     CI: build + JVM tests
+docs/                  this file, the parameter reference, the decision record
 ```

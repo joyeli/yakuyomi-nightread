@@ -45,18 +45,19 @@ flowchart TB
 
     subgraph SYN [重建：每一塊怎麼畫]
         direction TB
-        SC[場景曲線<br/><small>線性壓暗，保序</small>] --> GUT[留白填深]
+        FT[檔位篩選<br/><small>標準／更多決定哪些白要黑</small>] --> SC[場景曲線<br/><small>線性壓暗，保序</small>]
+        SC --> GUT[留白填深<br/><small>＋任意角度格溝、出血格過濾</small>]
         GUT --> STK[貼紙式背景<br/><small>填黑 + 前景白描邊</small>]
         STK --> OBJ[背景物件規則（只有「更多」）<br/><small>否決夾在物件間的白、塗無物件的亮背景</small>]
         OBJ --> BB[氣泡<br/><small>深底、筆畫畫亮</small>]
-        BB --> PB[偽泡<br/><small>開口泡／字壓畫面</small>]
-        PB --> HM[人頭一致化]
+        BB --> PB[偽泡<br/><small>開口泡／字壓畫面<br/>只有完整管線，標準與更多都關</small>]
+        PB --> HM[人頭一致化<br/><small>只有完整管線，標準與更多都關</small>]
         HM --> RST[剩餘填色<br/><small>泡框外那一圈</small>]
         RST --> RNG[灰圈收細<br/><small>有輪廓線處黑長到線</small>]
         RNG --> RES[人物還原 + 抗鋸齒]
     end
 
-    ANA --> SC
+    ANA --> FT
     RES --> OUT([暗色頁])
 ```
 
@@ -105,7 +106,8 @@ CartoonSegmentation 與 YOLO11-seg 兩個實例分割模型的聯集。
 從字框內的白出發，開運算切掉窄頸，只留與字連通的寬闊區，再往墨線回收。泡框缺口漏出的背景、
 經下巴縫連進來的臉白都在頸口被切斷，是幾何保護不是門檻保護。
 
-還有一道面積比：泡核心不得超過字框長邊平方的 2.5 倍。真泡的字塞得滿，字壓在臉頰上的元件
+還有一道面積比：泡核心不得超過字框長邊平方的 6 倍（2026-09-26 前是 2.5：譯後頁的日文長句翻成 2–4 字中文，
+字框變小，真泡被拒收）。真泡的字塞得滿，字壓在臉頰上的元件
 則是整片皮膚。分母用長邊平方而不是字框面積，是因為單行直排的字框只有一行寬，用面積會假性爆表。
 
 **漏泡封縫。** 泡框上 1–2 px 的縫會讓泡內的白和縫外的格內背景連成同一個元件，整顆泡因「太大」或「屬於留白／格內白」
@@ -154,7 +156,7 @@ alpha 做混合，只在 1 到 2 像素內過渡。這消掉鋸齒又不會產�
 
 ## 在產品裡的位置
 
-夜讀是翻譯的下游，不是平行分支。
+譯後頁的夜讀接在翻譯下游；沒翻譯的頁直接從原圖跑夜讀。
 
 **順序：翻譯完成之後才跑夜讀。** 夜讀處理的是已經貼好譯文的成品頁，不是原圖。如果在翻譯前算，
 夜讀看到的是原文，譯文貼上去之後就是黑字壓在黑底上，完全讀不出來。
@@ -174,9 +176,9 @@ alpha 做混合，只在 1 到 2 像素內過渡。這消掉鋸齒又不會產�
 是字周圍的泡白不是筆畫。量可讀性要先濾掉非筆畫像素。
 
 **哪些能從翻譯借。** 省得掉的是 OCR、翻譯、去字、排版，也就是翻譯的大宗成本。省不掉的是
-**偵測**。人物遮罩則是夜讀專屬，成本看配方：只用 YOLO11-seg 的 int8 版是 10.5 MB（代價是多九框
-違規），加上 CartoonSegmentation 則是 238 MB。CartoonSegmentation 量化不得——它的 int8 版要把分數
-門檻降到遮罩過度覆蓋，泡會被當成人物吃掉。
+**偵測**。人物遮罩是夜讀專屬成本：兩顆 NCNN fp16 模型合計 146 MB（YOLO11-seg 20.4 MB、
+CartoonSegmentation 126 MB），測試機一頁約 1.2～1.4 s。只用 YOLO11-seg 也能跑，守護框違規較多
+（2026-09-21 量 18 → 25）。int8 不用：CartoonSegmentation 過 `ncnn2int8` 後零實例，YOLO11-seg int8 只省 7%。
 
 **偵測為什麼省不掉。** 三種配方的實測：
 
@@ -196,8 +198,9 @@ alpha 做混合，只在 1 到 2 像素內過渡。這消掉鋸齒又不會產�
 結論：DBNet 的 seg 有兩個夜讀依賴的性質，排版器的精確遮罩都給不了。它是區域不是筆畫，
 所以能直接當填色種子；而且它涵蓋所有文字。
 
-B 與 A 完全同值，因為 DBNet 一次前向同時給區域與筆畫遮罩，共用文字區省不到時間。所以也不必
-為了共用而多存素材。
+B 與 A 完全同值，因為 DBNet 一次前向同時給區域與筆畫遮罩，共用文字區省不到時間。偵測照樣重跑，
+但現在另外帶兩樣翻譯素材（2026-09-26 與規則版本 4）：原文字框，與 DBNet 的文字區取聯集，因為譯後的
+短中文常常重測不到；以及去字遮罩，讓「更多」不去塗去字留下的乾淨小塊。閱讀器在夜讀開著時逐頁存這兩樣。
 
 **定案的產品形狀。**
 
@@ -205,6 +208,8 @@ B 與 A 完全同值，因為 DBNet 一次前向同時給區域與筆畫遮罩�
 flowchart LR
     SRC([原圖]) --> TR[翻譯<br/><small>偵測 → OCR → 翻譯 → 去字 → 排版</small>]
     TR --> DAY([成品頁])
+    SRC -->|未翻譯| NR
+    TR -.->|字框、去字遮罩| NR
     DAY --> NR[夜讀<br/><small>偵測 → 人物遮罩 → 分區重繪</small>]
     NR --> NIGHT([夜讀版])
     DAY <-->|切換：換檔案指標，零計算| NIGHT
@@ -212,11 +217,12 @@ flowchart LR
 
 夜讀與正常版可以隨意切換，因為兩個版本都是已經算好的圖。
 
-**三檔一次產生。** 閱讀中可以在 L1／L2／L3 之間即時切換，所以產生時三檔都要備好。`NightRead.render` 拆成與檔位無關的
+**兩檔一次產生。** 閱讀中可以在「標準」（L2）與「更多」（L3）之間即時切換，所以產生時兩檔都要備好；L1 只留給研究。`NightRead.render` 拆成與檔位無關的
 分析（`analyze`：紙白、人物遮罩、格線、白元件、泡與封縫、貼紙計畫、場景曲線、任意角度格溝）和每檔各做的合成
-（`composeTier`：三檔篩選、留白帶、貼紙、泡、剩餘填色、人物還原）。`render` 就是「分析 → 篩選 → 合成」，全庫只有一條
-程式路徑。`renderTiers` 分析一次、一檔一檔串流交給 sink；某檔留下的元件集合（keep）跟前一檔相同就不合成、傳 null——
-輸出只經由這個集合跟檔位有關，所以那一檔必定跟前一檔相同。三檔參數由 `NightTier.apply(base)` 產生。每檔輸出與單檔
+（`composeTier`：三檔篩選、留白帶、貼紙、背景物件規則（更多）、泡、剩餘填色、灰圈收細、人物還原）。`render` 就是「分析 → 篩選 → 合成」，全庫只有一條
+程式路徑。`renderTiers` 分析一次、一檔一檔串流交給 sink；某檔的合成鍵（keep、擢升元件、加 A2 前的 keep、「更多」的繪製設定）
+跟前一檔相同就不合成、傳 null——輸出只經由這個鍵跟檔位有關，所以那一檔必定跟前一檔相同。各檔參數由
+`NightTier.apply(base)` 產生。每檔輸出與單檔
 `render` 逐位元相同，串流版能跑的最低 heap 與單檔相同。分析裡彼此獨立的分支可以交給呼叫端給的 Executor 並行（頁內並行，
 輸出不變、heap 尖峰較高；見 DECISIONS「加速四批」）。
 
@@ -231,8 +237,8 @@ flowchart LR
 
 ## 圖層優先權
 
-漫畫的疊法是 **字 > 對話框 > 人物 > 背景**。壓在最上面的是字和對話框，所以它們的權重比
-保護人物更高。
+漫畫的疊法是 **字 > 對話框 > 格溝／頁邊 > 人物 > 背景**。壓在最上面的是字和對話框，所以它們的權重比
+保護人物更高。任意角度格溝找到的格溝與頁邊壓過人物遮罩（2026-09-27）。
 
 這條原則不能粗暴實作。單純讓「泡贏過人物」會弄壞 17 個守護框，因為泡遮罩會溢出：字寫在臉上時，
 泡遮罩會從字一路長到整片白皮膚。分辨真泡與溢出的三種判準（離字距離、邊界墨線比、泡全贏）
@@ -254,25 +260,26 @@ flowchart LR
 | 指標 | 值 |
 |---|---|
 | 守護框違規 | python：完整管線 11 / 688；產品「標準」（L2）10；產品「更多」（L3＋新規則 A2）10；L1 10；不加 A2 的 L3 10。Kotlin：11／9／9（完整管線／標準／更多）。2026-10-03，守護框重畫後 |
-| 亮區（成品 ≥110 的比例） | 38.6% |
-| 管線 | 1351 行 Python |
+| 亮區（成品 ≥110 的比例） | 38.0%（11 張 fixture 逐頁平均、完整管線，2026-10-08） |
+| 管線 | 規則版本 4；Kotlin 函式庫自 Yakuyomi 0.23.0 上線 |
 
 ## 桌面研究與上機的關係
 
 | | 研究端（`research/`，Python） | 上機（`nightread/`，Kotlin） |
 |---|---|---|
-| 角色 | 規格與驗收 | 未來的產品 |
+| 角色 | 規格與驗收 | 產品函式庫 |
 | 技術棧 | numpy / cv2 / onnxruntime | 純 Kotlin：不綁推論框架、無 `android.graphics` |
-| 現況 | 收斂，逐位元可重現 | 只有 `Cv.kt` 的 API 契約 |
+| 現況 | 收斂，逐位元可重現 | 整條移植完成；對 Python fixture 的 parity 測試；規則版本 4，`RulesVersionGuardTest` 守 |
 
-Python 是規格本。Kotlin 移植的驗收方式是對同一批 fixture 逐位元比對，這也是
-`nightread/` 刻意不依賴 `android.graphics` 的原因：JVM 測試才跑得起來。
+Python 是規格本。Kotlin 移植的驗收方式是對同一批 fixture 跑 parity 測試：許多階段與遮罩要逐像素相同，
+整頁則在小容差內（Python 的距離變換是 chamfer 近似、Kotlin 是精確歐氏）。這也是 `nightread/` 刻意不依賴
+`android.graphics` 的原因：JVM 測試才跑得起來。
 
 上機的模型配方已經定了：人物遮罩＝兩顆 NCNN fp16 模型取聯集，合計 146MB——CartoonSegmentation 的
 RTMDet-Ins（`cartoonseg.ncnn`，126MB）與 YOLO11-seg（`manga_seg_s.ncnn`，20.4MB），測試機一頁約
 1.2～1.4 s。int8 量過、判死：cseg 過 `ncnn2int8` 後零實例（工具鏈問題、不是校準），YOLO11-seg int8
 只在本來就 0.4 s 的遮罩上省 7%。推論在 yakuyomi-engine 的 `:nightread-android` 模組（`CsegSegmenter`、`YoloSegSegmenter`），
-不在這裡：這個 library 只吃遮罩。偵測沿用引擎既有的 DBNet，不另外花空間。
+不在這裡：這個 library 只吃遮罩。偵測沿用引擎的 DBNet，有用翻譯的人不另外花空間；只用夜讀的話它也要下載（約 153 MB）。
 
 API 也已經對齊：`research/nightread.py` 的 `run_page` 新增 `regions` 與 `seg` 參數，外部提供就
 跳過偵測，與 Kotlin 端的 `NightReadInput` 同形狀。譯後頁兩邊另外都吃翻譯素材的去字遮罩（`inpaint=`／`inpaintMask`，與頁同尺寸，
@@ -282,16 +289,24 @@ API 也已經對齊：`research/nightread.py` 的 `run_page` 新增 `regions` �
 ## Repo 佈局
 
 ```
-research/           桌面管線（規格）
-  nightread.py        整條管線，一次一頁
-  nightread_sep.py    任意角度格溝／頁邊
-  nightread_bleed.py  出血格過濾
-  nightread_batch.py  跑 11 張 fixture、印亮區表
-  nightread_guard.py  紅線測試：732 個守護框
-  charmask.py         人物遮罩探針（cseg / yoloseg / 聯集）
-  make_showcase.py    六階段成果展示圖
-fixtures/pages/     11 張測試頁
-fixtures/baseline/  現行輸出，回歸用
-nightread/          未來的 Kotlin library（目前只有 API 契約）
-docs/               這份文件、參數表、決策記錄
+research/              桌面管線（規格）
+  nightread.py           整條管線，一次一頁
+  nightread_sep.py       任意角度格溝／頁邊
+  nightread_bleed.py     出血格過濾
+  nightread_ring.py      人物外灰圈收細
+  nightread_obj.py       「更多」背景物件規則
+  nightread_fx.py        效果線與閃光
+  nightread_batch.py     跑 11 張 fixture、印亮區表
+  nightread_guard.py     紅線測試：732 個守護框
+  nightread_translated.py  譯後頁跑夜讀：三種偵測素材配方
+  charmask.py            人物遮罩探針（cseg / yoloseg / 聯集）
+  make_showcase.py       六階段成果展示圖
+  pipeline_diagram.py    管線階段圖
+  make_*_fixture.py      Kotlin 測試資源
+fixtures/pages/        11 張測試頁
+fixtures/charmask/     它們的人物遮罩
+fixtures/baseline/     tiers/：TierParityTest 的各檔基線
+nightread/             Kotlin library（產品用）
+.github/workflows/     CI：編譯＋JVM 測試
+docs/                  這份文件、參數表、決策記錄
 ```

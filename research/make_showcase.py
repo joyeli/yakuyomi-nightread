@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""make_showcase.py — 夜讀成果展示圖（5 階段）。
+"""make_showcase.py — 夜讀成果展示圖（6 格）。
 
 用途有二：**檢驗成果**（一眼看出哪頁哪個階段出問題）與 **GitHub 效果展示**。
 
-五個階段的敘事刻意這樣排：
+六格的敘事刻意這樣排：
   1. 原圖
   2. 管線看到什麼          ← 人物／氣泡／文字，說明這不是全域濾鏡
   3. 硬反相                ← **對照組一**：業界另一條路線。紙白參與構圖（臉的亮部、留白都用
@@ -14,9 +14,10 @@
 第 3、4 格是整組圖的關鍵：把「為什麼現有做法都不夠」變成不用解釋的事。
 第 5 格放在成品前面，讓讀者先知道「要處理的是什麼」再看結果。
 
-用法：
+用法（-r＝nightread_batch.py 的輸出夾，要有 <page>_final.png 與 _bubble.png；預設同它的預設 out/nightread）：
   python3 make_showcase.py              # 全 fixture 頁 → out/showcase/<page>_{A,B}.png
   python3 make_showcase.py ch34_010 -o out/x --layout A
+  python3 make_showcase.py -r out/run -o out/showcase --layout B --webp   # docs/img/showcase/ 用的格式（WebP q92）
 """
 import argparse
 import glob
@@ -42,17 +43,16 @@ SPEC = [("orig",   "1. Original",              "the source page"),
 
 
 def build_steps(page, result_dir):
-    """產五張階段圖（BGR）。result_dir 需含 <page>_final.png 與 _bubble.png。"""
+    """產六格（BGR）。result_dir 需含 <page>_final.png 與 _bubble.png。"""
     p = sorted(glob.glob(os.path.join(paths.SANDBOX_TEST, page + ".*")))[0]
     img = cv2.imread(p)
     g, _ = nr.normalize_paper(cv2.imread(p, 0), img)
     _, regions, seg = nr.detect(img)
     cm = nr.load_charmask(p, g.shape)
     if cm is not None:
-        cm = nr.trim_charmask(cm, g)
         if nr.CHAR_SNAP > 0:
             cm = nr.snap_charmask(cm, g)
-        if nr.MASK_SMOOTH > 0:
+        if nr.MASK_SMOOTH_MEDIAN > 0:
             cm = nr.smooth_charmask(cm, g)
     else:
         cm = np.zeros(g.shape, bool)
@@ -60,7 +60,7 @@ def build_steps(page, result_dir):
     fin = cv2.imread(os.path.join(result_dir, f"{page}_final.png"))
     fing = cv2.imread(os.path.join(result_dir, f"{page}_final.png"), 0)
 
-    # 2. 遮罩：原圖淡化當底（否則標示看不清），人物橘、氣泡藍、文字紅，加輪廓線
+    # 2. 遮罩：原圖淡化當底（否則標示看不清），人物藍、氣泡橙、文字紅，加輪廓線（顏色是 BGR）
     def outline(m, w=3):
         return cv2.morphologyEx(m.astype(np.uint8), cv2.MORPH_GRADIENT, np.ones((w, w), np.uint8)) > 0
     masks = (img * 0.55 + 255 * 0.45).astype(np.uint8)
@@ -75,7 +75,7 @@ def build_steps(page, result_dir):
     # 4. 只套 lin8 曲線＝濾鏡極限（不做任何分區重繪）
     curve = cv2.cvtColor(np.clip(8 + g.astype(np.float32) * 132 / 255, 0, 255).astype(np.uint8),
                          cv2.COLOR_GRAY2BGR)
-    # 4. 殘白：原圖是白、成品仍亮
+    # 5. 殘白：原圖是白、成品仍亮
     resid = (g >= nr.WHITE_TH) & (fing >= 110)
     rv = img.copy()
     rv[resid] = (rv[resid] * 0.35 + np.array([70, 70, 255]) * 0.65).astype(np.uint8)
@@ -119,15 +119,20 @@ def main():
     ap = argparse.ArgumentParser(description="夜讀成果展示圖")
     ap.add_argument("pages", nargs="*", default=PAGES)
     ap.add_argument("-o", "--outdir", default=os.path.join(paths.OUT, "showcase"))
-    ap.add_argument("-r", "--result", default=os.path.join(paths.OUT, "v8"))
+    ap.add_argument("-r", "--result", default=nr.OUT_DEFAULT)
     ap.add_argument("--layout", choices=["A", "B", "both"], default="both")
+    ap.add_argument("--webp", action="store_true", help="寫 <page>_<layout>.webp（q92，docs/img 用的格式）而不是 PNG")
     a = ap.parse_args()
     os.makedirs(a.outdir, exist_ok=True)
     for page in a.pages:
         im, resid = build_steps(page, a.result)
         for lay in (["A", "B"] if a.layout == "both" else [a.layout]):
-            fp = os.path.join(a.outdir, f"{page}_{lay}.png")
-            cv2.imwrite(fp, compose(im, lay), [cv2.IMWRITE_PNG_COMPRESSION, 6])
+            if a.webp:
+                fp = os.path.join(a.outdir, f"{page}_{lay}.webp")
+                cv2.imwrite(fp, compose(im, lay), [cv2.IMWRITE_WEBP_QUALITY, 92])
+            else:
+                fp = os.path.join(a.outdir, f"{page}_{lay}.png")
+                cv2.imwrite(fp, compose(im, lay), [cv2.IMWRITE_PNG_COMPRESSION, 6])
         print(f"{page:10s} 殘白 {resid:5.1f}%")
     print(f"→ {a.outdir}")
 

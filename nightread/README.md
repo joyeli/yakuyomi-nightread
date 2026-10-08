@@ -27,10 +27,10 @@ requirement — see [Text detection is not in this repo](#text-detection-is-not-
 It is an Android library, minSdk 26, compileSdk 37, Java 17, with a group and version set, so a consumer can
 wire it in through a Gradle composite build (`includeBuild`), which is what the Yakuyomi fork does.
 
-Keeping it to one module is deliberate. `:nightread` imports nothing but `kotlin.math`, not even
-`android.graphics`: that keeps the pipeline runnable under plain JVM unit tests (which is how it is checked
-against the Python fixtures) and lets any JVM project take it as is. The character mask is computed
-elsewhere: Yakuyomi runs the two segmentation models with NCNN inside
+Keeping it to one module is deliberate. `:nightread` imports nothing beyond the Kotlin and JDK standard
+libraries (`kotlin.math`, `java.math`, `java.util.concurrent`), not even `android.graphics`: that keeps the
+pipeline runnable under plain JVM unit tests (which is how it is checked against the Python fixtures) and lets
+any JVM project take it as is. The character mask is computed elsewhere: Yakuyomi runs the two segmentation models with NCNN inside
 [yakuyomi-engine](https://github.com/joyeli/yakuyomi-engine)'s `:nightread-android` module (`CsegSegmenter` and `YoloSegSegmenter`, see
 [Character-mask models](#character-mask-models)), and this repo only consumes the resulting mask. There used
 to be a `:nightread-ort` module here running the same two models through ONNX Runtime; it went away with the
@@ -70,7 +70,10 @@ val regions: List<TextRegion> = yourTextBoxes()         // TextRegion(x0, y0, x1
 val charMask: Mask = yourCharacterMask(w, h)            // Mask(w, h), true = character
 
 // 5. Rebuild.
-val result: NightReadResult = NightRead.render(NightReadInput(gray, seg, regions, charMask, chroma))
+val result: NightReadResult = NightRead.render(
+    NightReadInput(gray, seg, regions, charMask, chroma),
+    NightTier.L2.apply(),   // Standard; NightTier.L3.apply() is More. The default NightReadParams() is the full research pipeline.
+)
 
 // 6. The dark page, 0..255 per pixel, same size as the input.
 val dark = result.out
@@ -81,7 +84,12 @@ val outPixels = IntArray(w * h) {
 val nightBitmap = Bitmap.createBitmap(outPixels, w, h, Bitmap.Config.ARGB_8888)
 ```
 
-There is one entry point:
+The entry points, all on the stateless `NightRead` object: `render(input, p, debug)` for one level;
+`render(input, p, debug, parallel)` with an optional `Executor` (see *Lifecycle and threading*);
+`renderTiers(input, tiers, debug, sink)` and `renderTiers(input, tiers, debug, parallel, sink)`, which analyse
+once and stream several levels to `sink` (a level identical to the previous one arrives as `null`).
+`NightTier.L1/L2/L3.apply(base)` builds each level's parameters, and `NightRead.RULES_VERSION` is the rules
+version (see [Rules version](#rules-version)).
 
 ```kotlin
 fun render(
@@ -105,7 +113,7 @@ fun render(
 | `regions` | `List<TextRegion>` | text-region boxes, `x0, y0, x1, y1` in original-image pixels |
 | `charMask` | `Mask(w, h)` | character mask, the model's raw output. Required |
 | `chroma` | `Gray(w, h)?` | per-pixel chroma (max channel minus min channel), used for colour-page judgements. A pure-greyscale page can pass `null` |
-| `inpaintMask` | `Mask(w, h)?` | translated pages only: the inpaint mask from the translation material (`.yakuyomi/<page>.mask.png`, same size as the page, `true` = inpainted). Used by「更多」(rules version 4) so that small blocks of clean white left by inpainting next to the translation are not painted. Japanese pages pass `null` (an all-empty mask is the same) |
+| `inpaintMask` | `Mask(w, h)?` | translated pages only: the inpaint mask from the translation material (`.yakuyomi/<page>.mask.png`, same size as the page, `true` = inpainted). Used by "More" (rules version 4) so that small blocks of clean white left by inpainting next to the translation are not painted. Japanese pages pass `null` (an all-empty mask is the same) |
 
 ### Text detection is not in this repo
 
@@ -161,11 +169,16 @@ settled recipe is the union of the two. Each segmenter holds one NCNN net and is
 | Model | Files | Size (fp16) | Role | Licence |
 |---|---|---|---|---|
 | YOLO11-seg | `manga_seg_s.ncnn.param` + `.bin` | 20.4 MB | the settled recipe's base, and the cheapest standalone option | **AGPL-3.0** (Ultralytics) |
-| CartoonSegmentation (RTMDet-Ins) | `cartoonseg.ncnn.param` + `.bin` | 126 MB | optional, more accurate with it | MIT |
+| CartoonSegmentation (RTMDet-Ins) | `cartoonseg.ncnn.param` + `.bin` | 126 MB | optional, more accurate with it | none stated: the repository has no LICENSE; the original checkpoint's Hugging Face card says MIT, the ONNX conversion says nothing |
+
+Yakuyomi redistributes both NCNN conversions for research and non-commercial use and takes them down on a
+rights holder's request; see
+[the engine's model notes](https://github.com/joyeli/yakuyomi-engine/blob/main/docs/MODELS.md#night-reading-models).
 
 Three things measurement settled:
 
-- **Running YOLO11-seg alone works.** The cost is guard-box violations rising from 18 to 27.
+- **Running YOLO11-seg alone works.** The cost is more guard-box violations: 18 → 25 when measured
+  (2026-09-21, 665 boxes at the time).
 - **All fp16, no int8.** CartoonSegmentation comes out of `ncnn2int8` producing zero instances (a toolchain
   failure on its graph, not a calibration problem), and YOLO11-seg int8 is 7% faster on a mask that already
   takes 0.4 s. Both were measured on device. The earlier finding against the ONNX int8 build of
@@ -200,7 +213,7 @@ without re-deriving them:
   their order stay the same, and the stages that report a mask count send 0 instead (about ten full-page scans saved).
 - Intra-page parallelism (2026-10-06): `render(input, p, debug, parallel)` and
   `renderTiers(input, tiers, debug, parallel, sink)` take an `Executor`. The independent analysis branches
-  (character-mask smoothing, scene curve, grey-ring evidence, sticker plan) and the「更多」background-object
+  (character-mask smoothing, scene curve, grey-ring evidence, sticker plan) and the "More" background-object
   measurement run on it, and the calling thread waits only when it needs a result. (Since 2026-10-07 the parts of
   that measurement that only some pages need — object evidence, long-line band, faint-line halo around characters,
   tone edges — are computed later, during compose, on the calling thread, and only where they are used.) A branch the pool has not
@@ -212,12 +225,18 @@ without re-deriving them:
   once on a tight heap budget; budget at least 70 B/px per page with it on (see "加速四批" in `docs/DECISIONS.md`).
 - The segmenters that produce `charMask` are not this module's concern. In yakuyomi-engine each holds one
   NCNN net and is `AutoCloseable`: build once, reuse across pages, close when done.
+- Cost: both product levels from one analysis take about 1.3 s per page single-threaded on a desktop JVM
+  (65-page average), roughly 7 s in a debug build on a Snapdragon 8 Gen 3 (estimated from a desktop debug
+  proxy); the character mask adds 1.2–1.4 s on device. Numbers per batch are in *加速第五批* in
+  `docs/DECISIONS.md`.
 
 ## Parameters
 
-`NightReadParams` is a `data class` holding the module's 125 parameters plus four nested groups — the any-angle
-separators, `sep: SeparatorParams` (57), the bleed-panel filter, `bleed: BleedParams` (28), and bubble-leak
-sealing, `bubbleSeal: BubbleSealParams` (6) and the "More" rule A2, `more: MoreRuleParams` (19) — 235 in all.
+`NightReadParams` is a `data class` holding 132 parameters of its own plus six nested groups: the any-angle
+separators, `sep: SeparatorParams` (57); the bleed-panel filter, `bleed: BleedParams` (28); bubble-leak sealing,
+`bubbleSeal: BubbleSealParams` (6); the "More" rule A2, `more: MoreRuleParams` (19); character ring thinning,
+`ring: RingParams` (23); and the "More" background-object rule, `obj: ObjectRuleParams` (72, which itself nests
+the effect-line group `fx: EffectLineParams`, 42) — 379 in all.
 Its defaults are the settled values. The nesting is forced: flattened, the constructor would exceed the JVM's
 255 parameter slots (a `Double` takes two) and the class would fail to load with `ClassFormatError`. Per-item documentation is in [`docs/PARAMETERS.md`](../docs/PARAMETERS.md), which covers the whole
 pipeline; the knobs that are not in `NightReadParams` sit outside the module — the detector's binarisation
@@ -228,11 +247,13 @@ Changing them changes the algorithm, not a style setting. The thresholds are int
 is built on the white-component decisions, so a value moved in one stage propagates through every stage after
 it.
 
-The one group meant to be set by the caller is the **fill tier** (how much white goes black; *Fill tiers* in
+Two groups are meant to be set by the caller. The brightness of the output (`bg`, `ink`, `edgeInk`,
+`strokeObjV`, `dimCeil`, `glowCap`; see *Output levels* in `docs/PARAMETERS.md`): Yakuyomi's brightness presets
+and sliders set these on a base `NightReadParams`. And the **fill level** (how much white goes black; *Fill tiers* in
 `docs/PARAMETERS.md`): `stickerMode` (`StickerMode.ALL` / `SIMPLE` / `PLAIN`), `stickerRoughMax`,
 `stickerSimpleMinFrac`, `stickerPlainRingR`, `stickerPlainArtMax`, `stickerPlainFrameDil`, `stickerPlainFaintMax`,
 `stickerPlainFaintHalo`, `pseudoBubbles` and `harmonize`. The defaults (`ALL`, both switches on) are the full
-research pipeline, which the fixtures and the guard baselines are pinned to; the three product levels are
+research pipeline, which the fixtures and the guard baselines are pinned to; the three levels are
 parameter sets the caller passes in:
 
 | Level | `NightReadParams(...)` |
@@ -289,6 +310,22 @@ three levels too: a bubble rejected only because a 1–2 px crack in its outline
 sealed off and sent down the bubble path again, and what it recovers joins only the bubble layer.
 `BubbleSealParams(r = 0)` reproduces the output from before it. See *Bubble-leak sealing* in
 `docs/PARAMETERS.md`.
+
+## Rules version
+
+`NightRead.RULES_VERSION` (currently 4) goes up by one whenever the product levels' output for the same page and
+brightness changes. Store it next to each night page you generate; a page made with a lower version is out of
+date and can be regenerated. `RulesVersionGuardTest` keeps one SHA-256 digest per version over both product
+levels on a set of fixture pages (eight since version 4, two of them synthetic) and fails if the output changes
+without a bump; versions already shipped are frozen. History and rules: *規則版本* in `docs/DECISIONS.md`.
+
+## Tests
+
+`./gradlew :nightread:testDebugUnitTest` runs every JVM test: primitive and whole-page parity against the Python
+fixtures, the tier baselines, the rules-version guard, intra-page parallelism and a profiling run.
+`-PtestGroup=fast|guard|parallel|profile` runs one group; CI (`.github/workflows/ci.yml`) runs the four in
+parallel on every push to `main` and every pull request. The test JVM needs a 1 GB heap (set in
+`build.gradle.kts`).
 
 ## The red line
 

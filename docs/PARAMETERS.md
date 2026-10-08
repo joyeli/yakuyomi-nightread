@@ -3,9 +3,11 @@
 English ｜ [中文](PARAMETERS_zh.md)
 
 Every knob in the pipeline: what it controls, what it is set to, and what happens if you push it either
-way. They all live in a single block at the top of `research/nightread.py` (the any-angle separator and
-bleed-panel filter keep theirs at the top of their own modules, `research/nightread_sep.py` and
-`research/nightread_bleed.py`) — there are no magic numbers scattered through the code.
+way. They live at the top of `research/nightread.py`, except the modules that keep their own block:
+`nightread_sep.py` (any-angle separators), `nightread_bleed.py` (bleed-panel filter), `nightread_ring.py` (ring
+thinning), `nightread_obj.py` and `nightread_fx.py` (the "More" background-object rule and effect lines) — there
+are no magic numbers scattered through the code. On the Kotlin side they are `NightReadParams` and its nested
+groups (`sep`, `bleed`, `bubbleSeal`, `more`, `ring`, `obj` with `obj.fx`).
 
 One environment variable is required: `NIGHTREAD_CHARMASK`, pointing at the character-mask directory
 produced by `charmask.py`. If it is missing the run fails outright rather than silently degrading. The three
@@ -37,6 +39,13 @@ near-black crush on OLED; 16 is the compromise.
 ### `INK` = 240
 Brightness of text strokes inside a bubble. The original ink density comes in as alpha, so stroke edges are
 antialiased for free.
+
+### `EDGE_INK` = `INK` (`NIGHTREAD_EDGE_INK`; Kotlin `edgeInk`)
+Ceiling for the 1 px brightened edges: gutter borders, bubble outlines and the ring outside a bubble. It
+defaults to `INK`, so output is unchanged; separating it from `INK` lets a reader tone those lines down without
+dimming the text (on device they looked like pure-white lines). Yakuyomi's brightness presets set text / edges /
+figure outline (`INK` / `EDGE_INK` / `STROKE_OBJ_V`) to 240/240/220 (Standard), 205/170/190 (Soft, the default)
+and 190/150/175 (Softer); its advanced settings also expose `BG`, `DIM_CEIL` and `GLOW_CAP`.
 
 ### `STROKE` = 1
 Radius of the boundary brightening. Once a bubble is filled dark its original black outline is invisible
@@ -175,9 +184,12 @@ own text, and after hole-filling demo01's face block lands right in the middle o
 distribution. "Adjacent to thick ink" is unusable too — bold text strokes are themselves 6 px thick.
 Geometric neck-cutting is the only thing that separates them.
 
-### `SAFE_BUBBLE_RATIO` = 2.5
-A bubble core may be no larger than 2.5× the square of the text box's long edge. A real bubble is packed with
+### `SAFE_BUBBLE_RATIO` = 6.0
+A bubble core may be no larger than 6× the square of the text box's long edge. A real bubble is packed with
 its text; a component grown from text sitting on a cheek or a hand is a whole sheet of skin-white.
+
+Raised from 2.5 on 2026-09-26 after device pages of translated chapters: short translations shrink the long
+edge squared 10–20×, and the bubble was rejected; on the fixtures 2.5 → 6 changes no guard box.
 
 **The denominator is the long edge squared, not the text box's area**: a single column of vertical text is
 one column wide, so an area denominator blows up spuriously, the whole bubble is rejected, and it stays
@@ -491,7 +503,9 @@ means it is a caption box, and filling that black turns the text into a smeared 
 
 ## Fill tiers
 
-How much white should go black is a product setting with three levels (user definition, 2026-09-27). The full
+How much white should go black is a product setting. The library defines three levels (user definition,
+2026-09-27); since 2026-10-01 the product ships two of them, Standard = L2 and More = L3 with rule A2, and L1 is
+kept for research. The full
 pipeline — every accepted sticker, pseudo-bubbles and floating-head harmonization — stays the library default
 so the fixtures and guard baselines hold, but it is no longer one of the product levels. Each level is a set of
 environment variables (listed in the header of `research/nightread.py`).
@@ -516,7 +530,8 @@ The `simple` thresholds. L2 uses 10 and 0.5%; L3 uses 20 and no area floor. Guar
 40.7%, L2 40.2%, L3 40.0%, default 35.7% (40.3 / 39.8 / 39.6 / 35.6 before the outline gate existed).
 These were measured before the any-angle separator and the bleed-panel filter (next two sections); with them
 the guard reads L1 13, L2 13, L3 17, default 19 (each +1 is the same ch34_006 annotation drawn over a gutter)
-and the bright fraction L1 38.8%, L2 38.3%, L3 38.1%, default 36.3%.
+and the bright fraction L1 38.8%, L2 38.3%, L3 38.1%, default 36.3%. Current guard (688 scored boxes, after the
+2026-10-03 redraw): full pipeline 11, L1 10, L2 10, old L3 10, More 10 (Kotlin 11 / 9 / 9 / 9 / 9).
 
 ### `STICKER_PLAIN_RING_R` = 7 · `STICKER_PLAIN_ART_MAX` = 0.05 · `STICKER_PLAIN_FRAME_DIL` = 7
 The `plain` test. The ring is the component dilated with a 15×15 ellipse minus the component; "artwork" is
@@ -555,9 +570,12 @@ old L3 without A2 is `L3.apply(base).copy(more = base.more.copy(enabled = false)
 differ only in those three fields and `more`, and every level must have pseudo-bubbles and harmonization off,
 because both make the character-restore mask or the gutter depend on the level. A level is skipped (the sink gets
 null) only when its composition key matches the previous level's: keep, promoted components, the keep before A2,
-and A2's two drawing switches (counted only when there are stickers to paint). An A2 level whose keep equals the
-previous one but whose drawing switches differ is still composed; pixel-level dedup is left to the caller.
-`key` (`l1`/`l2`/`l3`) is the string the app stores in its preference and file names.
+and More's drawing settings (the A2 switches `keepDarkStroke`, `edgeSeedFallback`, `edgeBand`, `edgeReach`, plus
+the background-object parameters; with that rule on, a level is composed even when its keep is empty). An A2
+level whose keep equals the previous one but whose drawing switches differ is still composed; pixel-level dedup
+is left to the caller. `key` (`l1`/`l2`/`l3`) is what Yakuyomi stores in the `nightread_fill_level` preference
+(only `l2` and `l3` now); night pages are saved as `<page>.night.std.webp` and `<page>.night.more.webp`, and older
+`l1`/`l2`/`l3` files are still read.
 
 ## "More" rule A2
 
@@ -1034,10 +1052,10 @@ Components that DBNet only marked in its text mask, without a box, are not treat
 on c371_013, the star mark on c371_014 and the sweat-drop marks used to be inverted to white. Cost: handwritten text without a box
 (the 「44…」 on c362_001) is no longer brightened either; it stays grey like an object.
 
-### Rules version 4: four additions to「更多」(2026-10-05, the user's decisions q1–q4)
-Only「更多」changes; the standard tier is pixel-identical to version 3. Each addition has its own switch, all four off =
+### Rules version 4: four additions to "More" (2026-10-05, the user's decisions q1–q4)
+Only "More" changes; the standard tier is pixel-identical to version 3. Each addition has its own switch, all four off =
 version 3 pixel for pixel. Not done, by the user's decision: extending screentone gradients to their dark end (q5) and the
-stippled concentration lines on c362_016 (q6); the structural veto is closed (q7). After version 4 is delivered,「更多」is
+stippled concentration lines on c362_016 (q6); the structural veto is closed (q7). After version 4 is delivered, "More" is
 frozen except for red-line fixes (see DECISIONS, *「更多」規則版本 4*).
 
 ### `OBJ_SEAM` = 1 · `SEAM_R` = 3 · `SEAM_SPARK` = 4 · `SEAM_G` = 200 (`NIGHTREAD_OBJ_SEAM`; Kotlin `seam` / `seamR` / `seamSpark` / `seamG`)

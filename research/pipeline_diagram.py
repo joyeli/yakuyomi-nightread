@@ -91,7 +91,7 @@ def build(name, results):
 def main():
     ap = argparse.ArgumentParser(description="管線視覺化圖")
     ap.add_argument("page", nargs="?", default="ch34_011")
-    ap.add_argument("-r", "--results", default=os.path.join(paths.OUT, "nightread", "v11"))
+    ap.add_argument("-r", "--results", default=os.path.join(paths.OUT, "nightread"))   # nightread_batch.py 的預設輸出夾
     ap.add_argument("-o", "--out", default=os.path.join(DOCS_IMG, "pipeline.webp"))
     a = ap.parse_args()
     os.makedirs(os.path.dirname(a.out), exist_ok=True)

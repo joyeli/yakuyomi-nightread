@@ -7,6 +7,11 @@ curve alone, how much white is left, and the finished rebuild. Panels three and 
 they are there to show why a filter cannot do this. Inversion wrecks the art; a tone curve can only grey the
 whole page down.
 
+The sheets show the full research pipeline (the library default) as of 2026-10-08, rules version 4, not the
+product levels: Standard and More choose differently which white backgrounds go black, and both turn off the
+pseudo-bubbles that the text-over-artwork pages below rely on. They are made with `research/make_showcase.py`
+from a `nightread_batch.py` run on the 11 fixture pages.
+
 Panel five marks every pixel that is **still bright in the output but was white in the source**. Less red
 means a more complete rebuild. The red on the characters is deliberate: that is the region the red line
 protects.
@@ -38,7 +43,7 @@ background. Neck-cutting separates them, and the bubble still fills completely.
 
 ### ch34_014
 The bottom-right bubble was once recognized as only 10% bubble, leaving a grey-white ring inside its frame.
-Loosening the area ratio to 2.5 fills it.
+Loosening the area ratio (2.0 → 2.5, now 6) fills it.
 
 ![ch34_014](img/showcase/ch34_014.webp)
 
@@ -95,7 +100,7 @@ than before.
 ## How to read the panels
 
 **Panel two (what the pipeline sees)** overlays three colours on a faded source: blue is characters, orange
-is bubbles, red is text strokes. Their priority order is text > bubble > character > background.
+is bubbles, red is text strokes. Their priority order is text > bubble > gutter/margin > character > background.
 
 **Panel five (what is left bright)** is a diagnostic, not an output. It marks pixels that were white in the
 source and are still bright in the result. Large areas of red on a character are expected — that is the red
