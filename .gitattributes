@@ -1,0 +1,16 @@
+# 文字檔一律以 LF 入庫、checkout 也是 LF：測試逐位元比對 fixtures 與 test resources，
+# Windows 開了 core.autocrlf 時若換成 CRLF，文字 fixture 讀出來就不一樣。
+* text=auto eol=lf
+
+# Windows 批次檔 checkout 成 CRLF（庫內仍是 LF）
+*.bat text eol=crlf
+
+# 二進位檔：不做換行轉換、不做文字 diff
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.bin binary
+*.npy binary
+*.jar binary

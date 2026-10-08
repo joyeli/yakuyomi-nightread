@@ -14,10 +14,10 @@ on:
     branches: [main]
   pull_request:
 
-# 同一分支上若有舊 build 仍在跑就取消，省 runner。
+# PR 上若有舊 build 仍在跑就取消，省 runner；main 不取消，每個 commit 都留得到結果（哪一個 commit 開始紅才查得出來）。
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
