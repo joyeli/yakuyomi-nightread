@@ -31,5 +31,25 @@ tasks.withType<Test>().configureEach {
     testLogging {
         showStandardStreams = true
         events("passed", "failed")
+        // CI 紀錄裡要看得到斷言訊息與堆疊（預設 SHORT 只有例外類別），不然失敗時得下載報告才知道差在哪
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
+
+    // CI 分組（.github/workflows/ci.yml 的 matrix 各跑一組、平行）：-PtestGroup=<組>。幾支整頁的重測試各自成組，
+    // 其餘全部歸 fast——新加的測試類別不用登記就落在 fast，不會漏跑；重組裡的類別改名時 include 找不到測試會直接失敗。
+    // 沒給 testGroup（本機的平常用法）＝全部跑。
+    providers.gradleProperty("testGroup").orNull?.let { group ->
+        val heavy = mapOf(
+            "guard" to listOf("RulesVersionGuardTest", "SharedTierTest"),
+            "parallel" to listOf("ParallelRenderTest"),
+            "profile" to listOf("ProfileTest"),
+        )
+        filter {
+            when (group) {
+                "fast" -> heavy.values.flatten().forEach { excludeTestsMatching("li.joye.yakuyomi.nightread.$it") }
+                in heavy -> heavy.getValue(group).forEach { includeTestsMatching("li.joye.yakuyomi.nightread.$it") }
+                else -> error("未知的 testGroup：$group（可用 fast、${heavy.keys.joinToString("、")}）")
+            }
+        }
     }
 }

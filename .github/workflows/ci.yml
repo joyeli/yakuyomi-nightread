@@ -1,0 +1,82 @@
+name: CI
+
+# 每次 push 到 main 與每個 PR：編譯夜讀函式庫（:nightread，debug＋release）並跑全部 JVM 單元測試，含逐位元 parity 與守護測試
+# （測試讀 nightread/src/test/resources 與 fixtures/，都在 git 裡）。研究端 Python（research/）要模型權重，不在 CI。
+# 本 repo 沒有 submodule，checkout 不必帶。
+#
+# 測試分四組平行跑（nightread/build.gradle.kts 的 -PtestGroup），哪一組紅一眼就看得出是哪類測試：
+#   fast     ＝原語與大部分 parity（cv、形態學、泡、格溝、三檔基線、「更多」背景物件…），重組以外的全部都在這
+#   guard    ＝規則版本守護（產品輸出 SHA-256 對 RULES_VERSION）＋共用分析與分開重繪逐位元相同
+#   parallel ＝頁內並行與依序版逐位元相同（4 頁 × 四種 Executor，最久的一支）
+#   profile  ＝熱點計時（不驗正確性，只確保每個階段函式跑得完、不丟例外）
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 同一分支上若有舊 build 仍在跑就取消，省 runner。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Unit tests (${{ matrix.group }})
+    runs-on: ubuntu-latest
+    # 本機（32 執行緒）各組 2–3 分鐘；runner 只有 4 vCPU、單核也慢，抓寬。
+    timeout-minutes: 45
+    strategy:
+      # 一組紅了其他組照跑完，才看得到是不是只有那一類壞
+      fail-fast: false
+      matrix:
+        group: [fast, guard, parallel, profile]
+    steps:
+      - uses: actions/checkout@v4
+
+      # 與本機一致：build 目標 JVM 17，但用 JDK 21 跑 Gradle／AGP 9（開發機是 Android Studio 的 jbr 21）。
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      # 裝 cmdline-tools 並接受授權；compileSdk 37 由 AGP 依需求自動下載。
+      # packages 要明寫：這個 action 預設會跑 `sdkmanager tools`，新版 cmdline-tools 已經沒有 `tools` 這個套件（引擎 CI 踩過）。
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      # Gradle 設定＋跨 run 快取（用 repo 內 wrapper 的 Gradle 版本）。
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # git 在 Windows／WSL 可能沒保留 gradlew 執行權限（已用 update-index 設成 100755，這道是保險）。
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      # local.properties 不入庫；沒有它時 AGP 從 ANDROID_HOME 找 SDK（上面的 action 已設）。編譯檢查只在一組做一次。
+      - name: Assemble (debug + release)
+        if: matrix.group == 'fast'
+        run: ./gradlew :nightread:assemble --no-daemon --stacktrace
+
+      # 只跑 debug 變體：:nightread:test 會把 debug 與 release 各跑一次（同一份程式碼，時間白白加倍）。
+      # 測試 JVM heap 1 GB 設在 build.gradle.kts（ParallelRenderTest 在 7.2 MPx 頁上 512 MB 不夠）。
+      - name: Unit tests (${{ matrix.group }})
+        run: ./gradlew :nightread:testDebugUnitTest -PtestGroup=${{ matrix.group }} --no-daemon --stacktrace
+
+      # 失敗時把 HTML 報告、XML 結果與 PageParityTest 的對照圖帶出來
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports-${{ matrix.group }}
+          path: |
+            nightread/build/reports/tests/testDebugUnitTest
+            nightread/build/test-results/testDebugUnitTest
+            nightread/build/parity_*.png
+          if-no-files-found: ignore
+          retention-days: 14
