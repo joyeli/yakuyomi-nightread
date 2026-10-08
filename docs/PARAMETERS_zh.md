@@ -9,7 +9,7 @@
 `obj.fx`）。
 
 必要的環境變數只有一個：`NIGHTREAD_CHARMASK`，指向 `charmask.py` 產出的人物遮罩目錄，缺了會直接報錯
-而不是默默降級。產品端的背景填黑三檔也走環境變數（`NIGHTREAD_STICKER_MODE`、`NIGHTREAD_STICKER_ROUGH`、
+而不是默默降級。背景填黑三檔（產品出 L2、L3 兩檔）也走環境變數（`NIGHTREAD_STICKER_MODE`、`NIGHTREAD_STICKER_ROUGH`、
 `NIGHTREAD_STICKER_MINFRAC`、`NIGHTREAD_PB`、`NIGHTREAD_HM`，見「背景填黑三檔」），任意角度格溝與出血格過濾各有
 開關（`NIGHTREAD_SEP`、`NIGHTREAD_BLEED`，預設開），漏泡封縫的半徑也在這裡（`NIGHTREAD_BUBBLE_SEAL_R`，預設 1、0＝關），
 泡內淺條的兩個修法也各有開關（`NIGHTREAD_CLEAN_INK_HOLES`、`NIGHTREAD_GUARD_RAW`，預設開、0＝舊行為），
@@ -424,7 +424,7 @@ L1 目前＝留白＋泡、一顆貼紙都不填。門檻取 0～0.166 之間任
 `simple`（rough／面積）不看它。更寬的「無畫面背景」判準（外圈扣掉泡框與字）另案研究。
 
 ### `PSEUDO_BUBBLES` = 1（`NIGHTREAD_PB`）· `HARMONIZE` = 1（`NIGHTREAD_HM`）
-偽泡層與人頭一致化層的開關。三個產品檔位都關：偽泡從字往背景長、要付 2 個守護框；人頭一致化對守護框沒影響，但會把格內
+偽泡層與人頭一致化層的開關。三檔都關：偽泡從字往背景長、要付 2 個守護框；人頭一致化對守護框沒影響，但會把格內
 背景挖成黑洞。預設兩者都開。
 
 ### Kotlin：`NightTier` 與 `renderTiers`

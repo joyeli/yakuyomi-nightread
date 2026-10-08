@@ -22,7 +22,9 @@
   python3 charmask.py isnet              # 全 fixture 頁 → out/char_isnet/<page>_char.png
   python3 charmask.py yolodet --kinds body face
   python3 charmask.py yoloseg demo01     # 需 pip install ultralytics（AGPL-3.0，僅研究端）
-  python3 charmask.py combine            # 定案配方：cseg ∪ yoloseg ∪ (isnet ∩ 漏抓框) → out/char_combine
+  python3 charmask.py cseg               # → out/char_cseg（out/models/cartoonseg.onnx）
+  python3 charmask.py yoloseg_onnx       # → out/char_yoloseg_onnx（out/models/manga_seg_s.onnx）
+  python3 charmask.py combine            # 定案配方：讀上面兩步的輸出取 cseg ∪ yoloseg_onnx → out/char_combine
 """
 import argparse
 import glob

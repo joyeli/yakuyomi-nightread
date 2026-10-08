@@ -66,7 +66,7 @@ val outPixels = IntArray(w * h) {
 val nightBitmap = Bitmap.createBitmap(outPixels, w, h, Bitmap.Config.ARGB_8888)
 ```
 
-入口都在無狀態的 `NightRead` 上：`render(input, p, debug)` 產一檔；`render(input, p, debug, parallel)` 多一個選用的 `Executor`（見「生命週期與執行緒」）；`renderTiers(input, tiers, debug, sink)` 與 `renderTiers(input, tiers, debug, parallel, sink)` 分析一次、依序把多檔交給 `sink`（與前一檔相同的傳 `null`）。各檔參數用 `NightTier.L1/L2/L3.apply(base)` 產生；規則版本是 `NightRead.RULES_VERSION`（見[規則版本](#規則版本)）。
+入口都在無狀態的 `NightRead` 上：`render(input, p, debug)` 產一檔；`render(input, p, debug, parallel)` 多一個選用的 `Executor`（見「生命週期與執行緒」）；`renderTiers(input, tiers, debug, sink)` 與 `renderTiers(input, tiers, debug, parallel, sink)` 分析一次、依序把多檔交給 `sink`（確定會跟前一檔相同的傳 `null`；見 `docs/PARAMETERS_zh.md`「Kotlin：`NightTier` 與 `renderTiers`」）。各檔參數用 `NightTier.L1/L2/L3.apply(base)` 產生；規則版本是 `NightRead.RULES_VERSION`（見[規則版本](#規則版本)）。
 
 ```kotlin
 fun render(
@@ -130,7 +130,7 @@ val charMask = Mask(w, h, BooleanArray(w * h) { a[it] || b[it] })
 
 | 模型 | 檔案 | 大小（fp16） | 角色 | 授權 |
 |---|---|---|---|---|
-| YOLO11-seg | `manga_seg_s.ncnn.param` + `.bin` | 20.4 MB | 定案配方的基底，也是單獨跑時最省的一顆 | **AGPL-3.0**（Ultralytics） |
+| YOLO11-seg | `manga_seg_s.ncnn.param` + `.bin` | 20.4 MB | 定案配方的基底，也是單獨跑時最省的一顆 | 模型卡寫 `other`；以 Ultralytics YOLO11 訓練，**AGPL-3.0** |
 | CartoonSegmentation（RTMDet-Ins） | `cartoonseg.ncnn.param` + `.bin` | 126 MB | 可選，加了更準 | 沒寫明：repo 沒有 LICENSE 檔；原始權重的 Hugging Face 模型卡寫 MIT，ONNX 轉檔版沒寫 |
 
 Yakuyomi 以研究與非商業用途散布兩顆的 NCNN 轉檔，權利人要求即下架；見[引擎的模型說明](https://github.com/joyeli/yakuyomi-engine/blob/main/docs/MODELS_zh.md#夜讀模型)。
@@ -219,7 +219,7 @@ Yakuyomi 以研究與非商業用途散布兩顆的 NCNN 轉檔，權利人要�
 
 **絕不塗到臉、手、白衣、白髮。** 唯一可接受的失敗是「不夠暗」。驗收靠 732 個人工標註的前景框；在 688 框的 fixture 子集上，目前（python 參考實作）完整管線 11 框違規、產品「標準」（L2）10 框、「更多」（L3＋新規則 A2）10 框，這個 Kotlin 函式庫是 11／9／9（ch34_006 有一框其實畫在斜格溝上、另有三框的框邊伸進對話泡，四框都已修正標註；人物外灰圈收細之後，框邊伸進背景的 19 框重畫成 47 個貼身框，見 `docs/DECISIONS.md`）。
 
-要達到這條線必須有人物語意遮罩：純幾何最好也只能到 37 框，而且要付 14 個百分點的亮區代價。
+要達到這條線必須有人物語意遮罩：純幾何最好也只能到 37 框（當時的 665 框），而且要付 14 個百分點的亮區代價。
 
 ## Python 端
 

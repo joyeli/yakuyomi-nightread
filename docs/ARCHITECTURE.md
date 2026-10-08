@@ -74,7 +74,7 @@ The region decides the treatment:
 | Gutter (page margins, panel gaps) | fill with `BG`, brighten the boundary |
 | Plain white background (blank space inside a panel) | fill with `BG`, lift the foreground out with a white outline |
 | Bubble interior | fill with `BG`, draw the text strokes up to `INK` |
-| Characters | darkened by the scene curve; every fill gives way |
+| Characters | darkened by the scene curve; fills give way, except text, bubbles and gutters/margins (see *Layer priority*) |
 | The rest of the art | darkened by the scene curve |
 
 ## Stage by stage
@@ -97,7 +97,8 @@ the red line is unreachable without it: the best purely geometric recipe still l
 percentage points of light area to get there. The mask comes from `charmask.py`, the union of two
 instance-segmentation models, CartoonSegmentation and YOLO11-seg.
 
-The models produce their output at 640 resolution; scaled up to the full page, the boundary is a blocky
+The models produce their output at a fraction of page resolution (640 for CartoonSegmentation, 1024 for
+YOLO11-seg); scaled up to the full page, the boundary is a blocky
 staircase and often stops inside the object. Two passes correct it:
 
 - **Ink-snapping**: grow geodesically outward from the mask through non-ink pixels and stop at the line art. A
@@ -385,7 +386,7 @@ research/              desktop pipeline (the spec)
   charmask.py            character-mask probe (cseg / yoloseg / union)
   make_showcase.py       six-stage result sheet
   pipeline_diagram.py    the pipeline-stage figure
-  make_*_fixture.py      Kotlin test resources
+  make_*_fixture*.py     Kotlin test resources
 fixtures/pages/        the 11 test pages
 fixtures/charmask/     their character masks
 fixtures/baseline/     tiers/: per-level baselines for TierParityTest

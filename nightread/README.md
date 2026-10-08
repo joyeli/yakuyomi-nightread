@@ -87,7 +87,8 @@ val nightBitmap = Bitmap.createBitmap(outPixels, w, h, Bitmap.Config.ARGB_8888)
 The entry points, all on the stateless `NightRead` object: `render(input, p, debug)` for one level;
 `render(input, p, debug, parallel)` with an optional `Executor` (see *Lifecycle and threading*);
 `renderTiers(input, tiers, debug, sink)` and `renderTiers(input, tiers, debug, parallel, sink)`, which analyse
-once and stream several levels to `sink` (a level identical to the previous one arrives as `null`).
+once and stream several levels to `sink` (a level that is bound to come out the same as the previous one arrives
+as `null`; see *Kotlin: `NightTier` and `renderTiers`* in `docs/PARAMETERS.md`).
 `NightTier.L1/L2/L3.apply(base)` builds each level's parameters, and `NightRead.RULES_VERSION` is the rules
 version (see [Rules version](#rules-version)).
 
@@ -168,7 +169,7 @@ settled recipe is the union of the two. Each segmenter holds one NCNN net and is
 
 | Model | Files | Size (fp16) | Role | Licence |
 |---|---|---|---|---|
-| YOLO11-seg | `manga_seg_s.ncnn.param` + `.bin` | 20.4 MB | the settled recipe's base, and the cheapest standalone option | **AGPL-3.0** (Ultralytics) |
+| YOLO11-seg | `manga_seg_s.ncnn.param` + `.bin` | 20.4 MB | the settled recipe's base, and the cheapest standalone option | model card says `other`; built on Ultralytics YOLO11, **AGPL-3.0** |
 | CartoonSegmentation (RTMDet-Ins) | `cartoonseg.ncnn.param` + `.bin` | 126 MB | optional, more accurate with it | none stated: the repository has no LICENSE; the original checkpoint's Hugging Face card says MIT, the ONNX conversion says nothing |
 
 Yakuyomi redistributes both NCNN conversions for research and non-commercial use and takes them down on a
@@ -336,8 +337,8 @@ Python reference (11 / 9 / 9 with this Kotlin library). One ch34_006 box turned 
 gutter and three boxes reached into a speech bubble; all four were re-annotated. After the grey-ring change, 19 boxes
 whose edges reached into the background were redrawn as 47 tighter boxes — see `docs/DECISIONS.md`.
 
-Meeting that line requires a semantic character mask. Pure geometry tops out at 37 violations, and pays 14
-percentage points of light area to get there.
+Meeting that line requires a semantic character mask. Pure geometry topped out at 37 violations (on the 665
+boxes of the time), and paid 14 percentage points of light area to get there.
 
 ## The Python reference
 

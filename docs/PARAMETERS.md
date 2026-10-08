@@ -11,7 +11,7 @@ groups (`sep`, `bleed`, `bubbleSeal`, `more`, `ring`, `obj` with `obj.fx`).
 
 One environment variable is required: `NIGHTREAD_CHARMASK`, pointing at the character-mask directory
 produced by `charmask.py`. If it is missing the run fails outright rather than silently degrading. The three
-product fill levels are also selected through the environment (`NIGHTREAD_STICKER_MODE`,
+fill levels (the product ships L2 and L3) are also selected through the environment (`NIGHTREAD_STICKER_MODE`,
 `NIGHTREAD_STICKER_ROUGH`, `NIGHTREAD_STICKER_MINFRAC`, `NIGHTREAD_PB`, `NIGHTREAD_HM` — see *Fill tiers*), the
 any-angle separator and the bleed-panel filter each have a switch (`NIGHTREAD_SEP`, `NIGHTREAD_BLEED`, on by
 default), bubble-leak sealing has its radius there (`NIGHTREAD_BUBBLE_SEAL_R`, 1 by default, 0 = off), the two
@@ -556,7 +556,7 @@ threshold between 0 and 0.166 gives the same result (the triangle is 0.16676 and
 bubble outlines and text) is open research.
 
 ### `PSEUDO_BUBBLES` = 1 (`NIGHTREAD_PB`) · `HARMONIZE` = 1 (`NIGHTREAD_HM`)
-Switches for the pseudo-bubble and floating-head layers. All three product levels turn both off:
+Switches for the pseudo-bubble and floating-head layers. All three levels turn both off:
 pseudo-bubbles grow from the text into the background and cost 2 guard boxes; harmonization has no effect on
 the guard but digs black holes into panel backgrounds. The default keeps both on.
 

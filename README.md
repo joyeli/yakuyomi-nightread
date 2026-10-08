@@ -154,7 +154,7 @@ today's 688 scored boxes.
 | `research/nightread_translated.py` | The translated-page material-sharing check: run night reading on the engine's finished page, compare the three detection-material recipes. |
 | `research/make_showcase.py` | The six-stage showcase sheets. |
 | `research/pipeline_diagram.py` | The pipeline-stage figure in *Why a rebuild and not a filter*. |
-| `research/make_*_fixture.py` | Regenerate the Kotlin test resources in `nightread/src/test/resources/`. |
+| `research/make_*_fixture*.py` | Regenerate the Kotlin test resources in `nightread/src/test/resources/`. |
 | `fixtures/pages/` | The 11 test pages. `fixtures/charmask/` holds the character masks for the 11 pages. `fixtures/baseline/tiers/<L1\|L2\|L3\|MORE>/` holds the per-level reference outputs that `TierParityTest` compares against. The `*_final.png` files directly under `fixtures/baseline/` are full-pipeline outputs from 2026-09-17 (dab92ab) and are no longer updated. |
 | `nightread/` | The Kotlin library. The whole pipeline is ported and passes parity tests against the Python fixtures. Android library with **no `android.graphics` and no inference framework**; the source imports nothing beyond the Kotlin and JDK standard libraries (`kotlin.math`, `java.math`, `java.util.concurrent`), so the tests run on a plain JVM. Integration guide in [`nightread/README.md`](nightread/README.md). |
 | `docs/` | Architecture, parameter reference, decision log. |
@@ -186,7 +186,10 @@ plus the engine's `parity/` environment.
 ```bash
 cd research
 
-# 1. character masks (required input — the pipeline refuses to run without them)
+# 1. character masks (required input — the pipeline refuses to run without them).
+#    combine only unions the outputs of the two runs before it.
+python3 charmask.py cseg            # → out/char_cseg
+python3 charmask.py yoloseg_onnx    # → out/char_yoloseg_onnx
 python3 charmask.py combine -o out/char_combine
 
 # 2. the pipeline

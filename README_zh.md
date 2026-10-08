@@ -131,7 +131,7 @@ Detector(dir.resolve("dbnet_detect.ncnn.param").path).use { detector ->
 | `research/nightread_translated.py` | 譯文頁的素材共用驗證：對翻譯引擎的成品頁跑夜讀，比較三種偵測素材共用配方。 |
 | `research/make_showcase.py` | 六階段成果展示圖。 |
 | `research/pipeline_diagram.py` | 「為什麼是重繪」一節那張管線階段圖。 |
-| `research/make_*_fixture.py` | 重產 `nightread/src/test/resources/` 的 Kotlin 測試資源。 |
+| `research/make_*_fixture*.py` | 重產 `nightread/src/test/resources/` 的 Kotlin 測試資源。 |
 | `fixtures/pages/` | 11 張測試頁。`fixtures/charmask/` 是 11 頁的人物遮罩。`fixtures/baseline/tiers/<L1\|L2\|L3\|MORE>/` 是 TierParityTest 比對的各檔參考輸出；`fixtures/baseline/` 最上層的 `*_final.png` 是 2026-09-17（dab92ab）的完整管線輸出，之後沒再更新。 |
 | `nightread/` | Kotlin library。整條管線已經移植完成，並通過對 Python fixture 的 parity 測試。Android library，**不依賴 `android.graphics`、也不綁任何推論框架**；原始碼只用 Kotlin 與 JDK 標準庫（`kotlin.math`、`java.math`、`java.util.concurrent`），所以測試在一般 JVM 上就跑得起來。接法見 [`nightread/README_zh.md`](nightread/README_zh.md)。 |
 | `docs/` | 架構、參數表、決策記錄。 |
@@ -159,7 +159,9 @@ Python `onnxruntime` 跑 `.onnx` 匯出檔，那是 NCNN 移植拿來對照的�
 ```bash
 cd research
 
-# 1. 人物遮罩（必要輸入，沒有它管線會直接報錯）
+# 1. 人物遮罩（必要輸入，沒有它管線會直接報錯）。combine 只把前兩步的輸出取聯集
+python3 charmask.py cseg            # → out/char_cseg
+python3 charmask.py yoloseg_onnx    # → out/char_yoloseg_onnx
 python3 charmask.py combine -o out/char_combine
 
 # 2. 管線
