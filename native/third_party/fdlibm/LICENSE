@@ -1,0 +1,29 @@
+FDLIBM 5.3 (Freely Distributable LIBM), developed at Sun Microsystems, Inc.
+Source: https://www.netlib.org/fdlibm/
+
+The files in this directory are unmodified copies of the netlib distribution.
+Each file carries one of the two notices below, which are reproduced here
+verbatim as the terms require.
+
+Files dated 1993 (e_atan2.c, e_rem_pio2.c, e_sqrt.c, k_cos.c, k_rem_pio2.c,
+k_sin.c, s_atan.c, s_copysign.c, s_cos.c, s_fabs.c, s_floor.c, s_scalbn.c,
+s_sin.c):
+
+ * ====================================================
+ * Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+ *
+ * Developed at SunSoft, a Sun Microsystems, Inc. business.
+ * Permission to use, copy, modify, and distribute this
+ * software is freely granted, provided that this notice
+ * is preserved.
+ * ====================================================
+
+Files dated 2004 (fdlibm.h, e_exp.c, e_pow.c):
+
+ * ====================================================
+ * Copyright (C) 2004 by Sun Microsystems, Inc. All rights reserved.
+ *
+ * Permission to use, copy, modify, and distribute this
+ * software is freely granted, provided that this notice
+ * is preserved.
+ * ====================================================
