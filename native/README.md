@@ -95,7 +95,7 @@ python3 native/tools/gen_params.py --check    # 只檢查是不是最新的
 - 攤平格式：ints＝Int、Boolean（0／1）、enum（ordinal）、Int?（有無＋值兩格）；doubles＝Double、Float（精確轉 double）。
 - schema 雜湊只看欄位的名稱、型別與順序；`NightNative.available()` 要 `nr_params_schema()` 等於 `ParamsFlat.SCHEMA_HASH` 才用 C++。
 - 驗證：`ParamsFlatTest`（fast 組，反射逐欄比）、`CppParamsParityTest`（native 組：每回合 379 欄各不相同，Kotlin → C++ 與
-  C++ → Kotlin 都用名稱逐欄比，另比預設值與不合法輸入）、`nr_core_tests` 的 `testParams`。
+  C++ → Kotlin 都用名稱逐欄比，另比預設值與不合法輸入）、`nr_core_tests` 的 `testParams`。CI 的 native-guard 重跑後 `git diff` 必須是空的。
 
 ## 錄出與重放（`NativeDumpTest`、`nr_dump_check`）
 
@@ -115,6 +115,16 @@ native/build/host/nr_dump_check [--expect-families packbits,kernel] [--expect-pa
   其他族（形態學、連通元件、距離、灰階濾波…）在搬到 C++ 的那一階加上重放。
 - 一項都沒驗到、或某一族 0 筆時一律失敗；`--expect-families` 列的族一定要真的重放到、`--expect-pages N` 至少 N 頁真的重算了東西
   （CI 兩個都給）。`-PnativeDumpPrims` 的族名打錯，錄出器直接失敗。
+
+## CI（`.github/workflows/ci.yml`）
+
+原本的四組（fast、guard、parallel、profile）之外：
+
+| job | 內容 |
+|---|---|
+| `native` | 主機建置＋ctest、同 JVM 差分（`-PtestGroup=native`，寫 golden）、錄出器冒煙＋`nr_dump_check`；golden 與錄出交給下面兩個 |
+| `native-sanitize` | ASan＋UBSan（ctest、golden、錄出檢查）、TSan（並行測試） |
+| `native-guard` | `gen_params.py` 重跑後無變動；NDK 28.2 arm64 Debug／Release 建置、FMA／OpenMP 掃描與匯出符號、編譯旗標；qemu-aarch64 跑 `nr_core_tests`、golden、錄出檢查 |
 
 ## 接進產品
 

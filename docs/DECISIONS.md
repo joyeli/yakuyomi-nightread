@@ -16,7 +16,7 @@
 - 產品兩檔：標準＝L2、更多＝L3＋A2；L1 只留研究。
 - 守護框（732 框、688 計分）：python 完整／L1／標準／舊 L3／更多 11／10／10／10／10，Kotlin 11／9／9／9／9。
 - 人物遮罩：yolo fp16 ∪ cseg fp16（NCNN，146 MB）。
-- CI：push 到 main 與 PR 跑 `:nightread` 編譯與四組 JVM 測試。
+- CI：push 到 main 與 PR 跑 `:nightread` 編譯與四組 JVM 測試，另有 C++ 核心的三個 job（native、native-sanitize、native-guard；見 native/README.md）。
 
 ## ★★ 規則版本 `NightRead.RULES_VERSION`：舊夜讀頁標「可更新」＋一鍵重新產生（2026-10-03，使用者拍板）
 

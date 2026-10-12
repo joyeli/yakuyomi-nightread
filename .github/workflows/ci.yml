@@ -9,6 +9,14 @@ name: CI
 #   guard    ＝規則版本守護（產品輸出 SHA-256 對 RULES_VERSION）＋共用分析與分開重繪逐位元相同
 #   parallel ＝頁內並行與依序版逐位元相同（4 頁 × 四種 Executor，最久的一支）
 #   profile  ＝熱點計時（不驗正確性，只確保每個階段函式跑得完、不丟例外）
+#
+# 夜讀 C++ 核心（native/，cpp-eval 計畫階段 1）另三個 job，規則見 native/README.md：
+#   native          ＝主機（gcc＋cmake）建核心、ctest（256 KB 堆疊的執行緒）、同 JVM 差分（-PtestGroup=native：Kotlin 與 C++
+#                     逐位元比、參數來回），錄出器冒煙＋nr_dump_check；golden 與錄出交給下面兩個 job
+#   native-sanitize ＝ASan＋UBSan（ctest、golden、錄出檢查）與 TSan（並行測試）
+#   native-guard    ＝gen_params.py 重跑後 git diff 必須是空的；NDK 28.2 arm64 建置（Debug／Release 都要強制 -O2）、
+#                     反組譯不得有 FMA（fmadd…／主機 -mfma 版的 vfmadd…）與 OpenMP 參照、只匯出 JNI、編譯旗標；
+#                     qemu-aarch64（cortex-a57＝armv8.0）跑原生測試、golden 與錄出檢查
 on:
   push:
     branches: [main]
@@ -80,3 +88,190 @@ jobs:
             nightread/build/parity_*.png
           if-no-files-found: ignore
           retention-days: 14
+
+  native:
+    name: Native (host build + same-JVM differential)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # JDK 21：跑 Gradle，也提供主機建置要的 jni.h（JAVA_HOME）
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      # 核心、nr_core_tests（ctest；在 256 KB 堆疊的執行緒上）、nr_golden_check、nr_dump_check、JUnit 用的 libnightread_host.so
+      - name: Host build + ctest
+        run: bash native/tools/build_host.sh
+
+      # 同一個 JVM 裡 Kotlin 與 C++ 逐位元比（數值核心每個函式 200 萬組、常數表整表、像素、參數 379 欄來回）；
+      # 順便寫 golden（Java 答案的分塊雜湊）給 native-guard 在 qemu-aarch64 上比 arm64、給 native-sanitize 在 ASan 下比
+      - name: Same-JVM differential tests
+        run: >-
+          ./gradlew :nightread:testDebugUnitTest -PtestGroup=native
+          -PnativeLib=native/build/host/libnightread_host.so -PgoldenOut=native/build/golden --no-daemon --stacktrace
+
+      # 錄出器（NativeDumpTest）冒煙：一頁合成頁＋C++ 已能重放的兩族原語，再用 nr_dump_check 驗格式、重算摘要、重放
+      # （--expect-*：兩族都要真的重放到、那一頁要真的重算到東西，錄出少了什麼就紅，不會「0 項、0 個不符」通過）
+      - name: Recorder smoke + nr_dump_check
+        run: |
+          ./gradlew :nightread:testDebugUnitTest -PtestGroup=dump -PnativeDump=native/build/dump -PnativeDumpPages=syn_more \
+            -PnativeDumpPrims=packbits,kernel "-PnativeDumpRaw=input,params,tiers:def.*,analysis.a.frame" --no-daemon --stacktrace
+          native/build/host/nr_dump_check --expect-families packbits,kernel --expect-pages 1 native/build/dump
+
+      - name: Upload golden + dump
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-golden
+          path: |
+            native/build/golden
+            native/build/dump
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports-native
+          path: |
+            nightread/build/reports/tests/testDebugUnitTest
+            nightread/build/test-results/testDebugUnitTest
+          if-no-files-found: ignore
+          retention-days: 14
+
+  native-sanitize:
+    name: Native sanitizers (ASan+UBSan, TSan)
+    needs: native
+    # native 紅了也照跑 sanitizer 建置與 ctest；要 golden／錄出的那步才跳過
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download golden + dump
+        if: needs.native.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: native-golden
+          path: native/build
+
+      # -fno-sanitize-recover=all：任何一個報告就失敗。float-cast-overflow 不在 undefined 裡，另外列。
+      - name: ASan + UBSan build + ctest
+        run: bash native/tools/build_host.sh native/build/asan -DNR_SANITIZE=address,undefined,float-cast-overflow -DNR_HOST_JNI=OFF
+
+      - name: ASan + UBSan golden + dump check
+        if: needs.native.result == 'success'
+        run: |
+          native/build/asan/nr_golden_check -j "$(nproc)" native/build/golden
+          native/build/asan/nr_dump_check --expect-families packbits,kernel --expect-pages 1 native/build/dump
+
+      # TSan：nr_core_tests 的並行測試（多頁在不同執行緒、另一條一直取消）。新核心 ASLR 位元太多會報 unexpected memory mapping。
+      - name: TSan build + ctest
+        run: |
+          sudo sysctl vm.mmap_rnd_bits=28
+          bash native/tools/build_host.sh native/build/tsan -DNR_SANITIZE=thread -DNR_HOST_JNI=OFF
+
+  native-guard:
+    name: Native guard (NDK arm64, FMA/OpenMP scan, flags, gen_params, qemu)
+    needs: native
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      NDK_VERSION: 28.2.13676358
+    steps:
+      - uses: actions/checkout@v4
+
+      # 參數結構、ParamsFlat.kt、nr.h 的規則版本都由 gen_params.py 從 Params.kt 產生並入庫：重跑後工作區必須沒有任何變動
+      - name: gen_params.py output is up to date
+        run: |
+          python3 native/tools/gen_params.py
+          git diff --exit-code
+          test -z "$(git status --porcelain)"
+
+      - name: Install ninja + qemu-user
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ninja-build qemu-user-static
+
+      # NDK 28.2（與引擎、fork 同一版）：runner 映像有裝就直接用，沒有就從快取或 sdkmanager 裝到 ~/android-ndk
+      - name: Find preinstalled NDK
+        id: ndk-pre
+        run: |
+          pre="${ANDROID_HOME:-/usr/local/lib/android/sdk}/ndk/$NDK_VERSION"
+          if [ -f "$pre/build/cmake/android.toolchain.cmake" ]; then echo "root=$pre" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Cache NDK
+        id: ndk-cache
+        if: steps.ndk-pre.outputs.root == ''
+        uses: actions/cache@v4
+        with:
+          path: ~/android-ndk/ndk/${{ env.NDK_VERSION }}
+          key: ndk-${{ env.NDK_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Set up Android SDK (sdkmanager)
+        if: steps.ndk-pre.outputs.root == '' && steps.ndk-cache.outputs.cache-hit != 'true'
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Install NDK
+        if: steps.ndk-pre.outputs.root == '' && steps.ndk-cache.outputs.cache-hit != 'true'
+        run: |
+          yes | sdkmanager --sdk_root="$HOME/android-ndk" --licenses > /dev/null || true
+          sdkmanager --sdk_root="$HOME/android-ndk" "ndk;$NDK_VERSION" > /dev/null
+
+      - name: Export ANDROID_NDK_ROOT
+        run: |
+          root="${{ steps.ndk-pre.outputs.root }}"
+          [ -n "$root" ] || root="$HOME/android-ndk/ndk/$NDK_VERSION"
+          test -f "$root/build/cmake/android.toolchain.cmake"
+          grep -q "Pkg.Revision = $NDK_VERSION" "$root/source.properties"
+          echo "ANDROID_NDK_ROOT=$root" >> "$GITHUB_ENV"
+
+      # Debug（AGP debug 是 -O0）與 Release（-O3）都要被 CMake 強制成 -O2；靜態測試執行檔給 qemu
+      - name: NDK arm64 build (Debug + Release)
+        run: |
+          bash native/tools/ndk_build.sh native/build/ndk-arm64 Debug
+          bash native/tools/ndk_build.sh native/build/ndk-arm64-rel Release
+
+      # 掃描腳本有自檢：預設旗標編的 a*b+c 要掃得到 fmadd／vfmadd，掃描本身失效就紅
+      - name: FMA / OpenMP scan + exported symbols
+        run: |
+          bash native/tools/fma_scan.sh native/build/ndk-arm64
+          bash native/tools/fma_scan.sh native/build/ndk-arm64-rel
+
+      - name: Compile flags
+        run: python3 native/tools/check_compile_flags.py native/build/ndk-arm64 native/build/ndk-arm64-rel native/build/host-fma
+
+      - name: arm64 under qemu (cortex-a57) — nr_core_tests
+        run: qemu-aarch64-static -cpu cortex-a57 native/build/ndk-arm64/nr_core_tests
+
+      - name: Download golden + dump
+        if: needs.native.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: native-golden
+          path: native/build
+
+      # 數值核心對 Java 答案（JUnit 寫的 golden）在 arm64 上逐塊比；錄出在 arm64 上重算摘要、重放
+      - name: arm64 under qemu (cortex-a57) — golden + dump check
+        if: needs.native.result == 'success'
+        run: |
+          QEMU_AARCH64="$(command -v qemu-aarch64-static)" bash native/tools/arm64_qemu.sh native/build/golden native/build/ndk-arm64
+          qemu-aarch64-static -cpu cortex-a57 native/build/ndk-arm64/nr_dump_check --expect-families packbits,kernel --expect-pages 1 native/build/dump
+

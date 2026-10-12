@@ -326,7 +326,8 @@ without a bump; versions already shipped are frozen. History and rules: *規則�
 fixtures, the tier baselines, the rules-version guard, intra-page parallelism and a profiling run.
 `-PtestGroup=fast|guard|parallel|profile` runs one group; CI (`.github/workflows/ci.yml`) runs the four in
 parallel on every push to `main` and every pull request. The test JVM needs a 1 GB heap (set in
-`build.gradle.kts`).
+`build.gradle.kts`). The C++ core (`native/`) adds a same-JVM differential group (`-PtestGroup=native`, needs the host
+native library) and a recorder (`-PtestGroup=dump`, skipped unless asked); see `native/README.md`.
 
 ## The red line
 

@@ -213,7 +213,7 @@ Yakuyomi 以研究與非商業用途散布兩顆的 NCNN 轉檔，權利人要�
 
 ## 測試
 
-`./gradlew :nightread:testDebugUnitTest` 跑全部 JVM 測試：原語與整頁對 Python fixture 的 parity、三檔基線、規則版本守門、頁內並行、熱點計時。`-PtestGroup=fast|guard|parallel|profile` 只跑一組；CI（`.github/workflows/ci.yml`）在 push 到 `main` 與每個 PR 時四組平行跑。測試 JVM 要 1 GB heap（設在 `build.gradle.kts`）。
+`./gradlew :nightread:testDebugUnitTest` 跑全部 JVM 測試：原語與整頁對 Python fixture 的 parity、三檔基線、規則版本守門、頁內並行、熱點計時。`-PtestGroup=fast|guard|parallel|profile` 只跑一組；CI（`.github/workflows/ci.yml`）在 push 到 `main` 與每個 PR 時四組平行跑。測試 JVM 要 1 GB heap（設在 `build.gradle.kts`）。夜讀 C++ 核心（`native/`）的同 JVM 差分（`-PtestGroup=native`，要主機原生庫）與錄出器（`-PtestGroup=dump`，平常略過）另見 `native/README.md`。
 
 ## 紅線
 
