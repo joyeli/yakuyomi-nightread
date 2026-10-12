@@ -58,6 +58,19 @@ tasks.withType<Test>().configureEach {
         outputs.dir(dir).withPropertyName("goldenOut")
     }
 
+    // 錄出器（NativeDumpTest，組 dump）：-PnativeDump=<目錄> 才錄，沒給就略過。其餘開關見 NativeDumpTest 的說明：
+    // -PnativeDumpPages（fixtures／fixture 頁名／NRIN 目錄）、-PnativeDumpVariants、-PnativeDumpRaw、-PnativeDumpPrims（false／族名清單）。
+    providers.gradleProperty("nativeDump").orNull?.let {
+        val dir = rootProject.file(it)
+        systemProperty("nightread.nativeDump", dir.absolutePath)
+        outputs.dir(dir).withPropertyName("nativeDump")
+        // 頁可以來自 repo 外的 NRIN 目錄（-PnativeDumpPages），那些檔沒登記成輸入：錄出一律重跑
+        outputs.upToDateWhen { false }
+    }
+    for (k in listOf("nativeDumpPages", "nativeDumpVariants", "nativeDumpRaw", "nativeDumpPrims")) {
+        providers.gradleProperty(k).orNull?.let { systemProperty("nightread.$k", it) }
+    }
+
     // CI 分組（.github/workflows/ci.yml 的 matrix 各跑一組、平行）：-PtestGroup=<組>。幾支整頁的重測試各自成組，
     // 其餘全部歸 fast——新加的測試類別不用登記就落在 fast，不會漏跑。C++ 差分一律命名 Cpp*：native 組用萬用字元收、fast 組排除，
     // 新加的差分測試不用改這裡；用到原生庫卻沒取 Cpp 開頭的類別，在其他組會直接失敗（NativeLib.assumeLoaded），不會被略過。
@@ -70,6 +83,8 @@ tasks.withType<Test>().configureEach {
             "profile" to listOf("ProfileTest"),
             // C++ 差分：要先建主機 .so（CI 的 native job），所以不放 fast
             "native" to listOf("Cpp*"),
+            // 錄出器：平常不跑（沒給 -PnativeDump 就略過），單獨成組免得 fast 組被它拖慢
+            "dump" to listOf("NativeDumpTest"),
         )
         // 一定要跑到的類別：列名的直接算；native 另列現有的四個（萬用字元收不到任何一個時也會在這裡失敗）
         val mustRun = heavy.mapValues { (_, v) -> v.filter { '*' !in it } } +

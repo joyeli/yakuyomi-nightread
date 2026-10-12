@@ -18,7 +18,7 @@
 | `core/fdlibm_rename.h` | 編 fdlibm 時強制引入：小端、`nr_fd_*` 改名 |
 | `third_party/fdlibm/` | netlib fdlibm 5.3 原檔（一字不改；授權見該目錄 `LICENSE`） |
 | `jni/nr_jni.cpp` | 產品 JNI（`li.joye.yakuyomi.nightread.NightNative`）；只用 Java 陣列，`std::bad_alloc` → `OutOfMemoryError` |
-| `test/` | 原生測試（`test_main.cpp`）、golden 檢查（`golden_check.cpp`）、測試案例產生器（`cases.*`）、只給主機的 JNI 測試橋（`test_jni.cpp`） |
+| `test/` | 原生測試（`test_main.cpp`）、golden 檢查（`golden_check.cpp`）、測試案例產生器（`cases.*`）、只給主機的 JNI 測試橋（`test_jni.cpp`）、錄出的讀取與檢查（`nrd.h`、`sha256.h`、`dump_check.cpp`） |
 | `tools/` | 建置與檢查腳本（下面） |
 
 ## 規則（為什麼要這些旗標）
@@ -96,6 +96,25 @@ python3 native/tools/gen_params.py --check    # 只檢查是不是最新的
 - schema 雜湊只看欄位的名稱、型別與順序；`NightNative.available()` 要 `nr_params_schema()` 等於 `ParamsFlat.SCHEMA_HASH` 才用 C++。
 - 驗證：`ParamsFlatTest`（fast 組，反射逐欄比）、`CppParamsParityTest`（native 組：每回合 379 欄各不相同，Kotlin → C++ 與
   C++ → Kotlin 都用名稱逐欄比，另比預設值與不合法輸入）、`nr_core_tests` 的 `testParams`。
+
+## 錄出與重放（`NativeDumpTest`、`nr_dump_check`）
+
+之後各階段搬一個模組，就拿 Kotlin 錄下的真頁資料與原語案例重放、逐位元比，不必等上游模組搬完。
+
+```
+./gradlew :nightread:testDebugUnitTest -PtestGroup=dump -PnativeDump=<目錄>     # 平常不跑；沒給 -PnativeDump 就略過
+native/build/host/nr_dump_check [--expect-families packbits,kernel] [--expect-pages 1] <目錄>   # 驗格式、重算摘要、重放已搬好的部分
+```
+
+- 錄出內容與格式見錄出目錄的 `README.txt`（`NativeDump.kt` 寫）：`prims/`（Cv 原語的隨機與邊界案例，輸入輸出原樣）、
+  `pages/<set>/<頁>/manifest.tsv`（輸入、參數與每種跑法每個成分的摘要）、選了才有的原始資料（頁輸入 NRIN、攤平參數、任意成分）。
+- 開關：`-PnativeDumpPages`（`fixtures`、頁名、本機 NRIN 目錄）、`-PnativeDumpVariants`（`all`＝五檔的 plain／diag 都錄）、
+  `-PnativeDumpRaw`（`input,params` 加成分名，`*` 萬用）、`-PnativeDumpPrims`（`false` 或族名清單）、`-PtestHeap`（大頁用）。
+- **本機語料（c362／c371 等）的錄出不進 repo**。
+- 現在 `nr_dump_check` 會重放的：`packbits`、`kernel` 兩族原語，以及每頁的輸入摘要、參數（C++ fromFlat／toFlat）與原始資料的摘要。
+  其他族（形態學、連通元件、距離、灰階濾波…）在搬到 C++ 的那一階加上重放。
+- 一項都沒驗到、或某一族 0 筆時一律失敗；`--expect-families` 列的族一定要真的重放到、`--expect-pages N` 至少 N 頁真的重算了東西
+  （CI 兩個都給）。`-PnativeDumpPrims` 的族名打錯，錄出器直接失敗。
 
 ## 接進產品
 
