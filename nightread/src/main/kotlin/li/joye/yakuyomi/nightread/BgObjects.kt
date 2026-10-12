@@ -4,7 +4,6 @@ import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.pow
 import kotlin.math.sqrt
 
 /**
@@ -293,8 +292,9 @@ internal object BgObjects {
             val step = (2.0 * c) / (n - 1)
             for (i in 0 until n) {
                 val u = if (i == n - 1) c.toDouble() else i * step + (-c).toDouble()
-                val ry = Math.rint(c + u * Math.sin(t)).toInt()
-                val rx = Math.rint(c + u * Math.cos(t)).toInt()
+                // StrictMath（fdlibm）：Math 在 ART 走平台 libm，各機不保證同值（DECISIONS「平台數學函式改 StrictMath」）
+                val ry = Math.rint(c + u * StrictMath.sin(t)).toInt()
+                val rx = Math.rint(c + u * StrictMath.cos(t)).toInt()
                 k[ry * len + rx] = true
             }
             val pts = ArrayList<Int>()
@@ -918,7 +918,7 @@ internal object BgObjects {
 
     /** 字筆畫亮度查表＝研究端 `text_lut`：BG ＋ clip((((255−g)/255)^1.4 − 0.35)/0.65, 0, 1) ×(INK − BG)，向下取整。 */
     internal fun textLut(bg: Int, ink: Int): FloatArray = FloatArray(256) {
-        val av = ((255.0 - it) / 255.0).pow(1.4)
+        val av = StrictMath.pow((255.0 - it) / 255.0, 1.4)       // StrictMath：同 [lineOffsets]
         val a3 = min(1.0, max(0.0, (av - 0.35) / 0.65))
         floor(bg + a3 * (ink - bg)).toFloat()
     }
@@ -928,7 +928,7 @@ internal object BgObjects {
      * `ink_lut`，向下取整。
      */
     internal fun inkLut(bg: Int, top: Int, inv: Boolean): FloatArray = FloatArray(256) {
-        val a = if (inv) ((255.0 - it) / 255.0).pow(1.4) else (it / 255.0).pow(1.4)
+        val a = if (inv) StrictMath.pow((255.0 - it) / 255.0, 1.4) else StrictMath.pow(it / 255.0, 1.4)   // 同 [lineOffsets]
         floor(bg + a * (top - bg)).toFloat()
     }
 

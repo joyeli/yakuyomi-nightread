@@ -2,7 +2,6 @@ package li.joye.yakuyomi.nightread
 
 import kotlin.math.abs
 import kotlin.math.ceil
-import kotlin.math.exp
 import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
@@ -1166,7 +1165,8 @@ object Cv {
         var sum = 0.0
         for (i in 0 until ks) {
             val x = i - (ks - 1) * 0.5
-            val t = exp(scale2X * x * x)
+            // StrictMath（fdlibm）：Math 在 ART 走平台 libm，各機不保證同值（DECISIONS「平台數學函式改 StrictMath」）
+            val t = StrictMath.exp(scale2X * x * x)
             k[i] = t
             sum += t
         }
@@ -2460,7 +2460,7 @@ object Cv {
     fun gaussW(sigma: Double): IntArray {
         val ks = Math.rint(sigma * 8 + 1).toInt() or 1
         val c = ks / 2
-        val k = DoubleArray(ks) { val d = (it - c).toDouble(); exp(-(d * d) / (2.0 * sigma * sigma)) }
+        val k = DoubleArray(ks) { val d = (it - c).toDouble(); StrictMath.exp(-(d * d) / (2.0 * sigma * sigma)) }   // 同 [gaussianKernel]
         var t = 0.0
         for (v in k) t += v
         val w = IntArray(ks) { floor(k[it] / t * 65536.0 + 0.5).toInt() }
