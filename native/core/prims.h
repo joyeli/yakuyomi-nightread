@@ -4,6 +4,10 @@
 //   第 3a 階（二值的其餘部分，Cv.kt :115-573、739-1145、1251-1654、2144-2219、2870-2919、3040-3053）：結構元素、二值形態學
 //   （一般核、線核、方核分解、打包格式的侵蝕）、ccRunsBits、distanceSq、chamfer、縮放、補洞、輪廓長、多邊形面積、測地生長、
 //   二值中值。位元的底層小工具（含 Ring 的位元集合）在 bits.h。
+//   第 3b 階（灰階、濾波、繪圖、numpy 相容；計畫寫的是 3a 之前的行號 :575-737、1147-1250、1656-2143、2221-2865、2921-3038）：
+//   灰階形態學與 blackhat、高斯／均值濾波（sepFilter）、cv2.line／fillPoly、最大值濾波（環狀列）、gaussQ16 的取樣版（gaussQ16Sparse、
+//   GrayRows、MedianRows）、單點整數高斯 gaussAt（原 BgObjects.gaussAt，搬到底層：效果線與背景物件都用，兩邊不必互相依賴）、
+//   uint8 中值、Canny。npArgsort、npSum、eigh2 在 jmath.h（第 1 階），gaussW、gaussianKernel 在 tables.h。
 //
 // 規則（native/README.md）：不遞迴、堆疊上沒有大陣列、沒有全域可變狀態、不開執行緒；不同呼叫可在不同執行緒同時跑，唯讀的輸入可以共用。
 // 暫存都是 Buf（給了 Budget 就記帳），配置失敗丟 std::bad_alloc。
@@ -124,6 +128,101 @@ Mask geodesicGrow(const Mask& seed, const Mask& within, int32_t iters, int32_t s
 
 /** Cv.medianBlurMask：二值中值（多數決，BORDER_REPLICATE）。r < 0 丟 std::invalid_argument；影像寬或高是 0 而 r ≥ 2 時也丟（Kotlin 的 coerceIn）。 */
 Mask medianBlurMask(const Mask& m, int32_t r, Budget* b = nullptr);
+
+// ── 第 3b 階 ────────────────────────────────────────────────────────────
+//
+// Kotlin 會丟例外的輸入照樣丟（越界 std::out_of_range、負的陣列長度 std::length_error、Kotlin 的 require／coerceIn std::invalid_argument）；
+// 陣列存取在 Kotlin 會越界的地方，這裡在同一個位置檢查。Kotlin 停不下來的輸入（reflect101(i, 0)）丟 std::invalid_argument。
+
+/**
+ * Cv.dilateGray／erodeGray（lo＝0、hi＝255）與 dilateGrayI／erodeGrayI（lo＝INT32_MIN、hi＝INT32_MAX）的本體 Cv.morphGray：
+ * 逐列滑動極值，外側不影響極值。寬 0、高 > 0 而且核有非空的列時丟（Kotlin 的 slidingExtreme 讀 a[0]）。
+ */
+ImgI32 morphGray(const ImgI32& g, const Kernel& k, bool wantMax, int32_t lo, int32_t hi, Budget* b = nullptr);
+ImgI32 dilateGray(const ImgI32& g, const Kernel& k, Budget* b = nullptr);
+ImgI32 erodeGray(const ImgI32& g, const Kernel& k, Budget* b = nullptr);
+ImgI32 dilateGrayI(const ImgI32& g, const Kernel& k, Budget* b = nullptr);
+ImgI32 erodeGrayI(const ImgI32& g, const Kernel& k, Budget* b = nullptr);
+
+/** Cv.blackhat：close(g) − g（負的取 0）。核每列都含錨點欄、值都在 0..255 時走 morphGrayGather，否則 morphGray（同 Kotlin）。 */
+ImgI32 blackhat(const ImgI32& g, const Kernel& k, Budget* b = nullptr);
+
+/** Cv.sepFilter：可分離濾波（先橫後縱，BORDER_REFLECT_101；核轉成 float，Float 乘加不合成 FMA）。k 長 n。 */
+ImgF32 sepFilter(const ImgF32& f, const double* k, int32_t n, Budget* b = nullptr);
+/** Cv.gaussianBlur：σ ≤ 0 回複本；σ 是 NaN 丟 std::invalid_argument（Kotlin roundToInt）；核長超過 Java 陣列上限丟 std::bad_alloc。 */
+ImgF32 gaussianBlur(const ImgF32& f, double sigma, Budget* b = nullptr);
+/** Cv.boxBlur：k 個 1/k 的核（k < 0 丟 std::length_error；k＝0 是空核，輸出全 0）。 */
+ImgF32 boxBlur(const ImgF32& f, int32_t k, Budget* b = nullptr);
+
+/** Cv.line（cv2.line，LINE_8、shift 0）：在 m 上就地畫。端點可在影像外。 */
+void line(Mask& m, int32_t x0, int32_t y0, int32_t x1, int32_t y1, int32_t thickness);
+/**
+ * Cv.fillPoly（cv2.fillPoly，單一多邊形、LINE_8、shift 0）：在 m 上就地填。xs 長 count、ys 長 ny；count＝0 或 ny < count 丟
+ * std::out_of_range（Kotlin 讀 xs[-1]／ys 越界，都在畫之前）。
+ */
+void fillPoly(Mask& m, const int32_t* xs, int32_t count, const int32_t* ys, int32_t ny, Budget* b = nullptr);
+
+/**
+ * Cv.maxFilterWrapRows：(2nt+1)×(2nr+1) 最大值濾波，列方向環狀、欄方向界外當 0。s 長 sLen（至少 rows·cols 才不越界）。
+ * 輸出 rows×cols（ImgI32 的 w＝cols、h＝rows）。
+ */
+ImgI32 maxFilterWrapRows(const int32_t* s, size_t sLen, int32_t rows, int32_t cols, int32_t nt, int32_t nr, Budget* b = nullptr);
+
+/** Cv.gaussAt（原 BgObjects.gaussAt）：整數高斯在單一像素的值。k 長 ks（Cv.gaussW 的核）。 */
+int32_t gaussAt(const ImgI32& g, const int32_t* k, int32_t ks, int32_t x, int32_t y);
+
+/** Cv.RowSrc：把頁面第 r 列在游程 [rs[q], re[q])（共 n 段）上的值寫進頁寬的 dst（長 dstLen）。 */
+struct RowSrc {
+    virtual ~RowSrc() = default;
+    virtual void fill(int32_t r, const int32_t* rs, const int32_t* re, int32_t n, int32_t* dst, size_t dstLen) = 0;
+};
+
+/** Cv.RowSink：頁面第 y 列的值在頁寬的 v，只在游程上有定義；回呼返回後緩衝會被重用。 */
+struct RowSink {
+    virtual ~RowSink() = default;
+    virtual void row(int32_t y, const int32_t* v, const int32_t* rs, const int32_t* re, int32_t n) = 0;
+};
+
+/** Cv.GrayRows：灰階頁面逐段複製（越界同 System.arraycopy 丟 std::out_of_range）。g 要活過呼叫。 */
+class GrayRows final : public RowSrc {
+public:
+    explicit GrayRows(const ImgI32& g) : g_(g) {}
+    void fill(int32_t r, const int32_t* rs, const int32_t* re, int32_t n, int32_t* dst, size_t dstLen) override;
+
+private:
+    const ImgI32& g_;
+};
+
+/**
+ * Cv.MedianRows：cv2.medianBlur(u8, ksize) 只算要的欄（每段從段首的窗起算、沿段滑動）。ksize < 0 在建構時丟 std::length_error；
+ * ksize 是 0 或偶數、頁高 0、頁寬 0、值不在 0..255 時 fill 丟（Kotlin 的陣列越界／coerceIn）。g 要活過呼叫。
+ */
+class MedianRows final : public RowSrc {
+public:
+    MedianRows(const ImgI32& g, int32_t ksize, Budget* b = nullptr);
+    void fill(int32_t r, const int32_t* rs, const int32_t* re, int32_t n, int32_t* dst, size_t dstLen) override;
+
+private:
+    const ImgI32& g_;
+    int32_t ksize_;
+    Buf<int32_t> fine_, cols_;
+};
+
+/**
+ * Cv.gaussQ16Sparse：只算 need 標的輸出像素的 gaussQ16（同一套整數運算，有算的值與整頁版逐位元相同）。k 長 ks（gaussW 的核）；
+ * need＝頁面第 ny0 列起 nrows 列的列打包位元（每列 (w+63)/64 字，長 needLen）。每個有 need 的輸出列（y 遞增）交給 sink。
+ */
+void gaussQ16Sparse(int32_t w, int32_t h, const int32_t* k, int32_t ks, const uint64_t* need, size_t needLen, int32_t ny0, int32_t nrows,
+                    RowSrc& src, RowSink& sink, Budget* b = nullptr);
+
+/** Cv.medianBlur8：cv2.medianBlur(u8, ksize)（BORDER_REPLICATE）。例外的條件同 MedianRows（ksize < 0 一律丟，其他在高 ≥ 1 時）。 */
+ImgI32 medianBlur8(const ImgI32& g, int32_t ksize, Budget* b = nullptr);
+
+/**
+ * Cv.canny：cv2.Canny(u8, lo, hi)（aperture 3、L1 梯度、非 IPP）；輸入＝src 右移 shift 位。src 長 srcLen（至少 w·h）。
+ * 寬或高是負的丟 std::length_error。
+ */
+Mask canny(const int32_t* src, size_t srcLen, int32_t w, int32_t h, int32_t shift, int32_t lo, int32_t hi, Budget* b = nullptr);
 
 }  // namespace prims
 }  // namespace nr

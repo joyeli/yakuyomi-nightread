@@ -51,7 +51,7 @@ target_compile_options(nightread_fdlibm PRIVATE ${NR_BITEXACT_FLAGS} -w
 # ── 核心 ─────────────────────────────────────────────────────────────────
 add_library(nightread_core STATIC
   core/jmath.cpp core/types.cpp core/bits.cpp core/tables.cpp core/convert.cpp core/page.cpp core/params.cpp core/prims.cpp
-  core/prims_mask.cpp
+  core/prims_mask.cpp core/prims_gray.cpp core/prims_draw.cpp
   $<TARGET_OBJECTS:nightread_fdlibm>)
 target_include_directories(nightread_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 set_target_properties(nightread_core PROPERTIES

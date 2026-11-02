@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -1159,6 +1160,281 @@ void testBinConcurrent() {
     CHECK(bad.load() == 0);
 }
 
+// ── 第 3b 階：灰階、濾波、繪圖、取樣版高斯（逐位元對 Kotlin 由 JUnit／錄放驗；這裡是不依賴 Kotlin 的交叉檢查與小堆疊）──────────
+
+nr::ImgI32 grayRand(int32_t w, int32_t h, uint64_t seed) {
+    nr::ImgI32 g(w, h);
+    for (size_t i = 0; i < g.data.size(); i++) g.data[i] = static_cast<int32_t>(lcg(seed) & 255);
+    return g;
+}
+
+/** 灰階形態學的暴力參考（核每列含錨點的核：視窗不會整個落在頁外）：輸出 (x, y) 取輸入 (x + kx − ax, y + ky − ay) 在頁內的極值。 */
+nr::ImgI32 refMorphGray(const nr::ImgI32& g, const nr::Kernel& k, bool wantMax) {
+    nr::ImgI32 o(g.w, g.h);
+    for (int32_t y = 0; y < g.h; y++) for (int32_t x = 0; x < g.w; x++) {
+        int32_t acc = wantMax ? INT32_MIN : INT32_MAX;
+        for (int32_t ky = 0; ky < k.h; ky++) for (int32_t kx = 0; kx < k.w; kx++) {
+            if (!k.data[static_cast<size_t>(ky) * k.w + kx]) continue;
+            const int32_t sx = x + kx - k.ax, sy = y + ky - k.ay;
+            if (sx < 0 || sy < 0 || sx >= g.w || sy >= g.h) continue;
+            const int32_t v = g.data[static_cast<size_t>(sy) * g.w + sx];
+            acc = wantMax ? (v > acc ? v : acc) : (v < acc ? v : acc);
+        }
+        o.data[static_cast<size_t>(y) * g.w + x] = acc;
+    }
+    return o;
+}
+
+bool sameImg(const nr::ImgI32& a, const nr::ImgI32& b) {
+    return a.w == b.w && a.h == b.h && (a.data.size() == 0 || std::memcmp(a.data.data(), b.data.data(), a.data.size() * 4) == 0);
+}
+
+void testGrayMorph() {
+    for (int32_t w : {1, 2, 63, 64, 65, 129}) for (int32_t h : {1, 3, 64}) {
+        const nr::ImgI32 g = grayRand(w, h, uint64_t(w) * 131 + h);
+        for (int32_t s : {1, 3, 7, 11}) {
+            const nr::Kernel e = nr::prims::ellipse(s);
+            const nr::ImgI32 d = nr::prims::dilateGray(g, e), er = nr::prims::erodeGray(g, e);
+            CHECK(sameImg(d, refMorphGray(g, e, true)));
+            CHECK(sameImg(er, refMorphGray(g, e, false)));
+            // 8 位元的影像：I 版、gather 版都相同（Kotlin 文件寫的性質）
+            CHECK(sameImg(nr::prims::dilateGrayI(g, e), d));
+            CHECK(sameImg(nr::prims::erodeGrayI(g, e), er));
+            CHECK(sameImg(nr::prims::morphGrayGather(g, e, true), d));
+            // blackhat＝close − g ≥ 0
+            const nr::ImgI32 bh = nr::prims::blackhat(g, e);
+            const nr::ImgI32 cl = nr::prims::erodeGray(d, e);
+            bool ok = bh.w == w && bh.h == h;
+            for (size_t i = 0; ok && i < bh.data.size(); i++) ok = bh.data[i] >= 0 && bh.data[i] == std::max(0, cl.data[i] - g.data[i]);
+            CHECK(ok);
+        }
+    }
+    // 寬 0、高 > 0：Kotlin 的 slidingExtreme 讀 a[0] 越界
+    bool threw = false;
+    try { nr::prims::dilateGray(nr::ImgI32(0, 3), nr::prims::ellipse(3)); } catch (const std::out_of_range&) { threw = true; }
+    CHECK(threw);
+    CHECK(nr::prims::dilateGray(nr::ImgI32(0, 0), nr::prims::ellipse(3)).data.size() == 0);
+}
+
+void testGrayFilters() {
+    // 常數影像的高斯／方框：每個輸出都接近常數（權重和為 1；Float 誤差很小）
+    nr::ImgF32 c(97, 41);
+    for (size_t i = 0; i < c.data.size(); i++) c.data[i] = 100.0f;
+    for (double s : {0.3, 0.7, 2.0, 5.0}) {
+        const nr::ImgF32 o = nr::prims::gaussianBlur(c, s);
+        bool ok = true;
+        for (float v : std::vector<float>(o.data.data(), o.data.data() + o.data.size())) ok = ok && v > 99.99f && v < 100.01f;
+        CHECK(ok);
+    }
+    const nr::ImgF32 b1 = nr::prims::boxBlur(c, 1);
+    CHECK(std::memcmp(b1.data.data(), c.data.data(), c.data.size() * 4) == 0);
+    const nr::ImgF32 b0 = nr::prims::boxBlur(c, 0);
+    bool zero = true;
+    for (size_t i = 0; i < b0.data.size(); i++) zero = zero && nr::jm::fbits(b0.data[i]) == 0;
+    CHECK(zero);
+    const nr::ImgF32 same = nr::prims::gaussianBlur(c, 0.0);
+    CHECK(std::memcmp(same.data.data(), c.data.data(), c.data.size() * 4) == 0);
+    bool threw = false;
+    try { nr::prims::gaussianBlur(c, std::numeric_limits<double>::quiet_NaN()); } catch (const std::invalid_argument&) { threw = true; }
+    CHECK(threw);
+    threw = false;
+    try { nr::prims::boxBlur(c, -1); } catch (const std::length_error&) { threw = true; }
+    CHECK(threw);
+}
+
+/** 排序法的 uint8 中值（BORDER_REPLICATE）。 */
+nr::ImgI32 refMedian(const nr::ImgI32& g, int32_t k) {
+    nr::ImgI32 o(g.w, g.h);
+    const int32_t r = k / 2;
+    std::vector<int32_t> v;
+    for (int32_t y = 0; y < g.h; y++) for (int32_t x = 0; x < g.w; x++) {
+        v.clear();
+        for (int32_t dy = -r; dy <= r; dy++) for (int32_t dx = -r; dx <= r; dx++) {
+            const int32_t yy = std::min(std::max(y + dy, 0), g.h - 1), xx = std::min(std::max(x + dx, 0), g.w - 1);
+            v.push_back(g.data[static_cast<size_t>(yy) * g.w + xx]);
+        }
+        std::sort(v.begin(), v.end());
+        o.data[static_cast<size_t>(y) * g.w + x] = v[v.size() / 2];
+    }
+    return o;
+}
+
+/** 收 gaussQ16Sparse 交給 sink 的每一列：存成整頁（沒算的格子是 INT32_MIN）。 */
+class PageSink final : public nr::prims::RowSink {
+public:
+    explicit PageSink(int32_t w, int32_t h) : w_(w), v(static_cast<size_t>(w) * h, INT32_MIN) {}
+    void row(int32_t y, const int32_t* p, const int32_t* rs, const int32_t* re, int32_t n) override {
+        for (int32_t q = 0; q < n; q++) for (int32_t x = rs[q]; x < re[q]; x++) v[static_cast<size_t>(y) * w_ + x] = p[x];
+    }
+    int32_t w_;
+    std::vector<int32_t> v;
+};
+
+void testGraySparse() {
+    for (int32_t w : {1, 63, 64, 65, 129}) for (int32_t h : {1, 2, 40}) {
+        const nr::ImgI32 g = grayRand(w, h, uint64_t(w) * 7 + h);
+        for (int32_t ks : {1, 3, 5, 7}) CHECK(sameImg(nr::prims::medianBlur8(g, ks), refMedian(g, ks)));
+        for (double s : {0.3, 1.0, 2.5, 3.0}) {
+            const std::vector<int32_t> k = nr::tables::gaussW(s);
+            const nr::ImgI32 full = nr::prims::gaussQ16(g, s);
+            // 單點＝整頁版的那一點
+            bool ok = true;
+            for (int32_t y = 0; y < h; y++) for (int32_t x = 0; x < w; x++)
+                ok = ok && nr::prims::gaussAt(g, k.data(), static_cast<int32_t>(k.size()), x, y) == full.data[static_cast<size_t>(y) * w + x];
+            CHECK(ok);
+            // 取樣版：need 隨機，算出的每一格＝整頁版；沒 need 的不算
+            const nr::Mask nm = randomMask(w, h, uint64_t(w) * 31 + h, 300);
+            const nr::PackedBits need = nr::packBits(nm);
+            nr::prims::GrayRows rows(g);
+            PageSink sink(w, h);
+            nr::prims::gaussQ16Sparse(w, h, k.data(), static_cast<int32_t>(k.size()), need.words.data(), need.words.size(), 0, h, rows, sink);
+            ok = true;
+            for (size_t i = 0; i < sink.v.size(); i++) ok = ok && (nm.data[i] ? sink.v[i] == full.data[i] : sink.v[i] == INT32_MIN);
+            CHECK(ok);
+            // 中值來源＝gaussQ16(medianBlur8(g, 3))
+            const nr::ImgI32 fm = nr::prims::gaussQ16(nr::prims::medianBlur8(g, 3), s);
+            nr::prims::MedianRows mr(g, 3);
+            PageSink sm(w, h);
+            nr::prims::gaussQ16Sparse(w, h, k.data(), static_cast<int32_t>(k.size()), need.words.data(), need.words.size(), 0, h, mr, sm);
+            ok = true;
+            for (size_t i = 0; i < sm.v.size(); i++) ok = ok && (nm.data[i] ? sm.v[i] == fm.data[i] : sm.v[i] == INT32_MIN);
+            CHECK(ok);
+        }
+    }
+    // Kotlin 會丟的：偶數 ksize、值超出 0..255、點的平坦索引越界、空核
+    const nr::ImgI32 g = grayRand(37, 41, 5);
+    int thrown = 0;
+    try { nr::prims::medianBlur8(g, 4); } catch (const std::out_of_range&) { thrown++; }
+    try { nr::prims::medianBlur8(g, -1); } catch (const std::length_error&) { thrown++; }
+    nr::ImgI32 bad(37, 41);
+    bad.data[100] = 256;
+    try { nr::prims::medianBlur8(bad, 3); } catch (const std::out_of_range&) { thrown++; }
+    const std::vector<int32_t> k1 = nr::tables::gaussW(1.0);
+    try { nr::prims::gaussAt(g, k1.data(), static_cast<int32_t>(k1.size()), -1, 0); } catch (const std::out_of_range&) { thrown++; }
+    try { nr::prims::gaussAt(g, k1.data(), 0, 3, 3); } catch (const std::out_of_range&) { thrown++; }
+    CHECK(thrown == 5);
+    // 欄越界、平坦索引在頁內：照算（Kotlin 讀到下一列）
+    CHECK(nr::prims::gaussAt(g, k1.data(), static_cast<int32_t>(k1.size()), 37, 5) >= 0);
+}
+
+void testGrayCannyMaxFilter() {
+    // 常數影像沒有邊；直的階梯在階梯處有邊
+    nr::ImgI32 c(50, 30);
+    for (size_t i = 0; i < c.data.size(); i++) c.data[i] = 128;
+    const nr::Mask e0 = nr::prims::canny(c.data.data(), c.data.size(), 50, 30, 0, 10, 30);
+    CHECK(std::count(e0.data.data(), e0.data.data() + e0.data.size(), 1) == 0);
+    for (int32_t y = 0; y < 30; y++) for (int32_t x = 25; x < 50; x++) c.data[static_cast<size_t>(y) * 50 + x] = 250;
+    const nr::Mask e1 = nr::prims::canny(c.data.data(), c.data.size(), 50, 30, 0, 10, 30);
+    bool ok = true;
+    for (int32_t y = 0; y < 30; y++) ok = ok && (e1.data[static_cast<size_t>(y) * 50 + 24] || e1.data[static_cast<size_t>(y) * 50 + 25]);
+    CHECK(ok);
+    // 最大值濾波對暴力法
+    uint64_t seed = 77;
+    for (int32_t rows : {1, 7, 30}) for (int32_t cols : {1, 13, 64}) for (int32_t nt : {0, 1, 3, 40}) for (int32_t nr : {0, 2, 6}) {
+        std::vector<int32_t> s(static_cast<size_t>(rows) * cols);
+        for (auto& v : s) v = static_cast<int32_t>(lcg(seed) % 1000);
+        const nr::ImgI32 o = nr::prims::maxFilterWrapRows(s.data(), s.size(), rows, cols, nt, nr);
+        bool same = o.w == cols && o.h == rows;
+        for (int32_t r = 0; same && r < rows; r++) for (int32_t c2 = 0; same && c2 < cols; c2++) {
+            int32_t m = 0;
+            for (int32_t dq = -nt; dq <= nt; dq++) {
+                const int32_t rr = ((r + dq) % rows + rows) % rows;
+                for (int32_t dc = -nr; dc <= nr; dc++) {
+                    const int32_t cc = c2 + dc;
+                    if (cc >= 0 && cc < cols) m = std::max(m, s[static_cast<size_t>(rr) * cols + cc]);
+                }
+            }
+            same = o.data[static_cast<size_t>(r) * cols + c2] == m;
+        }
+        CHECK(same);
+    }
+}
+
+void testGrayDraw() {
+    // 細線：兩端點都在、8 連通；畫出界外的線不寫越界
+    nr::Mask m(40, 30);
+    nr::prims::line(m, 3, 4, 30, 20, 1);
+    CHECK(m.data[4 * 40 + 3] == 1 && m.data[20 * 40 + 30] == 1);
+    nr::Mask far(40, 30);
+    nr::prims::line(far, -100000, -5, 100000, 40, 1);
+    nr::prims::line(far, -(1 << 20), 1 << 20, 1 << 20, -(1 << 20), 7);
+    CHECK(std::count(far.data.data(), far.data.data() + far.data.size(), 1) > 0);
+    // 粗線：端點的實心圓半徑 (th+1)/2
+    nr::Mask t(60, 60);
+    nr::prims::line(t, 20, 30, 40, 30, 9);
+    CHECK(t.data[30 * 60 + 20 - 4] == 1 && t.data[(30 + 4) * 60 + 20] == 1 && t.data[30 * 60 + 40 + 4] == 1 && t.data[(30 + 6) * 60 + 30] == 0);
+    // 長方形多邊形＝填滿那個長方形
+    nr::Mask p(50, 40);
+    const int32_t xs[4] = {5, 30, 30, 5}, ys[4] = {6, 6, 25, 25};
+    nr::prims::fillPoly(p, xs, 4, ys, 4);
+    bool ok = true;
+    for (int32_t y = 0; y < 40; y++) for (int32_t x = 0; x < 50; x++) ok = ok && p.data[static_cast<size_t>(y) * 50 + x] == ((x >= 5 && x <= 30 && y >= 6 && y <= 25) ? 1 : 0);
+    CHECK(ok);
+    bool threw = false;
+    try { nr::prims::fillPoly(p, xs, 0, ys, 0); } catch (const std::out_of_range&) { threw = true; }
+    CHECK(threw);
+    threw = false;
+    try { nr::prims::fillPoly(p, xs, 4, ys, 3); } catch (const std::out_of_range&) { threw = true; }
+    CHECK(threw);
+}
+
+/** 整頁尺寸的 3b 原語在 256 KB 堆疊上跑完（不在堆疊放大陣列），記憶體帳歸零。 */
+void testGrayBudgetAndStack() {
+    const int32_t W = 1351, H = 1920;
+    const nr::ImgI32 g = fakePage(W, H, 11);
+    const nr::Mask m = thresh(g, 200);
+    nr::Budget b;
+    {
+        const nr::ImgI32 bh = nr::prims::blackhat(g, nr::prims::ellipse(7), &b);
+        const nr::ImgI32 dg = nr::prims::dilateGray(g, nr::prims::ellipse(7), &b);
+        nr::ImgF32 f(W, H, &b);
+        for (size_t i = 0; i < f.data.size(); i++) f.data[i] = m.data[i] ? 1.0f : 0.0f;
+        const nr::ImgF32 gb = nr::prims::gaussianBlur(f, 4.0, &b);
+        const nr::ImgF32 bb = nr::prims::boxBlur(f, 15, &b);
+        const nr::ImgI32 q = nr::prims::gaussQ16(g, 2.0, &b);
+        const nr::Mask cn = nr::prims::canny(q.data.data(), q.data.size(), W, H, 16, 15, 40, &b);
+        const nr::ImgI32 md = nr::prims::medianBlur8(g, 7, &b);
+        nr::Mask ln(W, H, &b);
+        for (int i = 0; i < 20; i++) nr::prims::line(ln, -20, H * i / 20, W + 20, H * (20 - i) / 20, 17);
+        const int32_t xs[4] = {W / 10, W * 9 / 10, W * 9 / 10, W / 10}, ys[4] = {H / 3, H / 3 + 5, H / 3 + 25, H / 3 + 20};
+        nr::prims::fillPoly(ln, xs, 4, ys, 4, &b);
+        std::vector<int32_t> s(static_cast<size_t>(360) * 4697, 3);
+        const nr::ImgI32 mf = nr::prims::maxFilterWrapRows(s.data(), s.size(), 360, 4697, 3, 6, &b);
+        const std::vector<int32_t> k = nr::tables::gaussW(3.0);
+        const nr::PackedBits need = nr::packBits(m, &b);
+        nr::prims::MedianRows mr(g, 7, &b);
+        PageSink sink(W, H);
+        nr::prims::gaussQ16Sparse(W, H, k.data(), static_cast<int32_t>(k.size()), need.words.data(), need.words.size(), 0, H, mr, sink, &b);
+        int64_t acc = 0;
+        for (int i = 0; i < 2000; i++) acc += nr::prims::gaussAt(g, k.data(), static_cast<int32_t>(k.size()), (i * 37) % W, (i * 61) % H);
+        CHECK(b.cur.load() > 0 && bh.h == H && dg.h == H && gb.h == H && bb.h == H && cn.h == H && md.h == H && mf.h == 360 && acc > 0 &&
+              std::count(ln.data.data(), ln.data.data() + ln.data.size(), 1) > 0);
+    }
+    CHECK(b.cur.load() == 0);
+}
+
+/** 多條執行緒同時用同一份唯讀輸入（TSan 建置抓資料競爭）。 */
+void testGrayConcurrent() {
+    const nr::ImgI32 g = fakePage(257, 96, 17);
+    const nr::Kernel e = nr::prims::ellipse(7);
+    const nr::ImgI32 w1 = nr::prims::blackhat(g, e);
+    const nr::ImgI32 w2 = nr::prims::medianBlur8(g, 5);
+    const std::vector<int32_t> k = nr::tables::gaussW(2.5);
+    const int32_t w3 = nr::prims::gaussAt(g, k.data(), static_cast<int32_t>(k.size()), 100, 50);
+    std::atomic<int> bad{0};
+    std::vector<std::thread> ts;
+    for (int t = 0; t < 8; t++) {
+        ts.emplace_back([&] {
+            for (int i = 0; i < 3; i++) {
+                if (!sameImg(nr::prims::blackhat(g, e), w1) || !sameImg(nr::prims::medianBlur8(g, 5), w2) ||
+                    nr::prims::gaussAt(g, k.data(), static_cast<int32_t>(k.size()), 100, 50) != w3) bad++;
+            }
+        });
+    }
+    for (auto& t : ts) t.join();
+    CHECK(bad.load() == 0);
+}
+
 void* runAll(void*) {
     testRounding();
     testBigDecimal();
@@ -1183,6 +1459,13 @@ void* runAll(void*) {
     testBinDistanceAndMisc();
     testBinBudgetAndStack();
     testBinConcurrent();
+    testGrayMorph();
+    testGrayFilters();
+    testGraySparse();
+    testGrayCannyMaxFilter();
+    testGrayDraw();
+    testGrayBudgetAndStack();
+    testGrayConcurrent();
     return nullptr;
 }
 
