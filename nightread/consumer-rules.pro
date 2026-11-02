@@ -3,3 +3,6 @@
 -keepclasseswithmembernames,includedescriptorclasses class li.joye.yakuyomi.nightread.NightNative {
     native <methods>;
 }
+-keepclasseswithmembernames,includedescriptorclasses class li.joye.yakuyomi.nightread.NightNativePrims {
+    native <methods>;
+}

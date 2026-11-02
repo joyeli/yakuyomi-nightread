@@ -8,8 +8,8 @@ package li.joye.yakuyomi.nightread
  * 測試自己 `System.load` 本 repo 編的 `libnightread_host.so`（`native/README.md`）。所以呼叫任何方法前先問 [available]：
  * 沒載入、或載入的 .so 跟這份 Kotlin 不同版（ABI、規則版本或參數 schema 不同）時回 false，呼叫端一律改用 Kotlin 版。
  *
- * 階段 1 只有骨架：以「頁」為單位的 handle（[create]／[free]），像素分條進出（[putRows] 把 ARGB 轉成灰階與彩度、[getRows]
- * 取回），原生記憶體峰值（[peakBytes]）與取消旗標（[cancel]）。重繪本身還在 Kotlin（[NightRead]）。
+ * 現在只有骨架：以「頁」為單位的 handle（[create]／[free]），像素分條進出（[putRows] 把 ARGB 轉成灰階與彩度、[getRows]
+ * 取回），原生記憶體峰值（[peakBytes]）與取消旗標（[cancel]）。重繪本身還在 Kotlin（[NightRead]）；第一批原語的差分與計時走 [NightNativePrims]。
  *
  * 例外：參數不合法丟 [IllegalArgumentException]；原生配置失敗丟 [OutOfMemoryError]（與 Kotlin 版每頁 OOM 的補跑路徑相同）；
  * 呼叫順序不對丟 [IllegalStateException]。handle 用完一定要 [free]，同一個 handle 不要在兩條執行緒同時寫。
@@ -18,7 +18,7 @@ package li.joye.yakuyomi.nightread
  */
 object NightNative {
     /** C API／JNI 的 ABI 版本，必須等於 `native/include/nightread/nr.h` 的 `NR_ABI_VERSION`。 */
-    const val ABI_VERSION: Int = 1
+    const val ABI_VERSION: Int = 2
 
     /** [getRows] 的平面：灰階（BT.601，0..255）。 */
     const val PLANE_GRAY: Int = 0

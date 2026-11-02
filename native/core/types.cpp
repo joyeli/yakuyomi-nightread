@@ -9,8 +9,15 @@ namespace nr {
 void* bufAlloc(size_t n, size_t elemSize, Budget* budget) {
     if (n == 0) return nullptr;
     if (n > SIZE_MAX / elemSize) throw std::bad_alloc();
+#ifdef NR_EXPLICIT_ZERO_ALLOC
+    // 只有 NDK 靜態測試檔（qemu-aarch64）：見 CMakeLists.txt 的 NR_STATIC_TESTS
+    void* p = std::malloc(n * elemSize);
+    if (p == nullptr) throw std::bad_alloc();
+    std::memset(p, 0, n * elemSize);
+#else
     void* p = std::calloc(n, elemSize);
     if (p == nullptr) throw std::bad_alloc();
+#endif
     if (budget != nullptr) budget->add(static_cast<int64_t>(n * elemSize));
     return p;
 }

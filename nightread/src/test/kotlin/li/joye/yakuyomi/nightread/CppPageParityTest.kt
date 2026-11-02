@@ -48,7 +48,7 @@ class CppPageParityTest {
         NativeLib.assumeLoaded()
         assertTrue("載入主機原生庫後 NightNative.available() 要是 true", NightNative.available())
         assertEquals(NightNative.expectedAbi(), NightNative.abi())
-        assertEquals((1 shl 16) or NightRead.RULES_VERSION, NightNative.abi())
+        assertEquals((NightNative.ABI_VERSION shl 16) or NightRead.RULES_VERSION, NightNative.abi())
     }
 
     @Test

@@ -49,13 +49,19 @@ target_compile_options(nightread_fdlibm PRIVATE ${NR_BITEXACT_FLAGS} -w
 
 # ── 核心 ─────────────────────────────────────────────────────────────────
 add_library(nightread_core STATIC
-  core/jmath.cpp core/types.cpp core/tables.cpp core/convert.cpp core/page.cpp core/params.cpp
+  core/jmath.cpp core/types.cpp core/tables.cpp core/convert.cpp core/page.cpp core/params.cpp core/prims.cpp
   $<TARGET_OBJECTS:nightread_fdlibm>)
 target_include_directories(nightread_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 set_target_properties(nightread_core PROPERTIES
   POSITION_INDEPENDENT_CODE ON CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF
   CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
 target_compile_options(nightread_core PRIVATE ${NR_BITEXACT_FLAGS} -fexceptions -Wall -Wextra)
+# 只有給 qemu-aarch64 跑的靜態測試檔：Buf 不用 calloc，改 malloc＋memset。bionic 的 scudo 把 madvise(MADV_DONTNEED) 過的快取大塊當成全 0、
+# calloc 重用時不清，而 qemu-user 7.2 之前的 madvise 什麼都不做就回成功（Ubuntu 22.04 的 6.2 實測讀回舊值），大塊 calloc 在模擬器上會拿到
+# 舊資料（重放真頁時 segfault、heap 損毀）。真機的 madvise 正常，產品與手機探針都走 calloc。
+if(NR_STATIC_TESTS)
+  target_compile_definitions(nightread_core PRIVATE NR_EXPLICIT_ZERO_ALLOC)
+endif()
 
 # ── JNI ─────────────────────────────────────────────────────────────────
 # Android：jni.h 在 NDK sysroot。主機：從 JAVA_HOME（或 -DNR_JAVA_HOME）找標頭；只要標頭，不連 libjvm。
@@ -78,7 +84,7 @@ else()
 endif()
 
 if(NR_HAVE_JNI)
-  add_library(nightread_jni OBJECT jni/nr_jni.cpp)
+  add_library(nightread_jni OBJECT jni/nr_jni.cpp jni/nr_prims_jni.cpp)
   set_target_properties(nightread_jni PROPERTIES
     POSITION_INDEPENDENT_CODE ON CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF
     CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)

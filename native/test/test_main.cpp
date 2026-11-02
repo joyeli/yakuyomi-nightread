@@ -17,6 +17,7 @@
 #include "../core/convert.h"
 #include "../core/jmath.h"
 #include "../core/params_gen.h"
+#include "../core/prims.h"
 #include "../core/tables.h"
 #include "../core/types.h"
 #include "cases.h"
@@ -338,7 +339,7 @@ void testTypes() {
 }
 
 void testPage() {
-    CHECK(nr_abi() == ((1 << 16) | 4));
+    CHECK(nr_abi() == ((NR_ABI_VERSION << 16) | 4));
     nr_page* p = nullptr;
     CHECK(nr_create(0, 1, &p) == NR_E_ARG && p == nullptr);
     CHECK(nr_create(65536, 65536, &p) == NR_E_ARG);
@@ -469,6 +470,330 @@ void testParams() {
     CHECK(!P::fromFlat(nullptr, P::kIntSlots, dbls.data(), P::kDoubleSlots, &back));
 }
 
+// ── 第一批影像原語：對照逐像素的參考算法（逐位元對 Kotlin 的比對在 CppPrimsParityTest、nr_dump_check）─────────────
+
+uint64_t lcg(uint64_t& s) { s = s * 6364136223846793005ULL + 1442695040888963407ULL; return s >> 33; }
+
+nr::Mask randomMask(int32_t w, int32_t h, uint64_t seed, uint32_t per1024) {
+    nr::Mask m(w, h);
+    for (size_t i = 0; i < m.data.size(); i++) m.data[i] = (lcg(seed) & 1023) < per1024 ? 1 : 0;
+    return m;
+}
+
+/** 幾種核：全滿、十字、整段在錨點左／右側、遠離錨點、有空列、中間有洞、不對稱。 */
+std::vector<nr::Kernel> testKernels() {
+    std::vector<nr::Kernel> out;
+    auto add = [&](int32_t w, int32_t h, auto f) {
+        std::vector<uint8_t> d(static_cast<size_t>(w) * h);
+        for (int32_t y = 0; y < h; y++) for (int32_t x = 0; x < w; x++) d[static_cast<size_t>(y) * w + x] = f(x, y) ? 1 : 0;
+        out.emplace_back(w, h, d.data());
+    };
+    for (int32_t n : {1, 3, 9, 15}) add(n, n, [](int32_t, int32_t) { return true; });
+    add(65, 1, [](int32_t, int32_t) { return true; });
+    add(1, 9, [](int32_t, int32_t) { return true; });
+    add(129, 3, [](int32_t, int32_t) { return true; });
+    add(5, 5, [](int32_t x, int32_t y) { return x == 2 || y == 2; });
+    add(9, 3, [](int32_t x, int32_t) { return x >= 6; });
+    add(9, 3, [](int32_t x, int32_t) { return x <= 2; });
+    add(141, 1, [](int32_t x, int32_t) { return x >= 135; });
+    add(141, 1, [](int32_t x, int32_t) { return x <= 5; });
+    add(5, 5, [](int32_t, int32_t) { return false; });
+    add(5, 5, [](int32_t, int32_t y) { return y == 2; });
+    add(7, 5, [](int32_t x, int32_t y) { return y == 0 ? x <= 2 : (y == 4 ? x >= 3 : y == 2); });
+    add(7, 5, [](int32_t x, int32_t y) { return y == 0 ? x <= 2 : (y == 4 ? x >= 4 : y == 2); });   // 上下同寬、偏移不同（不能併成一趟）
+    add(4, 6, [](int32_t x, int32_t y) { return (x + y) % 3 != 0; });
+    return out;
+}
+
+void testPrimsDilate() {
+    const std::vector<nr::Kernel> ks = testKernels();
+    uint64_t seed = 1;
+    for (int32_t w : {1, 63, 64, 65, 127, 128, 129}) for (int32_t h : {1, 3, 7}) for (uint32_t d : {0U, 30U, 512U, 1024U}) {
+        const nr::Mask m = randomMask(w, h, seed++, d);
+        for (const nr::Kernel& k : ks) {
+            const nr::Mask got = nr::prims::dilatePacked(m, k);
+            bool ok = got.w == w && got.h == h;
+            for (int32_t y = 0; ok && y < h; y++) for (int32_t x = 0; x < w; x++) {
+                uint8_t v = 0;
+                for (int32_t ky = 0; !v && ky < k.h; ky++) {
+                    const int32_t sy = y - (ky - k.ay);
+                    if (sy < 0 || sy >= h) continue;
+                    for (int32_t o = k.runStart[ky] - k.ax; o <= k.runEnd[ky] - 1 - k.ax; o++) {
+                        const int32_t sx = x + o;
+                        if (sx >= 0 && sx < w && m.data[static_cast<size_t>(sy) * w + sx]) { v = 1; break; }
+                    }
+                }
+                if (got.data[static_cast<size_t>(y) * w + x] != v) { ok = false; break; }
+            }
+            CHECK(ok);
+        }
+    }
+    // 寬 0：核有整段在錨點左側的列時 Kotlin 丟例外，這裡也丟
+    const nr::Mask empty(0, 3);
+    bool threw = false;
+    try { nr::prims::dilatePacked(empty, ks[9]); } catch (const std::invalid_argument&) { threw = true; }
+    CHECK(threw);
+    CHECK(nr::prims::dilatePacked(empty, ks[8]).h == 3);
+}
+
+void testPrimsCc() {
+    uint64_t seed = 77;
+    for (int32_t w : {1, 63, 64, 65, 127, 128, 129}) for (int32_t h : {1, 3, 7, 65}) for (uint32_t d : {0U, 60U, 512U, 900U, 1024U}) for (int32_t conn : {4, 8}) {
+        const nr::Mask m = randomMask(w, h, seed++, d);
+        const nr::CC c = nr::prims::ccStats(m, conn);
+        const nr::CcRuns r = nr::prims::ccRuns(m, conn);
+        CHECK(r.n == c.n);
+        // 參考：掃描序首見、BFS（顯式佇列）
+        const size_t n = m.data.size();
+        std::vector<int32_t> lab(n, 0), q;
+        int32_t next = 1;
+        std::vector<int32_t> left{0}, top{0}, right{-1}, bottom{-1}, area{0};
+        for (size_t i = 0; i < n; i++) {
+            if (!m.data[i] || lab[i] != 0) continue;
+            const int32_t l = next++;
+            left.push_back(INT32_MAX); top.push_back(INT32_MAX); right.push_back(INT32_MIN); bottom.push_back(INT32_MIN); area.push_back(0);
+            lab[i] = l;
+            q.assign(1, static_cast<int32_t>(i));
+            while (!q.empty()) {
+                const int32_t p = q.back();
+                q.pop_back();
+                const int32_t x = p % w, y = p / w;
+                area[l]++;
+                if (x < left[l]) left[l] = x;
+                if (x > right[l]) right[l] = x;
+                if (y < top[l]) top[l] = y;
+                if (y > bottom[l]) bottom[l] = y;
+                for (int32_t dy = -1; dy <= 1; dy++) for (int32_t dx = -1; dx <= 1; dx++) {
+                    if ((dx == 0 && dy == 0) || (conn == 4 && dx != 0 && dy != 0)) continue;
+                    const int32_t nx = x + dx, ny = y + dy;
+                    if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+                    const size_t ni = static_cast<size_t>(ny) * w + nx;
+                    if (m.data[ni] && lab[ni] == 0) { lab[ni] = l; q.push_back(static_cast<int32_t>(ni)); }
+                }
+            }
+        }
+        CHECK(c.n == next);
+        bool ok = true;
+        for (size_t i = 0; i < n; i++) if (c.labels[i] != lab[i]) ok = false;
+        for (int32_t l = 1; ok && l < next; l++) {
+            if (c.left[l] != left[l] || c.top[l] != top[l] || c.width[l] != right[l] - left[l] + 1 || c.height[l] != bottom[l] - top[l] + 1 || c.area[l] != area[l]) ok = false;
+        }
+        CHECK(ok);
+        // 背景（0 號）：面積、外接框
+        int64_t bg = 0;
+        int32_t bl = INT32_MAX, bt = INT32_MAX, br = INT32_MIN, bb = INT32_MIN;
+        for (size_t i = 0; i < n; i++) {
+            if (m.data[i]) continue;
+            const int32_t x = static_cast<int32_t>(i) % w, y = static_cast<int32_t>(i) / w;
+            bg++;
+            if (x < bl) bl = x;
+            if (x > br) br = x;
+            if (y < bt) bt = y;
+            if (y > bb) bb = y;
+        }
+        CHECK(c.area[0] == bg);
+        CHECK(r.fg == static_cast<int64_t>(n) - bg);
+        CHECK(r.bgLeft == bl && r.bgTop == bt && r.bgRight == br && r.bgBottom == bb);
+        // 游程容量與 Kotlin 相同：max(64, 2h) 起倍增
+        size_t cap = static_cast<size_t>(h * 2 > 64 ? h * 2 : 64);
+        while (cap < static_cast<size_t>(r.rowFirst[h])) cap *= 2;
+        CHECK(r.rs.size() == cap && r.re.size() == cap && r.lab.size() == static_cast<size_t>(r.rowFirst[h]));
+    }
+    // 0 寬／0 高
+    const nr::Mask e0(0, 0), e1(0, 5), e2(5, 0);
+    for (const nr::Mask* m : {&e0, &e1, &e2}) {
+        const nr::CC c = nr::prims::ccStats(*m, 8);
+        CHECK(c.n == 1 && c.area[0] == 0 && c.left[0] == 0 && c.top[0] == 0 && c.width[0] == 0 && c.height[0] == 0);
+    }
+}
+
+void testPrimsDistance() {
+    uint64_t seed = 5;
+    for (int32_t w : {1, 63, 64, 65, 127, 128, 129}) for (int32_t h : {1, 3, 7, 65}) for (uint32_t d : {40U, 512U, 1000U}) {
+        const nr::Mask m = randomMask(w, h, seed++, d);
+        const nr::ImgF32 f = nr::prims::distanceL2(m);
+        bool anyBg = false;
+        for (size_t i = 0; i < m.data.size(); i++) if (!m.data[i]) { anyBg = true; break; }
+        bool ok = true;
+        for (int32_t y = 0; y < h; y++) for (int32_t x = 0; x < w; x++) {
+            const float got = f.data[static_cast<size_t>(y) * w + x];
+            if (!m.data[static_cast<size_t>(y) * w + x]) { if (got != 0.0f) ok = false; continue; }
+            if (!anyBg) { if (got < 9e9f) ok = false; continue; }
+            int64_t best = INT64_MAX;
+            for (int32_t yy = 0; yy < h; yy++) for (int32_t xx = 0; xx < w; xx++) {
+                if (m.data[static_cast<size_t>(yy) * w + xx]) continue;
+                const int64_t dd = static_cast<int64_t>(x - xx) * (x - xx) + static_cast<int64_t>(y - yy) * (y - yy);
+                if (dd < best) best = dd;
+            }
+            if (got != __builtin_sqrtf(static_cast<float>(best))) ok = false;
+        }
+        CHECK(ok);
+    }
+    // float 的 sqrt＝double 的 sqrt 再轉 float（Kotlin 的寫法）：邊界值加隨機位元型樣
+    uint64_t s = 99;
+    int bad = 0;
+    for (int i = 0; i < 4000000; i++) {
+        const uint32_t b = i < 2048 ? static_cast<uint32_t>(i) : static_cast<uint32_t>(lcg(s)) & 0x7fffffffU;
+        const float x = ffrom(b);
+        const float viaDouble = static_cast<float>(sqrt(static_cast<double>(x)));
+        if (fbits(__builtin_sqrtf(x)) != fbits(viaDouble) && !(x != x)) bad++;
+    }
+    CHECK(bad == 0);
+}
+
+void testPrimsGauss() {
+    uint64_t seed = 11;
+    for (int32_t w : {1, 63, 64, 65, 127, 128, 129}) for (int32_t h : {1, 3, 7, 65}) for (double sigma : {0.3, 1.5, 2.0, 5.0}) {
+        nr::ImgI32 g(w, h);
+        for (size_t i = 0; i < g.data.size(); i++) g.data[i] = static_cast<int32_t>(lcg(seed) & 255);
+        const nr::ImgI32 got = nr::prims::gaussQ16(g, sigma);
+        const std::vector<int32_t> k = nr::tables::gaussW(sigma);
+        const int32_t c = static_cast<int32_t>(k.size()) / 2;
+        auto refl = [](int32_t i, int32_t n) {
+            if (n == 1) return 0;
+            while (i < 0 || i >= n) { if (i < 0) i = -i; if (i >= n) i = 2 * (n - 1) - i; }
+            return i;
+        };
+        bool ok = true;
+        for (int32_t y = 0; ok && y < h; y++) for (int32_t x = 0; x < w; x++) {
+            int64_t acc = 0;
+            for (int32_t j = -c; j <= c; j++) {
+                const int32_t sy = refl(y + j, h);
+                int32_t row = 0;
+                for (int32_t i = -c; i <= c; i++) row += k[i + c] * g.data[static_cast<size_t>(sy) * w + refl(x + i, w)];
+                acc += static_cast<int64_t>(k[j + c]) * row;
+            }
+            if (got.data[static_cast<size_t>(y) * w + x] != static_cast<int32_t>((acc + 32768) >> 16)) { ok = false; break; }
+        }
+        CHECK(ok);
+    }
+    nr::ImgI32 zero(0, 3);
+    bool threw = false;
+    try { nr::prims::gaussQ16(zero, 2.0); } catch (const std::invalid_argument&) { threw = true; }
+    CHECK(threw);
+}
+
+void testPrimsMorph() {
+    const std::vector<nr::Kernel> ks = testKernels();
+    uint64_t seed = 21;
+    for (int32_t w : {1, 63, 64, 65, 127, 128, 129}) for (int32_t h : {1, 3, 7, 16}) {
+        nr::ImgI32 g(w, h);
+        for (size_t i = 0; i < g.data.size(); i++) g.data[i] = static_cast<int32_t>(lcg(seed)) - (1 << 30);
+        for (const nr::Kernel& k : ks) for (bool mx : {true, false}) {
+            const nr::ImgI32 got = nr::prims::morphGrayGather(g, k, mx);
+            bool ok = true;
+            for (int32_t y = 0; ok && y < h; y++) for (int32_t x = 0; x < w; x++) {
+                int32_t v = mx ? INT32_MIN : INT32_MAX;
+                for (int32_t ky = 0; ky < k.h; ky++) {
+                    if (k.runEnd[ky] <= k.runStart[ky]) continue;
+                    const int32_t sy = y + (ky - k.ay);
+                    if (sy < 0 || sy >= h) continue;
+                    for (int32_t o = k.runStart[ky] - k.ax; o < k.runEnd[ky] - k.ax; o++) {
+                        const int32_t sx = x + o;
+                        if (sx < 0 || sx >= w) continue;
+                        const int32_t u = g.data[static_cast<size_t>(sy) * w + sx];
+                        if (mx ? u > v : u < v) v = u;
+                    }
+                }
+                if (got.data[static_cast<size_t>(y) * w + x] != v) { ok = false; break; }
+            }
+            CHECK(ok);
+        }
+    }
+}
+
+/** 真頁尺寸的合成圖：大塊、細線、雜點（這支測試跑在 256 KB 堆疊的執行緒上；原語不能在堆疊放大陣列）。 */
+nr::ImgI32 fakePage(int32_t w, int32_t h, uint64_t seed) {
+    nr::ImgI32 g(w, h);
+    for (int32_t y = 0; y < h; y++) for (int32_t x = 0; x < w; x++) {
+        int32_t v = 240;
+        if ((x + y) % 97 < 3) v = 20;
+        if (((x / 200) + (y / 300)) % 3 == 0 && (x % 5 == 0)) v = 120;
+        if ((lcg(seed) & 255) == 0) v = 0;
+        g.data[static_cast<size_t>(y) * w + x] = v;
+    }
+    return g;
+}
+
+nr::Mask thresh(const nr::ImgI32& g, int32_t th) {
+    nr::Mask m(g.w, g.h);
+    for (size_t i = 0; i < m.data.size(); i++) m.data[i] = g.data[i] >= th ? 1 : 0;
+    return m;
+}
+
+void testPrimsBudgetAndStack() {
+    const int32_t W = 1351, H = 1920;
+    const nr::ImgI32 g = fakePage(W, H, 3);
+    const nr::Mask m = thresh(g, 200);
+    std::vector<uint8_t> full(11 * 11, 1);
+    const nr::Kernel k(11, 11, full.data());
+    const int64_t px = static_cast<int64_t>(W) * H;
+    {
+        nr::Budget b;
+        { const nr::Mask out = nr::prims::dilatePacked(m, k, &b); CHECK(b.cur.load() == px); CHECK(b.peak.load() > px); }
+        CHECK(b.cur.load() == 0);
+    }
+    {
+        nr::Budget b;
+        { const nr::CC c = nr::prims::ccStats(m, 8, &b); CHECK(b.cur.load() == px * 4 + 5 * 4 * static_cast<int64_t>(c.n)); }
+        CHECK(b.cur.load() == 0);
+    }
+    {
+        nr::Budget b;
+        { const nr::CcRuns r = nr::prims::ccRuns(m, 8, &b); CHECK(b.cur.load() > 0 && b.peak.load() >= b.cur.load()); }
+        CHECK(b.cur.load() == 0);
+    }
+    {
+        nr::Budget b;
+        { const nr::ImgF32 f = nr::prims::distanceL2(m, &b); CHECK(b.cur.load() == px * 4); CHECK(b.peak.load() > px * 4); }
+        CHECK(b.cur.load() == 0);
+    }
+    {
+        nr::Budget b;
+        { const nr::ImgI32 o = nr::prims::gaussQ16(g, 5.0, &b); CHECK(b.cur.load() == px * 4); CHECK(b.peak.load() > px * 4); }
+        CHECK(b.cur.load() == 0);
+    }
+    {
+        nr::Budget b;
+        { const nr::ImgI32 o = nr::prims::morphGrayGather(g, k, true, &b); CHECK(b.cur.load() == px * 4); CHECK(b.peak.load() > px * 4); }
+        CHECK(b.cur.load() == 0);
+    }
+}
+
+/** 多條執行緒同時用同一份唯讀輸入（TSan 建置抓資料競爭）：結果要跟依序版相同。 */
+void testPrimsConcurrent() {
+    const int32_t W = 257, H = 96;
+    const nr::ImgI32 g = fakePage(W, H, 9);
+    const nr::Mask m = thresh(g, 200);
+    std::vector<uint8_t> full(9 * 9, 1);
+    const nr::Kernel k(9, 9, full.data());
+    const nr::Mask wd = nr::prims::dilatePacked(m, k);
+    const nr::CC wc = nr::prims::ccStats(m, 8);
+    const nr::ImgF32 wf = nr::prims::distanceL2(m);
+    const nr::ImgI32 wg = nr::prims::gaussQ16(g, 2.0);
+    const nr::ImgI32 wm = nr::prims::morphGrayGather(g, k, true);
+    std::atomic<int> bad{0};
+    std::vector<std::thread> ts;
+    for (int t = 0; t < 8; t++) {
+        ts.emplace_back([&] {
+            for (int i = 0; i < 3; i++) {
+                const nr::Mask d = nr::prims::dilatePacked(m, k);
+                const nr::CC c = nr::prims::ccStats(m, 8);
+                const nr::ImgF32 f = nr::prims::distanceL2(m);
+                const nr::ImgI32 o = nr::prims::gaussQ16(g, 2.0);
+                const nr::ImgI32 mm = nr::prims::morphGrayGather(g, k, true);
+                if (std::memcmp(d.data.data(), wd.data.data(), wd.data.size()) != 0 || c.n != wc.n ||
+                    std::memcmp(c.labels.data(), wc.labels.data(), wc.labels.size() * 4) != 0 ||
+                    std::memcmp(f.data.data(), wf.data.data(), wf.data.size() * 4) != 0 ||
+                    std::memcmp(o.data.data(), wg.data.data(), wg.data.size() * 4) != 0 ||
+                    std::memcmp(mm.data.data(), wm.data.data(), wm.data.size() * 4) != 0) bad++;
+            }
+        });
+    }
+    for (auto& t : ts) t.join();
+    CHECK(bad.load() == 0);
+}
+
 void* runAll(void*) {
     testRounding();
     testBigDecimal();
@@ -481,6 +806,13 @@ void* runAll(void*) {
     testPage();
     testParams();
     testConcurrency();
+    testPrimsDilate();
+    testPrimsCc();
+    testPrimsDistance();
+    testPrimsGauss();
+    testPrimsMorph();
+    testPrimsBudgetAndStack();
+    testPrimsConcurrent();
     return nullptr;
 }
 

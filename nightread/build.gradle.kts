@@ -59,7 +59,7 @@ tasks.withType<Test>().configureEach {
     }
 
     // 錄出器（NativeDumpTest，組 dump）：-PnativeDump=<目錄> 才錄，沒給就略過。其餘開關見 NativeDumpTest 的說明：
-    // -PnativeDumpPages（fixtures／fixture 頁名／NRIN 目錄）、-PnativeDumpVariants、-PnativeDumpRaw、-PnativeDumpPrims（false／族名清單）。
+    // -PnativeDumpPages（fixtures／fixture 頁名／NRIN 目錄）、-PnativeDumpVariants、-PnativeDumpRaw、-PnativeDumpPrims（false／族名清單）、-PnativeDumpPrimPages（真頁跑原語步驟表）。
     providers.gradleProperty("nativeDump").orNull?.let {
         val dir = rootProject.file(it)
         systemProperty("nightread.nativeDump", dir.absolutePath)
@@ -67,7 +67,7 @@ tasks.withType<Test>().configureEach {
         // 頁可以來自 repo 外的 NRIN 目錄（-PnativeDumpPages），那些檔沒登記成輸入：錄出一律重跑
         outputs.upToDateWhen { false }
     }
-    for (k in listOf("nativeDumpPages", "nativeDumpVariants", "nativeDumpRaw", "nativeDumpPrims")) {
+    for (k in listOf("nativeDumpPages", "nativeDumpVariants", "nativeDumpRaw", "nativeDumpPrims", "nativeDumpPrimPages")) {
         providers.gradleProperty(k).orNull?.let { systemProperty("nightread.$k", it) }
     }
 
@@ -86,9 +86,9 @@ tasks.withType<Test>().configureEach {
             // 錄出器：平常不跑（沒給 -PnativeDump 就略過），單獨成組免得 fast 組被它拖慢
             "dump" to listOf("NativeDumpTest"),
         )
-        // 一定要跑到的類別：列名的直接算；native 另列現有的四個（萬用字元收不到任何一個時也會在這裡失敗）
+        // 一定要跑到的類別：列名的直接算；native 另列現有的五個（萬用字元收不到任何一個時也會在這裡失敗）
         val mustRun = heavy.mapValues { (_, v) -> v.filter { '*' !in it } } +
-            ("native" to listOf("CppJmathParityTest", "CppTablesParityTest", "CppPageParityTest", "CppParamsParityTest"))
+            ("native" to listOf("CppJmathParityTest", "CppTablesParityTest", "CppPageParityTest", "CppParamsParityTest", "CppPrimsParityTest"))
         systemProperty("nightread.testGroup", group)
         // native 組一定要真的載到原生庫（沒給 -PnativeLib 就失敗，不是略過）
         if (group == "native") systemProperty("nightread.requireNative", "true")
