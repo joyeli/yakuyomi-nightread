@@ -104,6 +104,18 @@
 手機探針的合計倍數用 `NightPrimWorkload` 的權重：一頁產品兩檔實際的呼叫次數（掛計數器量 6 頁的中位數），不是單次呼叫平均。
 唯一不照字面抄的一處是 `distanceL2` 的開平方：C++ 直接用 float 的 sqrt，Kotlin 是 double 的 sqrt 再轉 float；53 ≥ 2·24＋2，兩者數學上相同，測試也逐值比過。
 
+**第 3a 階的原語（2026-11-02）**：`Cv.kt` 的二值部分（:115-573、739-1145、1251-1654、2144-2219、2870-2919、3040-3053）照逐步搬進
+`native/core/prims.*`、`prims_mask.cpp`（結構元素、一般核與 1×n／n×1 線核的形態學、方核分解、打包格式的侵蝕、`ccRunsBits`、`distanceSq`、
+chamfer、縮放、補洞、輪廓長、多邊形面積、測地、二值中值），`ccRunsBits` 用到的 `bitRuns` 一起搬；Ring 的位元小工具（`packBits`、`set`、`has`）
+搬到 C++ 的最底層（`native/core/bits.*`），上面各模組都能用。產品還是 Kotlin，輸出不變、規則版本仍是 4；C++ ABI 升到 3（多了 `NightNativeBin` 的 JNI）。
+- **錄放**：`Cv` 加了一個呼叫監聽 `Cv.tap`（`Ring.packBits` 也報），測試設了它，每次呼叫已搬到 C++ 的整張影像原語之後回報一次（運算名、參數、結果）；
+  產品與一般測試永遠是 null，每次呼叫多讀一次靜態欄位。摘要仍是 `31f2ed4d…`。同 JVM 版（`CppCvCallReplayTest`）在 CI 語料 10 頁的產品兩檔
+  與完整管線、以及原本對照參考實作的 Kotlin 隨機測試上，每一次呼叫當場給 C++ 重算（46,965＋76,739 次呼叫，0 不同）；錄到磁碟的版本
+  （`NativeDumpTest` 的 calls/）給 qemu-aarch64 與 ASan／UBSan 重放（0 不同）。
+- **照抄的 Kotlin 行為**（不改，Kotlin 凍結）：一般核（`dilateBits`）的垂直取樣是 y − (ky − ay)、1×n／n×1 線核（`lineMorph`）是 y + (ky − ay)，
+  偶數高的核兩條路徑差一列（奇數高相同；cv2 是後者）。`Cv.rect(kw, 0)` 在 kw < 0 時 Kotlin 給一個寬是負的空核，C++ 丟例外（呼叫端不會這樣用）。
+- 手機探針用 `NightBinWorkload`（同 `NightPrimWorkload` 的用法，權重＝一頁產品兩檔實際的呼叫次數）；第 3a 階的關卡是手機上「全部相同」。
+
 ## ★★ 平台數學函式改 `StrictMath`：輸出不變、不升版本（2026-10-12，C++ 移植第 1 階段）
 
 **做法**：函式庫裡最後 6 處走平台 `Math` 的超越函數改成 `StrictMath`：`BgObjects.lineOffsets` 的 sin、cos，`textLut` 與 `inkLut`

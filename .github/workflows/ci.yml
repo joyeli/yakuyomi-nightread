@@ -12,7 +12,8 @@ name: CI
 #
 # 夜讀 C++ 核心（native/，cpp-eval 計畫階段 1）另三個 job，規則見 native/README.md：
 #   native          ＝主機（gcc＋cmake）建核心、ctest（256 KB 堆疊的執行緒）、同 JVM 差分（-PtestGroup=native：Kotlin 與 C++
-#                     逐位元比、參數來回、5 族原語的邊界寬度與真頁），錄出器＋nr_dump_check；golden 與錄出交給下面兩個 job
+#                     逐位元比、參數來回、第 2 階 5 族與第 3a 階二值原語的邊界寬度與真頁、CI 語料上每一次原語呼叫的錄放），
+#                     錄出器＋nr_dump_check；golden 與錄出交給下面兩個 job
 #   native-sanitize ＝ASan＋UBSan（ctest、golden、錄出重放含 5 族原語）與 TSan（並行測試含原語）
 #   native-guard    ＝gen_params.py 重跑後 git diff 必須是空的；NDK 28.2 arm64 建置（Debug／Release 都要強制 -O2）、
 #                     反組譯不得有 FMA（fmadd…／主機 -mfma 版的 vfmadd…）與 OpenMP 參照、只匯出 JNI、編譯旗標；
@@ -30,9 +31,14 @@ concurrency:
 permissions:
   contents: read
 
-# nr_dump_check 三個 job 用同一組期望（第 2 階搬好的 5 族，新增時改這裡）
+# nr_dump_check 三個 job 用同一組期望（第 2 階的 5 族＋第 3a 階的二值原語與位元小工具；錄放 11 個來源＝CI 語料 10 頁＋Kotlin 隨機測試；
+# 新增時改這裡）
 env:
-  NR_DUMP_EXPECT: --expect-families packbits,kernel,morph,cc,dist,gray --expect-ops dilatePacked,dilateBits,ccStats,ccRuns,distanceL2,gaussQ16,morphGrayGather.max,morphGrayGather.min --expect-pages 1 --expect-prim-pages 2
+  NR_DUMP_EXPECT: >-
+    --expect-families packbits,kernel,morph,cc,dist,maskmisc,gray,fimg,draw,bits
+    --expect-ops dilatePacked,dilateBits,ccStats,ccRuns,distanceL2,gaussQ16,morphGrayGather.max,morphGrayGather.min,dilate,erode,open,close,erodePacked,openPacked,closePacked,dilateRectSep,closeRectSep,distanceSq,distanceChamfer,chamfer5Padded,holes,medianBlurMask,totalContourLength,resizeNearest,geodesicDistance,geodesicGrow,resizeNearestGray,resizeArea,resizeBilinear,resizeAreaOf,polygonArea,ellipse,rect,packBitsNot,ring.packBits,unpackBits,unpackBitsNot,notBitsInPlace,erodeBits,ccRunsBits,bitRuns,anyBits,ring.has,ring.set,reflect101
+    --expect-pages 1 --expect-prim-pages 2 --expect-call-sources 11
+    --expect-call-ops dilate,erode,open,close,dilatePacked,erodePacked,openPacked,closePacked,packBits,packBitsNot,unpackBits,unpackBitsNot,notBitsInPlace,erodeBits,dilateBits,dilateRectSep,closeRectSep,ccStats,ccRuns,ccRunsBits,distanceL2,distanceSq,distanceChamfer,chamfer5Padded,resizeArea,resizeAreaOf,resizeNearest,holes,totalContourLength,geodesicDistance,geodesicGrow,medianBlurMask,ring.packBits
 
 jobs:
   test:
@@ -118,25 +124,32 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
+      # nr_dump_check 要 zlib（錄放的 blob 是 zlib 壓縮）
+      - name: Install zlib
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends zlib1g-dev
+
       # 核心、nr_core_tests（ctest；在 256 KB 堆疊的執行緒上）、nr_golden_check、nr_dump_check、JUnit 用的 libnightread_host.so
       - name: Host build + ctest
         run: bash native/tools/build_host.sh
 
       # 同一個 JVM 裡 Kotlin 與 C++ 逐位元比（數值核心每個函式 200 萬組、常數表整表、像素、參數 379 欄來回、
-      # 5 族影像原語：寬度 1／63／64／65／127／128／129…與真頁）；
+      # 第 2 階 5 族與第 3a 階二值原語：寬度 1／63／64／65／127／128／129…與真頁；CppCvCallReplayTest：CI 語料 10 頁的產品路徑與
+      # Kotlin 隨機測試裡每一次原語呼叫，當場給 C++ 重算）；
       # 順便寫 golden（Java 答案的分塊雜湊）給 native-guard 在 qemu-aarch64 上比 arm64、給 native-sanitize 在 ASan 下比
       - name: Same-JVM differential tests
         run: >-
           ./gradlew :nightread:testDebugUnitTest -PtestGroup=native
           -PnativeLib=native/build/host/libnightread_host.so -PgoldenOut=native/build/golden --no-daemon --stacktrace
 
-      # 錄出器（NativeDumpTest）：一頁合成頁＋C++ 已能重放的原語族＋兩張真頁的原語步驟表，再用 nr_dump_check 驗格式、重算摘要、重放
-      # （--expect-*：每一族、每個搬好的運算都要真的重放到、頁要真的重算到東西，錄出少了什麼就紅，不會「0 項、0 個不符」通過）
+      # 錄出器（NativeDumpTest）：一頁合成頁＋C++ 已能重放的原語族＋兩張真頁的原語步驟表＋錄放（CI 語料 10 頁與 Kotlin 隨機測試裡
+      # 每一次已搬到 C++ 的原語呼叫；灰階兩族的整頁 Q16 輸入太大不錄，它們另有 primpages 與同 JVM 的錄放），再用 nr_dump_check 驗格式、
+      # 重算摘要、重放（--expect-*：每一族、每個搬好的運算都要真的重放到、頁要真的重算到東西，錄出少了什麼就紅，不會「0 項、0 個不符」通過）
       - name: Recorder + nr_dump_check
         run: |
           ./gradlew :nightread:testDebugUnitTest -PtestGroup=dump -PnativeDump=native/build/dump -PnativeDumpPages=syn_more \
-            -PnativeDumpPrims=packbits,kernel,morph,cc,dist,gray -PnativeDumpPrimPages=ch34_011,demo05 \
-            "-PnativeDumpRaw=input,params,tiers:def.*,analysis.a.frame" --no-daemon --stacktrace
+            -PnativeDumpPrims=packbits,kernel,morph,cc,dist,maskmisc,gray,fimg,draw,bits -PnativeDumpPrimPages=ch34_011,demo05 \
+            "-PnativeDumpRaw=input,params,tiers:def.*,analysis.a.frame" \
+            -PnativeDumpCalls=fixtures,random -PnativeDumpCallSkip=gaussQ16,morphGrayGather --no-daemon --stacktrace
           native/build/host/nr_dump_check $NR_DUMP_EXPECT native/build/dump
 
       - name: Upload golden + dump
@@ -176,6 +189,9 @@ jobs:
         with:
           name: native-golden
           path: native/build
+
+      - name: Install zlib
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends zlib1g-dev
 
       # -fno-sanitize-recover=all：任何一個報告就失敗。float-cast-overflow 不在 undefined 裡，另外列。
       - name: ASan + UBSan build + ctest
