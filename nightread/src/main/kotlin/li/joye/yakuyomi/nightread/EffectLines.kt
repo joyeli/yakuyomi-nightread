@@ -453,7 +453,7 @@ internal object EffectLines {
                         val xi = floor(px + t * vx - o * vy + 0.5).toInt()
                         val yi = floor(py + t * vy + o * vx + 0.5).toInt()
                         if (xi < 0 || yi < 0 || xi >= w || yi >= h || x3.data[yi * w + xi]) { unk = true; break }
-                        if (BgObjects.gaussAt(g, k1, xi, yi) < lim && !nearSmall(sm, xi, yi)) blk = true
+                        if (Cv.gaussAt(g, k1, xi, yi) < lim && !nearSmall(sm, xi, yi)) blk = true
                     }
                     if (unk) break
                 }

@@ -116,9 +116,11 @@ object Cv {
     // ── 錄放（C++ 移植的驗收）────────────────────────────────────────────
 
     /**
-     * 呼叫監聽：C++ 移植的錄放（NativeDumpTest 的 calls/、CppCvCallReplayTest）設了它，每次呼叫已搬到 C++ 的整張影像原語**之後**同步
-     * 回報一次（運算名、參數、結果）。回呼在呼叫者的執行緒上執行，頁內並行時會同時從多條執行緒來；參數與結果在回呼返回後可能被呼叫端
-     * 改掉，要留就先複製。巢狀的呼叫各報各的（dilatePacked 裡的 packBits、dilateBits、unpackBits 也會報）。
+     * 呼叫監聽：C++ 移植的錄放（NativeDumpTest 的 calls/、CppCvCallReplayTest）設了它，每次呼叫 Cv 的公開原語（第 3b 階起是全部）**之後**
+     * 同步回報一次（運算名、參數、結果）。回呼在呼叫者的執行緒上執行，頁內並行時會同時從多條執行緒來；參數與結果在回呼返回後可能被呼叫端
+     * 改掉，要留就先複製。巢狀的呼叫各報各的（dilatePacked 裡的 packBits、dilateBits、unpackBits 也會報）。就地改輸入的（[notBitsInPlace]、
+     * [line]、[fillPoly]）回報的參數是呼叫前的複本、結果是改好的輸入；[gaussQ16Sparse] 的來源換成資料、結果是交給 sink 的列（[SparseRec]），
+     * 它的來源 [MedianRows] 每填一列也報一次（medianRows）。
      * 細粒度的（[reflect101]、[anyBits]、[bitRuns]、Ring.set／has）不報，靠錄出的隨機與邊界案例驗。
      * **產品與一般測試永遠是 null**：每次呼叫多讀一次靜態欄位，輸出不變。
      */
@@ -599,17 +601,19 @@ object Cv {
 
     // ── 灰階形態學（ink_line_mask 的 7×7 ellipse blackhat）───────────────
 
-    fun dilateGray(g: Gray, k: Kernel): Gray = morphGray(g, k, wantMax = true)
+    fun dilateGray(g: Gray, k: Kernel): Gray = tapped("dilateGray", morphGray(g, k, wantMax = true)) { arrayOf(g, k) }
 
-    fun erodeGray(g: Gray, k: Kernel): Gray = morphGray(g, k, wantMax = false)
+    fun erodeGray(g: Gray, k: Kernel): Gray = tapped("erodeGray", morphGray(g, k, wantMax = false)) { arrayOf(g, k) }
 
     /**
      * 不限 8 位元的灰階膨脹／侵蝕（背景物件規則的 Q16 影像、字塊標號）：外側不影響極值（同 cv2 的形態學預設邊界）。
      * 與 [dilateGray]／[erodeGray] 只差單位元（Int 的最小／最大值）；核都含錨點，8 位元影像兩者逐位元相同。
      */
-    fun dilateGrayI(g: Gray, k: Kernel): Gray = morphGray(g, k, wantMax = true, lo = Int.MIN_VALUE, hi = Int.MAX_VALUE)
+    fun dilateGrayI(g: Gray, k: Kernel): Gray =
+        tapped("dilateGrayI", morphGray(g, k, wantMax = true, lo = Int.MIN_VALUE, hi = Int.MAX_VALUE)) { arrayOf(g, k) }
 
-    fun erodeGrayI(g: Gray, k: Kernel): Gray = morphGray(g, k, wantMax = false, lo = Int.MIN_VALUE, hi = Int.MAX_VALUE)
+    fun erodeGrayI(g: Gray, k: Kernel): Gray =
+        tapped("erodeGrayI", morphGray(g, k, wantMax = false, lo = Int.MIN_VALUE, hi = Int.MAX_VALUE)) { arrayOf(g, k) }
 
     /** `cv2.morphologyEx(g, MORPH_BLACKHAT, k)` ＝ close(g) − g（灰階，結果 ≥ 0）。 */
     fun blackhat(g: Gray, k: Kernel): Gray {
@@ -627,7 +631,7 @@ object Cv {
             val v = d[i] - gd[i]
             d[i] = if (v > 0) v else 0
         }
-        return closed
+        return tapped("blackhat", closed) { arrayOf(g, k) }
     }
 
     /**
@@ -1178,11 +1182,11 @@ object Cv {
      * `getGaussianKernel` 的公式（sigma > 0 一律走公式，不查小核表）。可分離、BORDER_REFLECT_101。
      */
     fun gaussianBlur(f: FImg, sigma: Double): FImg {
-        if (sigma <= 0.0) return f.copy()
+        if (sigma <= 0.0) return tapped("gaussianBlur", f.copy()) { arrayOf(f, sigma) }
         var ks = (sigma * 4.0 * 2.0 + 1.0).roundToInt() or 1
         if (ks < 3) ks = 3
         val k = gaussianKernel(ks, sigma)
-        return sepFilter(f, k)
+        return tapped("gaussianBlur", sepFilter(f, k)) { arrayOf(f, sigma) }
     }
 
     private fun gaussianKernel(ks: Int, sigma: Double): DoubleArray {
@@ -1203,7 +1207,7 @@ object Cv {
     /** `cv2.blur(f, (k, k))`：均值濾波、BORDER_REFLECT_101。 */
     fun boxBlur(f: FImg, k: Int): FImg {
         val kern = DoubleArray(k) { 1.0 / k }
-        return sepFilter(f, kern)
+        return tapped("boxBlur", sepFilter(f, kern)) { arrayOf(f, k) }
     }
 
     /** 可分離濾波（先橫後縱），BORDER_REFLECT_101。 */
@@ -1982,6 +1986,12 @@ object Cv {
      * （半徑 (thickness+1)/2，即 thickness=2r+1 時為 r+1）。端點可在影像外（照 cv2 裁切）。
      */
     fun line(m: Mask, x0: Int, y0: Int, x1: Int, y1: Int, thickness: Int) {
+        val before = if (tap != null) m.copy() else null
+        lineBody(m, x0, y0, x1, y1, thickness)
+        if (before != null) tapped("line", m) { arrayOf(before, x0, y0, x1, y1, thickness) }
+    }
+
+    private fun lineBody(m: Mask, x0: Int, y0: Int, x1: Int, y1: Int, thickness: Int) {
         var p0x = x0.toLong() shl XY_SHIFT
         var p0y = y0.toLong() shl XY_SHIFT
         val p1x = x1.toLong() shl XY_SHIFT
@@ -2023,6 +2033,12 @@ object Cv {
      * 頂點可在影像外。
      */
     fun fillPoly(m: Mask, xs: IntArray, ys: IntArray) {
+        val before = if (tap != null) m.copy() else null
+        fillPolyBody(m, xs, ys)
+        if (before != null) tapped("fillPoly", m) { arrayOf(before, xs, ys) }
+    }
+
+    private fun fillPolyBody(m: Mask, xs: IntArray, ys: IntArray) {
         val count = xs.size
         val w = m.w
         val h = m.h
@@ -2252,7 +2268,9 @@ object Cv {
      * `aquicksort_`（introsort：三數取中、≤16 插入排序、深度超過 2·⌊log2 n⌋ 改 heapsort）。**不穩定**——
      * 同值的順序由這個演算法決定，格溝取峰的截斷（前 `SeparatorParams.peakMax` 峰，預設 800）與後續「同長度保持輸入順序」都吃它。
      */
-    fun npArgsort(v: IntArray): IntArray {
+    fun npArgsort(v: IntArray): IntArray = tapped("npArgsort", npArgsortBody(v)) { arrayOf(v) }
+
+    private fun npArgsortBody(v: IntArray): IntArray {
         val num = v.size
         val ts = IntArray(num) { it }
         if (num <= 1) return ts
@@ -2349,6 +2367,15 @@ object Cv {
      * `((r0+r1)+(r2+r3))+((r4+r5)+(r6+r7))`、餘數逐項；更長則對半遞迴，切點取 8 的倍數）。
      */
     fun npSum(a: DoubleArray, off: Int = 0, n: Int = a.size - off): Double {
+        val s = npSumRec(a, off, n)
+        // 不經 [tapped]：結果是 Double，泛型參數會裝箱（這個一頁呼叫很多次）；只在有監聽時才裝箱
+        val t = tap
+        if (t != null) t.call("npSum", arrayOf(a, off, n), s)
+        return s
+    }
+
+    /** [npSum] 的本體（遞迴的子段不另外回報）。 */
+    private fun npSumRec(a: DoubleArray, off: Int, n: Int): Double {
         if (n < 8) {
             var s = 0.0
             for (i in 0 until n) s += a[off + i]
@@ -2368,14 +2395,16 @@ object Cv {
         }
         var n2 = n / 2
         n2 -= n2 % 8
-        return npSum(a, off, n2) + npSum(a, off + n2, n - n2)
+        return npSumRec(a, off, n2) + npSumRec(a, off + n2, n - n2)
     }
 
     /**
      * `np.linalg.eigh([[a, b], [b, c]])` 的特徵向量（LAPACK dsyevd → dstedc → dsteqr 的 2×2 路徑：dlaev2 ＋
      * 旋轉 ＋ 特徵值遞增排序），逐位元重現。回傳 [w0, w1, v00, v10, v01, v11]（w 遞增；第 k 欄＝w_k 的向量）。
      */
-    fun eigh2(a: Double, b: Double, c: Double): DoubleArray {
+    fun eigh2(a: Double, b: Double, c: Double): DoubleArray = tapped("eigh2", eigh2Body(a, b, c)) { arrayOf(a, b, c) }
+
+    private fun eigh2Body(a: Double, b: Double, c: Double): DoubleArray {
         val eps = Math.ulp(1.0) / 2              // dlamch('E')＝2⁻⁵³
         val safmin = java.lang.Double.MIN_NORMAL
         var e = b
@@ -2475,7 +2504,7 @@ object Cv {
                 }
             }
         }
-        return out
+        return tapped("maxFilterWrapRows", out) { arrayOf(s, rows, cols, nt, nr) }
     }
 
     // ── 背景物件規則的確定性原語（研究端 research/nightread_obj.py 照同一套整數寫法；逐位元相同）──────────
@@ -2494,7 +2523,7 @@ object Cv {
         var sum = 0
         for (v in w) sum += v
         w[c] += 65536 - sum
-        return w
+        return tapped("gaussW", w) { arrayOf(sigma) }
     }
 
     /**
@@ -2552,6 +2581,43 @@ object Cv {
         return tapped("gaussQ16", Gray(w, h, out)) { arrayOf(g, sigma) }
     }
 
+    /**
+     * 整數高斯（[gaussQ16]）在單一像素 (x, y) 的值（同一套整數運算：先橫後直、REFLECT_101、Q16 四捨五入）。[k]＝[gaussW] 的核。
+     * 原本在 BgObjects（效果線也用）；2026-11-03 搬到底層（C++ 移植第 3b 階，拆掉效果線 ↔ 背景物件的互相依賴），算法一字不改。
+     */
+    internal fun gaussAt(g: Gray, k: IntArray, x: Int, y: Int): Int {
+        val v = gaussAtBody(g, k, x, y)
+        // 不經 [tapped]：結果是 Int，泛型參數會裝箱（效果線一頁呼叫很多次）；只在有監聽時才裝箱
+        val t = tap
+        if (t != null) t.call("gaussAt", arrayOf(g, k, x, y), v)
+        return v
+    }
+
+    private fun gaussAtBody(g: Gray, k: IntArray, x: Int, y: Int): Int {
+        val w = g.w
+        val h = g.h
+        val gd = g.data
+        val c = k.size / 2
+        val kc = k[c]
+        // 窗整個在影像內的不必反射（reflect101 在界內是恆等；整數加總與順序無關）
+        val inX = x >= c && x < w - c
+        var acc = 0L
+        for (j in 0 until k.size) {
+            val kj = k[j]
+            if (kj == 0) continue
+            val yy = y + j - c
+            val r = (if (yy >= 0 && yy < h) yy else reflect101(yy, h)) * w
+            var hs = kc * gd[r + x]
+            if (inX) {
+                for (t in 1..c) hs += k[c + t] * (gd[r + x - t] + gd[r + x + t])
+            } else {
+                for (t in 1..c) hs += k[c + t] * (gd[r + reflect101(x - t, w)] + gd[r + reflect101(x + t, w)])
+            }
+            acc += kj.toLong() * hs
+        }
+        return ((acc + 32768L) shr 16).toInt()
+    }
+
     /** [gaussQ16Sparse] 的來源列：把頁面第 [r] 列在游程 [rs]／[re]（[s, e)，依序、不重疊，共 [n] 段）上的值寫進頁寬的 [dst]。 */
     internal fun interface RowSrc {
         fun fill(r: Int, rs: IntArray, re: IntArray, n: Int, dst: IntArray)
@@ -2562,11 +2628,15 @@ object Cv {
         fun row(y: Int, v: IntArray, rs: IntArray, re: IntArray, n: Int)
     }
 
-    /** 灰階頁面當 [RowSrc]（逐段複製）。 */
-    internal fun grayRows(g: Gray): RowSrc = RowSrc { r, rs, re, n, dst ->
-        val base = r * g.w
-        for (k in 0 until n) System.arraycopy(g.data, base + rs[k], dst, rs[k], re[k] - rs[k])
+    /** 灰階頁面當 [RowSrc]（逐段複製）。具名類別：錄放要認得來源是什麼（[gaussQ16Sparse] 的回報）。 */
+    internal class GrayRows(@JvmField val g: Gray) : RowSrc {
+        override fun fill(r: Int, rs: IntArray, re: IntArray, n: Int, dst: IntArray) {
+            val base = r * g.w
+            for (k in 0 until n) System.arraycopy(g.data, base + rs[k], dst, rs[k], re[k] - rs[k])
+        }
     }
+
+    internal fun grayRows(g: Gray): RowSrc = GrayRows(g)
 
     /**
      * 列打包位元（[packBits] 格式）的一列（從 [off] 起 [nw] 字）→ 游程 [s, e)，依序寫進 [rs]／[re]，回傳段數（跨字的段接起來）。
@@ -2600,6 +2670,39 @@ object Cv {
      * （頁緣 REFLECT_101）離原位不超過 c，一定落在外擴的範圍裡，所以夾在頁內的外擴就夠。橫向結果留 2c+1 列的環形緩衝（同 [gaussQ16]）。
      */
     internal fun gaussQ16Sparse(w: Int, h: Int, k: IntArray, need: LongArray, ny0: Int, nrows: Int, src: RowSrc, sink: RowSink) {
+        val t = tap
+        if (t == null) {
+            gaussQ16SparseBody(w, h, k, need, ny0, nrows, src, sink)
+            return
+        }
+        // 錄放：把交給 sink 的每一列也記下來（[SparseRec] 的格式），來源換成資料（灰階頁面與中值的 ksize；0＝[GrayRows]）
+        val rec = SparseRec()
+        gaussQ16SparseBody(w, h, k, need, ny0, nrows, src) { y, v, rs, re, n ->
+            rec.add(y, v, rs, re, n)
+            sink.row(y, v, rs, re, n)
+        }
+        val sg: Gray? = when (src) { is GrayRows -> src.g; is MedianRows -> src.g; else -> null }
+        val sk = when (src) { is GrayRows -> 0; is MedianRows -> src.ksize; else -> -1 }
+        t.call("gaussQ16Sparse", arrayOf(w, h, k, need, ny0, nrows, sg, sk), rec.toArray())
+    }
+
+    /**
+     * [gaussQ16Sparse] 回報給錄放的結果：交給 sink 的每一列依序串成一個 IntArray——y、段數 n、n 對 [s, e)、再接各段的值（依段序）。
+     * C++ 的重算（NightNativeGray.gaussQ16Sparse）回同一種格式。
+     */
+    internal class SparseRec {
+        private var a = IntArray(256)
+        private var n = 0
+        private fun put(v: Int) { if (n == a.size) a = a.copyOf(a.size * 2); a[n++] = v }
+        fun add(y: Int, v: IntArray, rs: IntArray, re: IntArray, cnt: Int) {
+            put(y); put(cnt)
+            for (q in 0 until cnt) { put(rs[q]); put(re[q]) }
+            for (q in 0 until cnt) for (x in rs[q] until re[q]) put(v[x])
+        }
+        fun toArray(): IntArray = a.copyOf(n)
+    }
+
+    private fun gaussQ16SparseBody(w: Int, h: Int, k: IntArray, need: LongArray, ny0: Int, nrows: Int, src: RowSrc, sink: RowSink) {
         if (nrows <= 0 || w <= 0) return
         val c = k.size / 2
         val nw = (w + 63) ushr 6
@@ -2694,7 +2797,7 @@ object Cv {
     /**
      * [medianBlur8] 當 [gaussQ16Sparse] 的來源：只算要的欄（每段從段首的窗起算、再沿段滑動；同一個順序統計量，逐值相同）。
      */
-    internal class MedianRows(private val g: Gray, private val ksize: Int) : RowSrc {
+    internal class MedianRows(@JvmField val g: Gray, @JvmField val ksize: Int) : RowSrc {
         private val fine = IntArray(256)
         private val cols = IntArray(ksize)
 
@@ -2733,6 +2836,16 @@ object Cv {
                         while (lt + fine[m] < need) { lt += fine[m]; m++ }
                     }
                 }
+            }
+            // 錄放：結果＝各段的值依段序串起來（dst 在段外的格子沒定義）
+            val t = tap
+            if (t != null) {
+                var tot = 0
+                for (q in 0 until n) tot += re[q] - rs[q]
+                val v = IntArray(tot)
+                var o = 0
+                for (q in 0 until n) for (x in rs[q] until re[q]) v[o++] = dst[x]
+                t.call("medianRows", arrayOf(g, ksize, r, rs.copyOf(n), re.copyOf(n)), v)
             }
         }
     }
@@ -2781,7 +2894,7 @@ object Cv {
                 }
             }
         }
-        return Gray(w, h, out)
+        return tapped("medianBlur8", Gray(w, h, out)) { arrayOf(g, ksize) }
     }
 
     /**
@@ -2886,7 +2999,7 @@ object Cv {
                 }
             }
         }
-        return Mask(w, h, BooleanArray(w * h) { st[it].toInt() == 2 })
+        return tapped("canny", Mask(w, h, BooleanArray(w * h) { st[it].toInt() == 2 })) { arrayOf(src, w, h, shift, lo, hi) }
     }
 
     /**

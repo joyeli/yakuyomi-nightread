@@ -1107,35 +1107,9 @@ internal object BgObjects {
         return k
     }
 
-    /** 整數高斯（[Cv.gaussQ16]）在單一像素 (x, y) 的值（同一套整數運算：先橫後直、REFLECT_101、Q16 四捨五入）。 */
-    internal fun gaussAt(g: Gray, k: IntArray, x: Int, y: Int): Int {
-        val w = g.w
-        val h = g.h
-        val gd = g.data
-        val c = k.size / 2
-        val kc = k[c]
-        // 窗整個在影像內的不必反射（reflect101 在界內是恆等；整數加總與順序無關）
-        val inX = x >= c && x < w - c
-        var acc = 0L
-        for (j in 0 until k.size) {
-            val kj = k[j]
-            if (kj == 0) continue
-            val yy = y + j - c
-            val r = (if (yy >= 0 && yy < h) yy else Cv.reflect101(yy, h)) * w
-            var hs = kc * gd[r + x]
-            if (inX) {
-                for (t in 1..c) hs += k[c + t] * (gd[r + x - t] + gd[r + x + t])
-            } else {
-                for (t in 1..c) hs += k[c + t] * (gd[r + Cv.reflect101(x - t, w)] + gd[r + Cv.reflect101(x + t, w)])
-            }
-            acc += kj.toLong() * hs
-        }
-        return ((acc + 32768L) shr 16).toInt()
-    }
-
     /**
      * σ2.5 亮度（[Cv.gaussQ16]，Q16）在 [ns] 個取樣點（窗座標 ([xs], [ys])、窗左上 ([x0], [y0])、窗高 [sh]；掃描序）上的值，依同樣順序
-     * 回傳。只算取樣點（[Cv.gaussQ16Sparse]），與整頁算再取逐位元相同（取代逐點 [gaussAt]）。
+     * 回傳。只算取樣點（[Cv.gaussQ16Sparse]），與整頁算再取逐位元相同（取代逐點 [Cv.gaussAt]）。
      */
     internal fun gaussSamples(g: Gray, k: IntArray, ys: IntArray, xs: IntArray, ns: Int, x0: Int, y0: Int, sh: Int): IntArray {
         val out = IntArray(ns)

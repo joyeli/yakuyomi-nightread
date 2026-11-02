@@ -36,7 +36,7 @@ class SparsePrimitivesTest {
         return out
     }
 
-    /** 改寫前的逐點高斯（BgObjects.gaussAt，照抄）。 */
+    /** 改寫前的逐點高斯（原 BgObjects.gaussAt，2026-11-03 起是 Cv.gaussAt；照抄）。 */
     private fun gaussAtRef(g: Gray, k: IntArray, x: Int, y: Int): Int {
         val w = g.w
         val h = g.h
