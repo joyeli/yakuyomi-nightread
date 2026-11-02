@@ -113,6 +113,29 @@ class CC(
 
 object Cv {
 
+    // ── 錄放（C++ 移植的驗收）────────────────────────────────────────────
+
+    /**
+     * 呼叫監聽：C++ 移植的錄放（NativeDumpTest 的 calls/、CppCvCallReplayTest）設了它，每次呼叫已搬到 C++ 的整張影像原語**之後**同步
+     * 回報一次（運算名、參數、結果）。回呼在呼叫者的執行緒上執行，頁內並行時會同時從多條執行緒來；參數與結果在回呼返回後可能被呼叫端
+     * 改掉，要留就先複製。巢狀的呼叫各報各的（dilatePacked 裡的 packBits、dilateBits、unpackBits 也會報）。
+     * 細粒度的（[reflect101]、[anyBits]、[bitRuns]、Ring.set／has）不報，靠錄出的隨機與邊界案例驗。
+     * **產品與一般測試永遠是 null**：每次呼叫多讀一次靜態欄位，輸出不變。
+     */
+    internal fun interface CallTap {
+        fun call(op: String, args: Array<Any?>, result: Any?)
+    }
+
+    @JvmField @Volatile internal var tap: CallTap? = null
+
+    /** 有設 [tap] 就回報（參數陣列只在那時才建）；回傳 [r]。 */
+    @Suppress("NOTHING_TO_INLINE")
+    internal inline fun <T> tapped(op: String, r: T, args: () -> Array<Any?>): T {
+        val t = tap
+        if (t != null) t.call(op, args(), r)
+        return r
+    }
+
     // ── 結構元素 ─────────────────────────────────────────────────────
 
     /**
@@ -157,7 +180,7 @@ object Cv {
                 else -> dilatePacked(cur, k)
             }
         }
-        return cur
+        return tapped("dilate", cur) { arrayOf(m, k, iterations) }
     }
 
     fun erode(m: Mask, k: Kernel, iterations: Int = 1): Mask {
@@ -170,30 +193,30 @@ object Cv {
                 else -> erodePacked(cur, k)
             }
         }
-        return cur
+        return tapped("erode", cur) { arrayOf(m, k, iterations) }
     }
 
     fun open(m: Mask, k: Kernel): Mask {
         val line = lineKernel(k)
-        if (line == 0) return openPacked(m, k)
+        if (line == 0) return tapped("open", openPacked(m, k)) { arrayOf(m, k) }
         // 線核：侵蝕＝¬膨脹(¬m)，中間結果留在打包格式
         val hor = line > 0
         val len = if (hor) line else -line
         val an = if (hor) k.ax else k.ay
         val e = lineOrBits(packBitsNot(m), m.w, m.h, len, hor, an)
         notBitsInPlace(e, m.w, m.h)
-        return unpackBits(lineOrBits(e, m.w, m.h, len, hor, an), m.w, m.h)
+        return tapped("open", unpackBits(lineOrBits(e, m.w, m.h, len, hor, an), m.w, m.h)) { arrayOf(m, k) }
     }
 
     fun close(m: Mask, k: Kernel): Mask {
         val line = lineKernel(k)
-        if (line == 0) return closePacked(m, k)
+        if (line == 0) return tapped("close", closePacked(m, k)) { arrayOf(m, k) }
         val hor = line > 0
         val len = if (hor) line else -line
         val an = if (hor) k.ax else k.ay
         val d = lineOrBits(packBits(m), m.w, m.h, len, hor, an)
         notBitsInPlace(d, m.w, m.h)
-        return unpackBitsNot(lineOrBits(d, m.w, m.h, len, hor, an), m.w, m.h)
+        return tapped("close", unpackBitsNot(lineOrBits(d, m.w, m.h, len, hor, an), m.w, m.h)) { arrayOf(m, k) }
     }
 
     /**
@@ -205,7 +228,8 @@ object Cv {
      * （核高 × 像素數）快一個數量級：13×13 橢圓在 2.6 MPx 上約 40 ms → 5 ms。出血格過濾一頁要五趟整頁橢圓／方核外擴，
      * 用這條。
      */
-    fun dilatePacked(m: Mask, k: Kernel): Mask = unpackBits(dilateBits(packBits(m), m.w, m.h, k), m.w, m.h)
+    fun dilatePacked(m: Mask, k: Kernel): Mask =
+        tapped("dilatePacked", unpackBits(dilateBits(packBits(m), m.w, m.h, k), m.w, m.h)) { arrayOf(m, k) }
 
     /** 列打包：每列 (w+63)/64 個 Long，像素 x 在第 x ushr 6 字的第 x and 63 位；末字超出寬度的位元一律 0。 */
     fun packBits(m: Mask): LongArray {
@@ -226,7 +250,7 @@ object Cv {
                 out[wb + i] = v
             }
         }
-        return out
+        return tapped("packBits", out) { arrayOf(m) }
     }
 
     /** ¬[m] 的 [packBits]（只取反影像內的位元：末字超出寬度的位元照樣是 0）。 */
@@ -247,7 +271,7 @@ object Cv {
                 out[wb + i] = v
             }
         }
-        return out
+        return tapped("packBitsNot", out) { arrayOf(m) }
     }
 
     /** [unpackBits] 再取反（＝¬遮罩）。 */
@@ -265,7 +289,7 @@ object Cv {
                 for (b in 0 until n) od[base + x0 + b] = (v ushr b) and 1L == 0L
             }
         }
-        return out
+        return tapped("unpackBitsNot", out) { arrayOf(a, w, h) }
     }
 
     /** [packBits] 的反向。全 0 的字跳過、全 1 的字整段填，其餘逐位元寫（不逐個找最低位）。 */
@@ -289,11 +313,12 @@ object Cv {
                 for (b in 0 until n) od[o + b] = (v ushr b) and 1L != 0L
             }
         }
-        return out
+        return tapped("unpackBits", out) { arrayOf(a, w, h) }
     }
 
     /** 就地取反打包位元（只取反影像內的位元：末字超出寬度的位元維持 0）。 */
     fun notBitsInPlace(a: LongArray, w: Int, h: Int) {
+        val before = if (tap != null) a.copyOf() else null
         val nw = (w + 63) ushr 6
         val tail = if (w and 63 == 0) -1L else (1L shl (w and 63)) - 1
         for (y in 0 until h) {
@@ -301,6 +326,7 @@ object Cv {
             for (i in 0 until nw - 1) a[b + i] = a[b + i].inv()
             a[b + nw - 1] = a[b + nw - 1].inv() and tail
         }
+        if (before != null) tapped("notBitsInPlace", a) { arrayOf(before, w, h) }
     }
 
     /** 打包位元的侵蝕＝¬[dilateBits](¬src)（同 [erodePacked]；不改 [src]）。 */
@@ -309,7 +335,7 @@ object Cv {
         notBitsInPlace(inv, w, h)
         val d = dilateBits(inv, w, h, k)
         notBitsInPlace(d, w, h)
-        return d
+        return tapped("erodeBits", d) { arrayOf(src, w, h, k) }
     }
 
     /**
@@ -338,7 +364,7 @@ object Cv {
             if (j == nk) { keyLo[nk] = lo; keyHi[nk] = hi; nk++ }
             rowKey[ky] = j
         }
-        if (nk == 0) return acc
+        if (nk == 0) return tapped("dilateBits", acc) { arrayOf(src, w, h, k) }
         // 依兩側延伸量由小到大處理（橢圓、方核兩側一起單調變大 ⇒ 單側 OR 只要往上長）
         val order = (0 until nk).sortedWith(compareBy({ max(0, -keyLo[it]) }, { max(0, keyHi[it]) }))
         val runs = PackedRuns(src, nw, h, w)
@@ -356,7 +382,7 @@ object Cv {
                 }
             }
         }
-        return acc
+        return tapped("dilateBits", acc) { arrayOf(src, w, h, k) }
     }
 
     /**
@@ -544,7 +570,7 @@ object Cv {
         var bits = packBits(m)
         if (kw > 1) bits = lineOrBits(bits, w, h, kw, true, kw / 2)
         if (kh > 1) bits = lineOrBits(bits, w, h, kh, false, kh / 2)
-        return unpackBits(bits, w, h)
+        return tapped("dilateRectSep", unpackBits(bits, w, h)) { arrayOf(m, kw, kh) }
     }
 
     /**
@@ -554,11 +580,11 @@ object Cv {
     fun closeRectSep(m: Mask, n: Int): Mask {
         val w = m.w
         val h = m.h
-        if (n <= 1) return m.copy()
+        if (n <= 1) return tapped("closeRectSep", m.copy()) { arrayOf(m, n) }
         var bits = lineOrBits(lineOrBits(packBits(m), w, h, n, true, n / 2), w, h, n, false, n / 2)
         notBitsInPlace(bits, w, h)
         bits = lineOrBits(lineOrBits(bits, w, h, n, true, n / 2), w, h, n, false, n / 2)
-        return unpackBitsNot(bits, w, h)
+        return tapped("closeRectSep", unpackBitsNot(bits, w, h)) { arrayOf(m, n) }
     }
 
     /** 核是不是單一實心的 1×n（回 n）或 n×1（回 -n）；都不是回 0。 */
@@ -790,7 +816,7 @@ object Cv {
             if (width[i] < 0) width[i] = 0
             if (height[i] < 0) height[i] = 0
         }
-        return CC(n, labels, left, top, width, height, area)
+        return tapped("ccStats", CC(n, labels, left, top, width, height, area)) { arrayOf(m, connectivity) }
     }
 
     /**
@@ -892,7 +918,7 @@ object Cv {
             parent[r] = root
             lab[r] = remap[root]
         }
-        return CcRuns(n, rs, re, rowFirst, lab, fg, bgLeft, bgTop, bgRight, bgBottom)
+        return tapped("ccRuns", CcRuns(n, rs, re, rowFirst, lab, fg, bgLeft, bgTop, bgRight, bgBottom)) { arrayOf(m, connectivity) }
     }
 
     /**
@@ -954,7 +980,7 @@ object Cv {
             parent[r] = root
             lab[r] = remap[root]
         }
-        return CcRuns(n, rs, re, rowFirst, lab, fg, 0, 0, 0, 0)
+        return tapped("ccRunsBits", CcRuns(n, rs, re, rowFirst, lab, fg, 0, 0, 0, 0)) { arrayOf(bits, w, h, connectivity) }
     }
 
     /** 列打包位元第 [off] 字起那一列，在 [s, e) 裡有沒有任何一位是 1。 */
@@ -1022,7 +1048,7 @@ object Cv {
         // 就地開平方，省一次 2.6 MPx 的配置（這個函式是合成階段的記憶體峰值所在：留白帶的格線距離、核心填色的直線距離）；
         // 用 Float 版 sqrt 不繞 Double
         for (i in f.indices) f[i] = kotlin.math.sqrt(f[i])
-        return FImg(w, h, f)
+        return tapped("distanceL2", FImg(w, h, f)) { arrayOf(m) }
     }
 
     /** [distanceSq] 裡「沒有背景像素」的值。 */
@@ -1113,7 +1139,7 @@ object Cv {
                 out[base + x] = if (d2 < DIST_SQ_SAT) d2.toInt() else DIST_SQ_SAT.toInt()
             }
         }
-        return out
+        return tapped("distanceSq", out) { arrayOf(m) }
     }
 
     /** Felzenszwalb & Huttenlocher 的一維平方距離變換（拋物線下包絡）。 */
@@ -1262,9 +1288,9 @@ object Cv {
 
     /** `cv2.resize(f, (nw, nh), INTER_AREA)`（縮小用；對每個輸出格取其來源矩形的面積加權平均）。 */
     fun resizeArea(f: FImg, nw: Int, nh: Int): FImg {
-        if (nw == f.w && nh == f.h) return f.copy()
+        if (nw == f.w && nh == f.h) return tapped("resizeArea", f.copy()) { arrayOf(f, nw, nh) }
         val d = f.data
-        return resizeAreaOf(f.w, f.h, nw, nh) { d[it] }
+        return tapped("resizeArea", resizeAreaOf(f.w, f.h, nw, nh) { d[it] }) { arrayOf(f, nw, nh) }
     }
 
     /** [resizeArea] 的本體，來源像素由 [src]（索引 → 值）給：呼叫端可以不先攤出一張整頁的來源圖（同一套浮點運算）。 */
@@ -1298,7 +1324,8 @@ object Cv {
                 out[oy * nw + ox] = if (wsum > 0) (acc / wsum).toFloat() else 0f
             }
         }
-        return FImg(nw, nh, out)
+        // 錄放：來源是 lambda，回報時攤成一張來源圖（只在有設監聽時）
+        return tapped("resizeAreaOf", FImg(nw, nh, out)) { arrayOf(FImg(w, h, FloatArray(w * h) { src(it) }), nw, nh) }
     }
 
     /**
@@ -1308,7 +1335,7 @@ object Cv {
      * 的誤差遠小於它的平滑尺度。
      */
     fun resizeBilinear(f: FImg, nw: Int, nh: Int): FImg {
-        if (nw == f.w && nh == f.h) return f.copy()
+        if (nw == f.w && nh == f.h) return tapped("resizeBilinear", f.copy()) { arrayOf(f, nw, nh) }
         val out = FloatArray(nw * nh)
         val sx = f.w.toDouble() / nw
         val sy = f.h.toDouble() / nh
@@ -1327,14 +1354,14 @@ object Cv {
                 out[y * nw + x] = a * (1 - wy) + b * wy
             }
         }
-        return FImg(nw, nh, out)
+        return tapped("resizeBilinear", FImg(nw, nh, out)) { arrayOf(f, nw, nh) }
     }
 
     /** `cv2.resize(m, (nw, nh), INTER_NEAREST)`（cv2 取 `floor(dst * scale)`）。 */
     fun resizeNearest(m: Mask, nw: Int, nh: Int): Mask {
         val w = m.w
         val h = m.h
-        if (nw == w && nh == h) return m.copy()
+        if (nw == w && nh == h) return tapped("resizeNearest", m.copy()) { arrayOf(m, nw, nh) }
         val sx = w.toDouble() / nw
         val sy = h.toDouble() / nh
         val out = Mask(nw, nh)
@@ -1345,14 +1372,14 @@ object Cv {
                 out.data[oy * nw + ox] = m.data[iy * w + ix]
             }
         }
-        return out
+        return tapped("resizeNearest", out) { arrayOf(m, nw, nh) }
     }
 
     /** 灰階版最近鄰，供遮罩以外的圖層用。 */
     fun resizeNearestGray(g: Gray, nw: Int, nh: Int): Gray {
         val w = g.w
         val h = g.h
-        if (nw == w && nh == h) return g.copy()
+        if (nw == w && nh == h) return tapped("resizeNearestGray", g.copy()) { arrayOf(g, nw, nh) }
         val sx = w.toDouble() / nw
         val sy = h.toDouble() / nh
         val out = Gray(nw, nh)
@@ -1363,7 +1390,7 @@ object Cv {
                 out.data[oy * nw + ox] = g.data[iy * w + ix]
             }
         }
-        return out
+        return tapped("resizeNearestGray", out) { arrayOf(g, nw, nh) }
     }
 
     // ── 洞 / 輪廓 ────────────────────────────────────────────────────
@@ -1393,7 +1420,7 @@ object Cv {
             val y = i / w
             push(x - 1, y); push(x + 1, y); push(x, y - 1); push(x, y + 1)
         }
-        return Mask(w, h, BooleanArray(w * h) { !m.data[it] && !reached[it] })
+        return tapped("holes", Mask(w, h, BooleanArray(w * h) { !m.data[it] && !reached[it] })) { arrayOf(m) }
     }
 
     /**
@@ -1479,7 +1506,7 @@ object Cv {
                 x++
             }
         }
-        return total
+        return tapped("totalContourLength", total) { arrayOf(m) }
     }
 
     /** `cv2.contourArea(quad)`（多邊形面積，shoelace 絕對值）。 */
@@ -1490,7 +1517,7 @@ object Cv {
             val j = (i + 1) % n
             a += xs[i].toDouble() * ys[j] - xs[j].toDouble() * ys[i]
         }
-        return abs(a) / 2.0
+        return tapped("polygonArea", abs(a) / 2.0) { arrayOf(xs, ys) }
     }
 
     // ── 管線常用的小工具 ──────────────────────────────────────────────
@@ -1541,7 +1568,7 @@ object Cv {
                 }
             }
         }
-        return dist
+        return tapped("geodesicDistance", dist) { arrayOf(seed, within, step, maxIters) }
     }
 
     /**
@@ -1549,12 +1576,12 @@ object Cv {
      * O(到達面積 × (2·step+1)²)；BFS 的隨機查表比迭代的循序掃描每次貴約 3 倍，門檻取 3·iters > (2·step+1)²。
      */
     fun geodesicGrow(seed: Mask, within: Mask, iters: Int, step: Int = 5, bfs: Boolean? = null): Mask {
-        if (iters <= 0) return seed and within
+        if (iters <= 0) return tapped("geodesicGrow", seed and within) { arrayOf(seed, within, iters, step, bfs) }
         // 實測 BFS 每次查表比迭代每像素貴 ~3×（隨機存取），門檻放 3 倍：iters > (2·step+1)²/3
         val useBfs = bfs ?: (iters.toLong() * 3 > (2L * step + 1) * (2L * step + 1))
         if (useBfs) {
             val dist = geodesicDistance(seed, within, step, iters)
-            return Mask(seed.w, seed.h, BooleanArray(dist.size) { dist[it] >= 0 })
+            return tapped("geodesicGrow", Mask(seed.w, seed.h, BooleanArray(dist.size) { dist[it] >= 0 })) { arrayOf(seed, within, iters, step, bfs) }
         }
         // 迭代版走位元打包（2026-10-06；原本逐像素看八鄰居，留在測試 MorphPackedTest 當參考實作，逐像素相同）：
         // 一次 3×3 膨脹＝每列左右移一位 OR、再上下三列 OR（64 px 一字）。
@@ -1580,7 +1607,7 @@ object Cv {
             val t = cur; cur = nxt; nxt = t
             if (same) break
         }
-        return unpackBits(cur, w, h)
+        return tapped("geodesicGrow", unpackBits(cur, w, h)) { arrayOf(seed, within, iters, step, bfs) }
     }
 
     /** 打包位元就地 3×3 膨脹（影像外當 0）：[hor] 是同尺寸的工作緩衝。 */
@@ -1650,7 +1677,7 @@ object Cv {
                 out.data[y * w + x] = cnt >= need
             }
         }
-        return out
+        return tapped("medianBlurMask", out) { arrayOf(m, r) }
     }
 
     // ── 繪圖（cv2.line / cv2.fillPoly，LINE_8、shift 0）──────────────────────
@@ -2215,7 +2242,7 @@ object Cv {
                 out.data[y * w + x] = t0.toFloat() * scale
             }
         }
-        return out
+        return tapped("distanceChamfer", out) { arrayOf(m, maskSize) }
     }
 
     // ── numpy／LAPACK 相容的數值原語（格溝偵測的逐位元 parity 要用）──────────────────
@@ -2522,7 +2549,7 @@ object Cv {
             val ob = y * w
             for (x in 0 until w) out[ob + x] = ((acc[x] + 32768L) shr 16).toInt()
         }
-        return Gray(w, h, out)
+        return tapped("gaussQ16", Gray(w, h, out)) { arrayOf(g, sigma) }
     }
 
     /** [gaussQ16Sparse] 的來源列：把頁面第 [r] 列在游程 [rs]／[re]（[s, e)，依序、不重疊，共 [n] 段）上的值寫進頁寬的 [dst]。 */
@@ -2915,7 +2942,7 @@ object Cv {
                 }
             }
         }
-        return t
+        return tapped("chamfer5Padded", t) { arrayOf(m) }
     }
 
     /**
@@ -3034,20 +3061,21 @@ object Cv {
             if (first) java.util.Arrays.fill(cur, id)
             System.arraycopy(cur, 0, out, y * w, w)
         }
-        return Gray(w, h, out)
+        return tapped("morphGrayGather", Gray(w, h, out)) { arrayOf(g, k, wantMax) }
     }
 
     /**
      * 二值侵蝕的位元打包快路：`erode(m, k)` ＝ ¬`dilate`(¬m, k)（同一組位移；影像外：膨脹當 0 ⇔ 侵蝕當 1，同 cv2）。
      * 取反直接在打包／解包時做（[packBitsNot]／[unpackBitsNot]），不配兩張整頁的取反遮罩。
      */
-    fun erodePacked(m: Mask, k: Kernel): Mask = unpackBitsNot(dilateBits(packBitsNot(m), m.w, m.h, k), m.w, m.h)
+    fun erodePacked(m: Mask, k: Kernel): Mask =
+        tapped("erodePacked", unpackBitsNot(dilateBits(packBitsNot(m), m.w, m.h, k), m.w, m.h)) { arrayOf(m, k) }
 
     /** [close]（cv2 MORPH_CLOSE）的位元打包快路（中間結果留在打包格式，不解包再打包）。 */
     fun closePacked(m: Mask, k: Kernel): Mask =
-        unpackBits(erodeBits(dilateBits(packBits(m), m.w, m.h, k), m.w, m.h, k), m.w, m.h)
+        tapped("closePacked", unpackBits(erodeBits(dilateBits(packBits(m), m.w, m.h, k), m.w, m.h, k), m.w, m.h)) { arrayOf(m, k) }
 
     /** [open]（cv2 MORPH_OPEN）的位元打包快路（中間結果留在打包格式）。 */
     fun openPacked(m: Mask, k: Kernel): Mask =
-        unpackBits(dilateBits(erodeBits(packBits(m), m.w, m.h, k), m.w, m.h, k), m.w, m.h)
+        tapped("openPacked", unpackBits(dilateBits(erodeBits(packBits(m), m.w, m.h, k), m.w, m.h, k), m.w, m.h)) { arrayOf(m, k) }
 }

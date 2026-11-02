@@ -48,7 +48,7 @@ internal object Ring {
             for (t in 0 until e) if (d[i0 + t]) v = v or (1L shl t)
             bits[wi] = v
         }
-        return bits
+        return Cv.tapped("ring.packBits", bits) { arrayOf(m) }
     }
 
     /** [claimable] 的結果。 */
