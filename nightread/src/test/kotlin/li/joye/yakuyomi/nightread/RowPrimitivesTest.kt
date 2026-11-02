@@ -182,7 +182,8 @@ class RowPrimitivesTest {
             return arrayOf(convQOld(pxx, rows, cols, k4), convQOld(pyy, rows, cols, k4), convQOld(pxy, rows, cols, k4))
         }
 
-    private val sizes = listOf(1 to 1, 1 to 23, 23 to 1, 2 to 2, 3 to 7, 17 to 5, 64 to 9, 65 to 40, 140 to 97)
+    // 寬度跨過 64 位元字的邊界（63／64／65／127／128／129）：C++ 移植第 3b 階的錄放也拿這些案例重放（CppCvCallReplayTest）
+    private val sizes = listOf(1 to 1, 1 to 23, 23 to 1, 2 to 2, 3 to 7, 17 to 5, 63 to 4, 64 to 9, 65 to 40, 127 to 3, 128 to 5, 129 to 2, 140 to 97)
 
     private fun img(rnd: Random, w: Int, h: Int, kind: Int, scale: Int): IntArray = IntArray(w * h) {
         when (kind) {

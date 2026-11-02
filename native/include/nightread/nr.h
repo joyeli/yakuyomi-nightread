@@ -22,7 +22,7 @@ extern "C" {
 #endif
 
 /* ABI 版本：C API／JNI 簽名有不相容的改動就加 1。nr_abi() 回傳 (NR_ABI_VERSION << 16) | NR_RULES_VERSION。 */
-#define NR_ABI_VERSION 3
+#define NR_ABI_VERSION 4
 /* 夜讀規則版本：必須等於 Kotlin 的 NightRead.RULES_VERSION（tools/gen_params.py 會同步；NightNative.available() 握手時比對）。 */
 #define NR_RULES_VERSION 4
 

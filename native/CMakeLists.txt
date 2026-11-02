@@ -86,7 +86,7 @@ else()
 endif()
 
 if(NR_HAVE_JNI)
-  add_library(nightread_jni OBJECT jni/nr_jni.cpp jni/nr_prims_jni.cpp jni/nr_bin_jni.cpp)
+  add_library(nightread_jni OBJECT jni/nr_jni.cpp jni/nr_prims_jni.cpp jni/nr_bin_jni.cpp jni/nr_gray_jni.cpp)
   set_target_properties(nightread_jni PROPERTIES
     POSITION_INDEPENDENT_CODE ON CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF
     CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)

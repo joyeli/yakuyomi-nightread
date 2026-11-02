@@ -9,3 +9,6 @@
 -keepclasseswithmembernames,includedescriptorclasses class li.joye.yakuyomi.nightread.NightNativeBin {
     native <methods>;
 }
+-keepclasseswithmembernames,includedescriptorclasses class li.joye.yakuyomi.nightread.NightNativeGray {
+    native <methods>;
+}

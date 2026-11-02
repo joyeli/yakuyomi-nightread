@@ -130,5 +130,12 @@ class GatherPairTest {
                 assertArrayEquals("gather #$t ${w}×$h 核 ${k.w}×${k.h} max=$mx", gatherOld(g, k, mx).data, Cv.morphGrayGather(g, k, mx).data)
             }
         }
+        // 寬度跨過 64 位元字的邊界、單列、單欄
+        for ((w, h) in listOf(1 to 1, 1 to 9, 9 to 1, 63 to 3, 64 to 2, 65 to 3, 127 to 1, 128 to 3, 129 to 2)) {
+            val g = Gray(w, h, IntArray(w * h) { rnd.nextInt(256) * 65536 })
+            for (k in listOf(Cv.ellipse(7), Cv.ellipse(11), Cv.rect(9, 1), Cv.rect(1, 5))) for (mx in booleanArrayOf(true, false)) {
+                assertArrayEquals("gather ${w}×$h 核 ${k.w}×${k.h} max=$mx", gatherOld(g, k, mx).data, Cv.morphGrayGather(g, k, mx).data)
+            }
+        }
     }
 }

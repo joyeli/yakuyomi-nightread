@@ -8,12 +8,13 @@ import java.awt.image.BufferedImage
 import javax.imageio.ImageIO
 
 /**
- * 錄放（同 JVM 版）：Kotlin 跑真頁的產品路徑時，[Cv.tap] 回報的**每一次**原語呼叫（已搬到 C++ 的：第 2 階＋第 3a 階），當場用 C++ 拿
- * 同一份輸入重算、逐位元比（[CvCallReplay]）。
+ * 錄放（同 JVM 版）：Kotlin 跑真頁的產品路徑時，[Cv.tap] 回報的**每一次** Cv 呼叫（第 3b 階起 Cv 的公開原語全部搬到 C++），當場用
+ * C++ 拿同一份輸入重算、逐位元比（[CvCallReplay]；逐點的 gaussAt、medianRows 併批重算）。
  *  - [ciCorpus]：CI 語料的 10 頁（公開 fixture 與合成頁），產品兩檔（[NightRead.renderTiers] 的 L2＋L3，預設亮度與 fork 預設亮度）
- *    加研究端完整管線（render，標準參數）。每一頁都要真的比到東西，每個第 3a 階管線會用到的運算都要比到。
- *  - [kotlinRandomTests]：本來對照參考實作的 Kotlin 隨機測試（MorphPackedTest、CcStatsRunTest、SparsePrimitivesTest、PfShapeHolesTest）
- *    與對 cv2 fixture 的 CvParityTest（結構元素、形態學、iterations=2、補洞、中值、測地、輪廓長、chamfer…）在監聽下照跑一遍：
+ *    加研究端完整管線（render，標準參數）。每一頁都要真的比到東西，每個管線會用到的運算都要比到。
+ *  - [kotlinRandomTests]：本來對照參考實作的 Kotlin 隨機測試（MorphPackedTest、CcStatsRunTest、SparsePrimitivesTest、PfShapeHolesTest、
+ *    第 3b 階加的 RowPrimitivesTest、ObjPrimitivesTest、GatherPairTest）與對 cv2 fixture 的 CvParityTest（結構元素、形態學、iterations=2、
+ *    補洞、中值、測地、輪廓長、chamfer、blackhat、高斯／方框、線與多邊形、最大值濾波、argsort、np.sum、eigh…）在監聽下照跑一遍：
  *    它們每一次呼叫 Cv 的原語也都拿去給 C++ 重算。
  * 錄到磁碟、給 qemu-aarch64 與 sanitizer 重放的版本在 NativeDumpTest 的 calls/。需要主機原生庫（沒給 `-PnativeLib` 就略過）。
  */
@@ -27,6 +28,9 @@ class CppCvCallReplayTest {
         "unpackBits", "unpackBitsNot", "notBitsInPlace", "erodeBits", "dilateBits", "dilateRectSep", "closeRectSep", "ccStats", "ccRuns",
         "ccRunsBits", "distanceL2", "distanceSq", "distanceChamfer", "chamfer5Padded", "resizeArea", "resizeAreaOf", "resizeNearest",
         "holes", "totalContourLength", "geodesicDistance", "geodesicGrow", "medianBlurMask", "gaussQ16", "morphGrayGather", "ring.packBits",
+        // 第 3b 階（cv2 版灰階形態學、I 版、medianBlur8 不在產品兩檔與完整管線裡，由隨機測試比）
+        "blackhat", "gaussianBlur", "boxBlur", "line", "fillPoly", "maxFilterWrapRows", "gaussW", "npArgsort", "npSum", "eigh2",
+        "gaussQ16Sparse", "medianRows", "canny", "gaussAt",
     )
 
     private fun res(n: String) = javaClass.classLoader!!.getResource("page/$n")
@@ -94,12 +98,14 @@ class CppCvCallReplayTest {
         if (st.failed > 0) fail("Kotlin 隨機測試：${st.failed} 次呼叫 C++ 與 Kotlin 不同，例如\n" + st.failures.take(10).joinToString("\n"))
         println("CppCvCallReplayTest Kotlin 隨機測試 ${ran.size} 個：${st.total} 次呼叫相同（${st.summary()}）")
         assertEquals("每個測試類別都要有跑到測試方法：$ran", REPLAYED_TESTS.size, ran.map { it.substringBefore('.') }.toSet().size)
-        for (op in listOf("dilatePacked", "erodePacked", "dilate", "erode", "open", "close", "dilateRectSep", "closeRectSep", "geodesicGrow", "ccStats", "ccRunsBits")) {
+        for (op in listOf("dilatePacked", "erodePacked", "dilate", "erode", "open", "close", "dilateRectSep", "closeRectSep", "geodesicGrow", "ccStats", "ccRunsBits",
+                "dilateGray", "erodeGray", "dilateGrayI", "erodeGrayI", "blackhat", "medianBlur8", "canny", "gaussQ16Sparse", "medianRows", "line",
+                "gaussianBlur", "boxBlur", "fillPoly", "maxFilterWrapRows", "npArgsort", "npSum", "eigh2", "gaussW", "morphGrayGather", "gaussQ16")) {
             assertTrue("$op 要真的比到", (st.counts[op]?.get() ?: 0L) > 0)
         }
     }
 
-    /** CvParityTest 單獨在監聽下跑：它對 cv2 fixture 呼叫的第 3a 階二值原語都要真的給 C++ 重算到（計畫第 3a 階自動驗收的第一條）。 */
+    /** CvParityTest 單獨在監聽下跑：它對 cv2 fixture 呼叫的原語都要真的給 C++ 重算到（計畫第 3a、3b 階自動驗收的第一條）。 */
     @Test
     fun cvParityFixturesReplayed() {
         NativeLib.assumeLoaded()
@@ -110,7 +116,8 @@ class CppCvCallReplayTest {
         }
         if (st.failed > 0) fail("CvParityTest：${st.failed} 次呼叫 C++ 與 Kotlin 不同，例如\n" + st.failures.take(10).joinToString("\n"))
         println("CppCvCallReplayTest CvParityTest：${st.total} 次呼叫相同（${st.summary()}）")
-        for (op in listOf("dilate", "erode", "open", "close", "dilatePacked", "holes", "medianBlurMask", "geodesicGrow", "totalContourLength", "distanceChamfer", "resizeNearest")) {
+        for (op in listOf("dilate", "erode", "open", "close", "dilatePacked", "holes", "medianBlurMask", "geodesicGrow", "totalContourLength", "distanceChamfer", "resizeNearest",
+                "blackhat", "gaussianBlur", "boxBlur", "line", "fillPoly", "maxFilterWrapRows", "npArgsort", "npSum", "eigh2")) {
             assertTrue("CvParityTest 的 $op 要真的比到", (st.counts[op]?.get() ?: 0L) > 0)
         }
     }
@@ -123,6 +130,9 @@ class CppCvCallReplayTest {
             SparsePrimitivesTest::class.java,
             PfShapeHolesTest::class.java,
             CvParityTest::class.java,
+            RowPrimitivesTest::class.java,
+            ObjPrimitivesTest::class.java,
+            GatherPairTest::class.java,
         )
     }
 }

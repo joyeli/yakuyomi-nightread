@@ -87,10 +87,10 @@ tasks.withType<Test>().configureEach {
             // 錄出器：平常不跑（沒給 -PnativeDump 就略過），單獨成組免得 fast 組被它拖慢
             "dump" to listOf("NativeDumpTest"),
         )
-        // 一定要跑到的類別：列名的直接算；native 另列現有的八個（萬用字元收不到任何一個時也會在這裡失敗）
+        // 一定要跑到的類別：列名的直接算；native 另列現有的九個（萬用字元收不到任何一個時也會在這裡失敗）
         val mustRun = heavy.mapValues { (_, v) -> v.filter { '*' !in it } } +
             ("native" to listOf("CppJmathParityTest", "CppTablesParityTest", "CppPageParityTest", "CppParamsParityTest", "CppPrimsParityTest", "CppNumericProbeTest",
-                "CppBinParityTest", "CppCvCallReplayTest"))
+                "CppBinParityTest", "CppCvCallReplayTest", "CppGrayParityTest"))
         systemProperty("nightread.testGroup", group)
         // native 組一定要真的載到原生庫（沒給 -PnativeLib 就失敗，不是略過）
         if (group == "native") systemProperty("nightread.requireNative", "true")

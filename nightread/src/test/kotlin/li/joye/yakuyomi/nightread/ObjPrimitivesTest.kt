@@ -97,7 +97,7 @@ class ObjPrimitivesTest {
     @Test
     fun gaussQ16MatchesReference() {
         val rnd = Random(5150)
-        for ((w, h) in listOf(1 to 1, 1 to 40, 40 to 1, 7 to 9, 64 to 33, 120 to 80)) {
+        for ((w, h) in listOf(1 to 1, 1 to 40, 40 to 1, 7 to 9, 63 to 3, 64 to 33, 65 to 4, 120 to 80, 127 to 2, 128 to 3, 129 to 5)) {
             val g = Gray(w, h, IntArray(w * h) { rnd.nextInt(256) })
             for (sigma in doubleArrayOf(1.5, 2.0, 2.5, 3.0, 4.0, 5.0)) {
                 assertArrayEquals("gaussQ16 ${w}×$h σ$sigma", gaussRef(g, sigma), Cv.gaussQ16(g, sigma).data)
@@ -108,7 +108,7 @@ class ObjPrimitivesTest {
     @Test
     fun medianBlur8MatchesSort() {
         val rnd = Random(77)
-        for ((w, h) in listOf(1 to 1, 1 to 30, 30 to 1, 5 to 5, 61 to 47)) {
+        for ((w, h) in listOf(1 to 1, 1 to 30, 30 to 1, 5 to 5, 61 to 47, 63 to 4, 64 to 3, 65 to 2, 127 to 3, 128 to 2, 129 to 3)) {
             for (kind in 0 until 3) {
                 val g = Gray(w, h, IntArray(w * h) {
                     when (kind) { 0 -> rnd.nextInt(256); 1 -> if (rnd.nextInt(4) == 0) 255 else rnd.nextInt(3); else -> (it % w) * 255 / max(1, w - 1) }
@@ -143,6 +143,13 @@ class ObjPrimitivesTest {
             }
             for (mx in booleanArrayOf(true, false)) {
                 assertArrayEquals("gather #$t ${w}×$h 核 ${k.w}×${k.h} max=$mx", gatherRef(g, k, mx), Cv.morphGrayGather(g, k, mx).data)
+            }
+        }
+        // 寬度跨過 64 位元字的邊界、單列、單欄
+        for ((w, h) in listOf(1 to 1, 1 to 9, 9 to 1, 63 to 3, 64 to 2, 65 to 3, 127 to 1, 128 to 3, 129 to 2)) {
+            val g = Gray(w, h, IntArray(w * h) { rnd.nextInt(-5_000_000, 17_000_000) })
+            for (k in listOf(Cv.ellipse(7), Cv.rect(9, 1), Cv.rect(1, 5), Cv.rect(3, 3))) for (mx in booleanArrayOf(true, false)) {
+                assertArrayEquals("gather ${w}×$h 核 ${k.w}×${k.h} max=$mx", gatherRef(g, k, mx), Cv.morphGrayGather(g, k, mx).data)
             }
         }
     }

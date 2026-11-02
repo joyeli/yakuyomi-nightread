@@ -18,7 +18,7 @@ package li.joye.yakuyomi.nightread
  */
 object NightNative {
     /** C API／JNI 的 ABI 版本，必須等於 `native/include/nightread/nr.h` 的 `NR_ABI_VERSION`。 */
-    const val ABI_VERSION: Int = 3
+    const val ABI_VERSION: Int = 4
 
     /** [getRows] 的平面：灰階（BT.601，0..255）。 */
     const val PLANE_GRAY: Int = 0
