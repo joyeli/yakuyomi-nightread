@@ -62,7 +62,8 @@
      打包輸入帶末字的雜位元；細粒度小工具（bitRuns、anyBits、reflect101、Ring.set／has、橢圓 0–201）；0 寬／0 高與 Kotlin 會丟例外的輸入；
      10 張 fixture 頁跑 `NightBinWorkload`；並行。
    - **錄放**（`CppCvCallReplayTest`）：`Cv.tap` 回報的每一次原語呼叫（第 2 階＋第 3a 階），在 CI 語料 10 頁的產品兩檔（預設與 fork 預設亮度）
-     加完整管線上、以及 Kotlin 的隨機測試（MorphPackedTest、CcStatsRunTest、SparsePrimitivesTest、PfShapeHolesTest）裡，當場給 C++ 重算、逐位元比。
+     加完整管線上、Kotlin 的隨機測試（MorphPackedTest、CcStatsRunTest、SparsePrimitivesTest、PfShapeHolesTest）、以及對 cv2 fixture 的
+     `CvParityTest` 裡，當場給 C++ 重算、逐位元比（`CvParityTest` 另有單獨一項，要求它的二值原語真的比到）。
    - 沒給 `-PnativeLib` 時這些測試略過（平常的 `./gradlew test` 不需要 C++ 工具鏈）；`-PtestGroup=native` 則一定要有，否則失敗。
    - **新的差分測試類別一律命名 `Cpp*`**：native 組用萬用字元收、fast 組排除。用到原生庫卻沒取這個名字的類別，在其他組會直接失敗
      （不是略過）；native 組跑完也會檢查上面八個類別真的跑到了。

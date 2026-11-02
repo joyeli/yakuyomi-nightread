@@ -31,7 +31,7 @@ import javax.imageio.ImageIO
  *  - `-PnativeDumpPrimPages=`：要跑原語步驟表的頁（寫法同 -PnativeDumpPages；預設不跑）。
  *  - `-PnativeDumpCalls=`：錄放的來源（逗號分隔；預設不錄）：頁（寫法同 -PnativeDumpPages：`fixtures`＝CI 語料的 10 頁，每頁跑產品兩檔
  *    （預設與 fork 預設亮度）加完整管線）、`random`＝本來對照參考實作的 Kotlin 隨機測試（MorphPackedTest、CcStatsRunTest、
- *    SparsePrimitivesTest、PfShapeHolesTest）在監聽下照跑。
+ *    SparsePrimitivesTest、PfShapeHolesTest）與對 cv2 fixture 的 CvParityTest 在監聽下照跑（清單＝CppCvCallReplayTest.REPLAYED_TESTS）。
  *  - `-PnativeDumpCallSkip=`：錄放時不錄的運算（逗號分隔，例如 CI 的 `gaussQ16,morphGrayGather`：第 2 階已搬的灰階兩族輸入是整頁
  *    Q16 影像，壓縮後一頁幾十 MB；它們另有 primpages 與同 JVM 的錄放）。
  */
@@ -320,7 +320,7 @@ class NativeDumpTest {
         for (item in spec.split(',').map { it.trim() }.filter { it.isNotEmpty() }) {
             if (item == "random") {
                 val d = NativeCallDump.record(File(dir, "random.nrd"), callSkip) {
-                    for (cls in listOf(MorphPackedTest::class.java, CcStatsRunTest::class.java, SparsePrimitivesTest::class.java, PfShapeHolesTest::class.java)) {
+                    for (cls in CppCvCallReplayTest.REPLAYED_TESTS) {
                         val obj = cls.getDeclaredConstructor().newInstance()
                         for (m in cls.methods.filter { it.isAnnotationPresent(Test::class.java) }.sortedBy { it.name }) m.invoke(obj)
                     }

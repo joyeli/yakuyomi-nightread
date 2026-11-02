@@ -115,6 +115,13 @@ chamfer、縮放、補洞、輪廓長、多邊形面積、測地、二值中值�
 - **照抄的 Kotlin 行為**（不改，Kotlin 凍結）：一般核（`dilateBits`）的垂直取樣是 y − (ky − ay)、1×n／n×1 線核（`lineMorph`）是 y + (ky − ay)，
   偶數高的核兩條路徑差一列（奇數高相同；cv2 是後者）。`Cv.rect(kw, 0)` 在 kw < 0 時 Kotlin 給一個寬是負的空核，C++ 丟例外（呼叫端不會這樣用）。
 - 手機探針用 `NightBinWorkload`（同 `NightPrimWorkload` 的用法，權重＝一頁產品兩檔實際的呼叫次數）；第 3a 階的關卡是手機上「全部相同」。
+- **產品的 .so 也帶這批 JNI**（同第 2 階的 `NightNativePrims`）：`nightread_jni` 是一個 OBJECT 庫，連進產品唯一的 `libyakuyomi_ncnn.so`，
+  所以產品多了 19 個 `NightNativeBin` 入口（arm64 的 .so 多 61,872 位元組；匯出 24 → 43 個），產品不會呼叫它們，只有測試、錄放與探針用。
+  這一階不拆：第 2 階起就是這樣做（產品也帶 `NightNativePrims`），拆開等於再改一次產品 .so 與守門規則，多帶的只是大小。第 9 階產品改走整頁的
+  C++ 入口時，再把逐原語的 JNI 改成只給測試與探針。
+  引擎的 `check_native_so.sh` 要求產品與探針都有 `NightNativeBin_nMask`，數值自測橋（`NativeTestBridge`）照舊只有探針能帶。
+- `CvParityTest`（對 cv2 fixture 的逐位元與容差比對）也在監聽下由 C++ 重算（`CppCvCallReplayTest.cvParityFixturesReplayed`，
+  並加進錄放來源 `random`）：計畫第 3a 階的第一條自動驗收。
 
 ## ★★ 平台數學函式改 `StrictMath`：輸出不變、不升版本（2026-10-12，C++ 移植第 1 階段）
 

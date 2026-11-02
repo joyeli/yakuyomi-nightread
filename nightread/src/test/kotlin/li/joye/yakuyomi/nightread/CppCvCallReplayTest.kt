@@ -13,7 +13,8 @@ import javax.imageio.ImageIO
  *  - [ciCorpus]：CI 語料的 10 頁（公開 fixture 與合成頁），產品兩檔（[NightRead.renderTiers] 的 L2＋L3，預設亮度與 fork 預設亮度）
  *    加研究端完整管線（render，標準參數）。每一頁都要真的比到東西，每個第 3a 階管線會用到的運算都要比到。
  *  - [kotlinRandomTests]：本來對照參考實作的 Kotlin 隨機測試（MorphPackedTest、CcStatsRunTest、SparsePrimitivesTest、PfShapeHolesTest）
- *    在監聽下照跑一遍：它們每一次呼叫 Cv 的原語也都拿去給 C++ 重算。
+ *    與對 cv2 fixture 的 CvParityTest（結構元素、形態學、iterations=2、補洞、中值、測地、輪廓長、chamfer…）在監聽下照跑一遍：
+ *    它們每一次呼叫 Cv 的原語也都拿去給 C++ 重算。
  * 錄到磁碟、給 qemu-aarch64 與 sanitizer 重放的版本在 NativeDumpTest 的 calls/。需要主機原生庫（沒給 `-PnativeLib` 就略過）。
  */
 class CppCvCallReplayTest {
@@ -82,7 +83,7 @@ class CppCvCallReplayTest {
         val st = CvCallReplay.Stats()
         val ran = ArrayList<String>()
         CvCallReplay.run(st, "random") {
-            for (cls in listOf(MorphPackedTest::class.java, CcStatsRunTest::class.java, SparsePrimitivesTest::class.java, PfShapeHolesTest::class.java)) {
+            for (cls in REPLAYED_TESTS) {
                 val obj = cls.getDeclaredConstructor().newInstance()
                 for (m in cls.methods.filter { it.isAnnotationPresent(Test::class.java) }.sortedBy { it.name }) {
                     m.invoke(obj)
@@ -92,9 +93,36 @@ class CppCvCallReplayTest {
         }
         if (st.failed > 0) fail("Kotlin 隨機測試：${st.failed} 次呼叫 C++ 與 Kotlin 不同，例如\n" + st.failures.take(10).joinToString("\n"))
         println("CppCvCallReplayTest Kotlin 隨機測試 ${ran.size} 個：${st.total} 次呼叫相同（${st.summary()}）")
-        assertTrue("四個測試類別都要有跑到測試方法：$ran", ran.map { it.substringBefore('.') }.toSet().size == 4)
+        assertEquals("每個測試類別都要有跑到測試方法：$ran", REPLAYED_TESTS.size, ran.map { it.substringBefore('.') }.toSet().size)
         for (op in listOf("dilatePacked", "erodePacked", "dilate", "erode", "open", "close", "dilateRectSep", "closeRectSep", "geodesicGrow", "ccStats", "ccRunsBits")) {
             assertTrue("$op 要真的比到", (st.counts[op]?.get() ?: 0L) > 0)
         }
+    }
+
+    /** CvParityTest 單獨在監聽下跑：它對 cv2 fixture 呼叫的第 3a 階二值原語都要真的給 C++ 重算到（計畫第 3a 階自動驗收的第一條）。 */
+    @Test
+    fun cvParityFixturesReplayed() {
+        NativeLib.assumeLoaded()
+        val st = CvCallReplay.Stats()
+        CvCallReplay.run(st, "cvparity") {
+            val obj = CvParityTest()
+            for (m in CvParityTest::class.java.methods.filter { it.isAnnotationPresent(Test::class.java) }.sortedBy { it.name }) m.invoke(obj)
+        }
+        if (st.failed > 0) fail("CvParityTest：${st.failed} 次呼叫 C++ 與 Kotlin 不同，例如\n" + st.failures.take(10).joinToString("\n"))
+        println("CppCvCallReplayTest CvParityTest：${st.total} 次呼叫相同（${st.summary()}）")
+        for (op in listOf("dilate", "erode", "open", "close", "dilatePacked", "holes", "medianBlurMask", "geodesicGrow", "totalContourLength", "distanceChamfer", "resizeNearest")) {
+            assertTrue("CvParityTest 的 $op 要真的比到", (st.counts[op]?.get() ?: 0L) > 0)
+        }
+    }
+
+    companion object {
+        /** 在監聽下照跑的 Kotlin 測試類別（[kotlinRandomTests]；NativeDumpTest 的錄放來源 `random` 用同一份）。 */
+        val REPLAYED_TESTS: List<Class<*>> = listOf(
+            MorphPackedTest::class.java,
+            CcStatsRunTest::class.java,
+            SparsePrimitivesTest::class.java,
+            PfShapeHolesTest::class.java,
+            CvParityTest::class.java,
+        )
     }
 }
