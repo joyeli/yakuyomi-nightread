@@ -20,7 +20,7 @@
 | `third_party/fdlibm/` | netlib fdlibm 5.3 原檔（一字不改；授權見該目錄 `LICENSE`） |
 | `jni/nr_jni.cpp` | 產品 JNI（`li.joye.yakuyomi.nightread.NightNative`）；只用 Java 陣列，`std::bad_alloc` → `OutOfMemoryError` |
 | `jni/nr_prims_jni.cpp` | 原語的 JNI（`NightNativePrims`，只給差分測試與手機探針）：輸入輸出都複製、不持有 critical，另外回傳原語本身的耗時與原生峰值 |
-| `test/` | 原生測試（`test_main.cpp`）、golden 檢查（`golden_check.cpp`）、測試案例產生器（`cases.*`）、只給主機的 JNI 測試橋（`test_jni.cpp`）、錄出的讀取與檢查（`nrd.h`、`sha256.h`、`dump_check.cpp`） |
+| `test/` | 原生測試（`test_main.cpp`）、golden 檢查（`golden_check.cpp`）、測試案例產生器（`cases.*`）、JNI 測試橋（`test_jni.cpp`：主機的 `.so`，以及引擎 sandbox 探針開 `NR_PROBE_JNI` 的 `.so`；產品沒有）、錄出的讀取與檢查（`nrd.h`、`sha256.h`、`dump_check.cpp`） |
 | `tools/` | 建置與檢查腳本（下面） |
 
 ## 規則（為什麼要這些旗標）
@@ -41,7 +41,7 @@
    native/tools/build_host.sh                      # → native/build/host/libnightread_host.so
    ```
 
-2. **同 JVM 差分**（JUnit：`CppJmathParityTest`、`CppTablesParityTest`、`CppPageParityTest`、`CppParamsParityTest`、`CppPrimsParityTest`）：
+2. **同 JVM 差分**（JUnit：`CppJmathParityTest`、`CppTablesParityTest`、`CppPageParityTest`、`CppParamsParityTest`、`CppPrimsParityTest`、`CppNumericProbeTest`）：
 
    ```
    ./gradlew :nightread:testDebugUnitTest -PtestGroup=native -PnativeLib=native/build/host/libnightread_host.so
@@ -52,9 +52,9 @@
      遠離錨點、有洞、空核、隨機）；非 8 位元的灰階（Q16、負值、會環繞的任意 Int）、σ 0–10；距離平方超過 2²⁴ 的細長條（Float 開始捨入）；
      0 寬／0 高（Kotlin 丟例外 C++ 也要丟）；
      10 張 fixture 頁跑 `NightPrimWorkload`；多條執行緒同時用同一份輸入。
-   - 沒給 `-PnativeLib` 時這四個測試略過（平常的 `./gradlew test` 不需要 C++ 工具鏈）；`-PtestGroup=native` 則一定要有，否則失敗。
+   - 沒給 `-PnativeLib` 時這些測試略過（平常的 `./gradlew test` 不需要 C++ 工具鏈）；`-PtestGroup=native` 則一定要有，否則失敗。
    - **新的差分測試類別一律命名 `Cpp*`**：native 組用萬用字元收、fast 組排除。用到原生庫卻沒取這個名字的類別，在其他組會直接失敗
-     （不是略過）；native 組跑完也會檢查上面五個類別真的跑到了。
+     （不是略過）；native 組跑完也會檢查上面六個類別真的跑到了。
    - `.so` 登記成測試任務的輸入、golden 目錄登記成輸出：改了 C++ 重建 `.so`、或刪掉 golden 目錄之後，同一行指令會重跑，不會被判成 UP-TO-DATE。
    - 加 `-PgoldenOut=<目錄>` 會另外寫 golden 檔（Java 答案的分塊雜湊），給下一步用。
    - Windows 上的 Gradle 載不了 Linux 的 `.so`：在 Windows 開發時，用 Gradle 編好測試類別後，以 WSL 的 JDK 直接跑 JUnit（類別路徑同 Gradle）。
@@ -89,6 +89,14 @@
    native/tools/fma_scan.sh                        # arm64 物件不得有 fmadd/fmsub/fnmadd/fnmsub/fmla/fmls；主機 -mfma 版不得有 vfmadd 系列；不得參照 OpenMP
    native/tools/check_compile_flags.py native/build/ndk-arm64 native/build/host   # 最後的 -O 是 -O2、逐位元旗標沒被蓋掉、arm64 只有 armv8-a
    ```
+
+## 手機探針（引擎 sandbox 的「夜讀 C++ 探針」）
+
+探針在 ART 上做同行程比對，用到的都在這個 repo：
+
+- 數值核心：`NightNumericProbe`（純量函式、陣列、常數表，參考答案表跟 `CppJmathParityTest` 同一張）。案例產生器在 C++，所以需要測試橋；
+  引擎用 `-Pyakuyomi.nightProbe=true` 建置時才傳 `-DNR_PROBE_JNI=ON`，`test_jni.cpp`、`cases.cpp` 才進 `.so`。沒開時 `NightNumericProbe.available()` 回 false。
+- 5 族原語：`NightPrimWorkload`、`NightNativePrims`。
 
 ## 參數（`tools/gen_params.py`）
 

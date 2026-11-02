@@ -19,6 +19,7 @@ project(nightread_native C CXX)
 option(NR_BUILD_TESTS "建原生測試（ctest）與 golden_check" ${PROJECT_IS_TOP_LEVEL})
 option(NR_HOST_JNI "主機上建 libnightread_host.so（JUnit 同 JVM 差分用）" ${PROJECT_IS_TOP_LEVEL})
 option(NR_STATIC_TESTS "測試執行檔靜態連結（NDK arm64 給 qemu-aarch64 跑）" OFF)
+option(NR_PROBE_JNI "把數值自測橋（test/test_jni.cpp＋測試案例產生器）編成目標，給引擎 sandbox 的手機探針；產品的 .so 不開" OFF)
 set(NR_SANITIZE "" CACHE STRING "sanitizer 清單，例如 address,undefined 或 thread（只給主機測試用）")
 set(NR_GOLDEN_DIR "" CACHE PATH "JUnit 寫出的 golden 目錄；有給就加 nr_golden 這個 ctest")
 
@@ -95,16 +96,29 @@ if(NR_HAVE_JNI)
   endif()
 endif()
 
+# ── 測試案例產生器（原生測試、主機 JNI、手機探針共用）──────────────────────────────
+if(NR_BUILD_TESTS OR NR_PROBE_JNI)
+  add_library(nightread_testcases STATIC test/cases.cpp)
+  set_target_properties(nightread_testcases PROPERTIES POSITION_INDEPENDENT_CODE ON CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON
+    CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
+  # 產生器也用逐位元旗標：輸入要在 x86_64 與 arm64 上一模一樣
+  target_compile_options(nightread_testcases PRIVATE ${NR_BITEXACT_FLAGS} -fexceptions)
+  target_link_libraries(nightread_testcases PUBLIC nightread_core)
+endif()
+
+# 引擎 sandbox 手機探針用的測試橋：物件檔由引擎的 CMake 連進唯一的 .so（再連 nightread_testcases）
+if(NR_PROBE_JNI AND NR_HAVE_JNI)
+  add_library(nightread_probe_jni OBJECT test/test_jni.cpp)
+  set_target_properties(nightread_probe_jni PROPERTIES POSITION_INDEPENDENT_CODE ON CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON
+    CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
+  target_compile_options(nightread_probe_jni PRIVATE ${NR_BITEXACT_FLAGS} -fexceptions -Wall)
+  target_link_libraries(nightread_probe_jni PUBLIC nightread_testcases nightread_core)
+endif()
+
 # ── 測試 ─────────────────────────────────────────────────────────────────
 if(NR_BUILD_TESTS)
   enable_testing()
   find_package(Threads REQUIRED)
-
-  add_library(nightread_testcases STATIC test/cases.cpp)
-  set_target_properties(nightread_testcases PROPERTIES POSITION_INDEPENDENT_CODE ON CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
-  # 產生器也用逐位元旗標：輸入要在 x86_64 與 arm64 上一模一樣
-  target_compile_options(nightread_testcases PRIVATE ${NR_BITEXACT_FLAGS} -fexceptions)
-  target_link_libraries(nightread_testcases PUBLIC nightread_core)
 
   foreach(t nr_core_tests nr_golden_check nr_dump_check)
     if(t STREQUAL "nr_core_tests")

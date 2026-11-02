@@ -25,7 +25,7 @@ bin="$(ls -d "$ndk"/toolchains/llvm/prebuilt/*/bin | head -1)"
 objdump="$bin/llvm-objdump"; [ -x "$objdump" ] || objdump="$bin/llvm-objdump.exe"
 nm="$bin/llvm-nm"; [ -x "$nm" ] || nm="$bin/llvm-nm.exe"
 
-targets="nightread_core nightread_fdlibm nightread_jni nightread_testcases"
+targets="nightread_core nightread_fdlibm nightread_jni nightread_testcases nightread_probe_jni"
 
 objs_of() {   # $1＝建置目錄：列出本 repo 目標的 .o（相對路徑，Windows 版工具也吃）
   local d
