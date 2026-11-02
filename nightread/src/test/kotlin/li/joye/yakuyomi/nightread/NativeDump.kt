@@ -288,6 +288,9 @@ internal object NativeDump {
         |primpages/index.tsv  跑了原語步驟表（NightPrimWorkload）的頁（頁名、寬、高、步數）。
         |primpages/<頁>/input.bin、steps.nrd
         |                     頁輸入（NRIN）與每一步：id、op、in、out、args、sigma、kernel（有才有）、hash（Kotlin 輸出的摘要）。
+        |calls/index.tsv      錄放的來源（頁名或 random）：Cv 回報的呼叫數、錄下的（不重複）呼叫數、blob 數、壓縮後位元組、運算清單。
+        |calls/<來源>.nrd     依序的 blob 與 call 紀錄（NativeCallDump.kt 的說明）：blob＝一份輸入（編號、型別、維度、解壓後位元組數、zlib
+        |                     壓縮的資料；遮罩存整頁位元）；call＝運算名、依序的參數（ref＝blob 編號、int、dbl、bool、null）、Kotlin 結果的摘要。
         |
         |NRD 容器（小端）：魔數 "NRD1"，接著一筆筆紀錄到檔尾。紀錄＝u32 欄位數，每個欄位＝u16 名稱長、名稱（UTF-8）、u8 型別、
         |u8 維數、維數×i32 維度、資料（元素數＝維度乘積）。型別：1 u8、2 i32、3 i64、4 f32（原始位元）、5 f64（原始位元）、

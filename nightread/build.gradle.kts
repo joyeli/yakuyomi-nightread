@@ -59,7 +59,8 @@ tasks.withType<Test>().configureEach {
     }
 
     // 錄出器（NativeDumpTest，組 dump）：-PnativeDump=<目錄> 才錄，沒給就略過。其餘開關見 NativeDumpTest 的說明：
-    // -PnativeDumpPages（fixtures／fixture 頁名／NRIN 目錄）、-PnativeDumpVariants、-PnativeDumpRaw、-PnativeDumpPrims（false／族名清單）、-PnativeDumpPrimPages（真頁跑原語步驟表）。
+    // -PnativeDumpPages（fixtures／fixture 頁名／NRIN 目錄）、-PnativeDumpVariants、-PnativeDumpRaw、-PnativeDumpPrims（false／族名清單）、-PnativeDumpPrimPages（真頁跑原語步驟表）、
+    // -PnativeDumpCalls（錄放：頁或 random，Cv.tap 回報的每一次呼叫）、-PnativeDumpCallSkip（錄放時不錄的運算）。
     providers.gradleProperty("nativeDump").orNull?.let {
         val dir = rootProject.file(it)
         systemProperty("nightread.nativeDump", dir.absolutePath)
@@ -67,7 +68,7 @@ tasks.withType<Test>().configureEach {
         // 頁可以來自 repo 外的 NRIN 目錄（-PnativeDumpPages），那些檔沒登記成輸入：錄出一律重跑
         outputs.upToDateWhen { false }
     }
-    for (k in listOf("nativeDumpPages", "nativeDumpVariants", "nativeDumpRaw", "nativeDumpPrims", "nativeDumpPrimPages")) {
+    for (k in listOf("nativeDumpPages", "nativeDumpVariants", "nativeDumpRaw", "nativeDumpPrims", "nativeDumpPrimPages", "nativeDumpCalls", "nativeDumpCallSkip")) {
         providers.gradleProperty(k).orNull?.let { systemProperty("nightread.$k", it) }
     }
 

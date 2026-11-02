@@ -17,6 +17,8 @@ import javax.imageio.ImageIO
  *     成品、diag、除錯回呼序列）的摘要。C++ 之後算出同一個成分就比同一列。
  *  3. **指定項目的原始資料**：頁輸入（NRIN）、攤平參數、任意成分的原始陣列（-PnativeDumpRaw 選）。
  *  4. **真頁的原語步驟表**（primpages/，[NightPrimWorkload]）：頁輸入加每一步的參數與輸出摘要，nr_dump_check 照表重算。
+ *  5. **錄放**（calls/，[NativeCallDump]）：Kotlin 跑真頁的產品路徑（或 Kotlin 的隨機測試）時，[Cv.tap] 回報的每一次已搬到 C++ 的原語呼叫
+ *     ——輸入原樣（同內容只存一次、zlib 壓縮）、輸出的摘要。nr_dump_check 逐筆用 C++ 重算、比摘要。
  * 格式見 [NativeDump.README]（每份錄出也會寫一份 README.txt）；C++ 端讀取與重放在 native/test/dump_check.cpp（nr_dump_check）。
  *
  * **平常不跑**：沒給 `-PnativeDump=<目錄>` 就略過（Gradle 組 `dump`，fast 組不含它）。其他開關（都可省略）：
@@ -25,8 +27,13 @@ import javax.imageio.ImageIO
  *  - `-PnativeDumpVariants=`：預設 `analysis,tiers:def,tiers:fork,plain:full,plain:L2,plain:MORE`；`all`＝再加五檔的 plain／diag。
  *  - `-PnativeDumpRaw=`：預設 `input,params`；另可列成分名（`跑法.成分`，`*` 萬用；例如 `analysis.a.frame,tiers:def.*`），`none`＝都不要。
  *  - `-PnativeDumpPrims=`：`false`＝不錄原語；逗號分隔的族名＝只錄那幾族（packbits、kernel、morph、cc、dist、maskmisc、gray、
- *    fimg、draw、arrays）；預設全錄。
+ *    fimg、draw、arrays、bits）；預設全錄。
  *  - `-PnativeDumpPrimPages=`：要跑原語步驟表的頁（寫法同 -PnativeDumpPages；預設不跑）。
+ *  - `-PnativeDumpCalls=`：錄放的來源（逗號分隔；預設不錄）：頁（寫法同 -PnativeDumpPages：`fixtures`＝CI 語料的 10 頁，每頁跑產品兩檔
+ *    （預設與 fork 預設亮度）加完整管線）、`random`＝本來對照參考實作的 Kotlin 隨機測試（MorphPackedTest、CcStatsRunTest、
+ *    SparsePrimitivesTest、PfShapeHolesTest）在監聽下照跑。
+ *  - `-PnativeDumpCallSkip=`：錄放時不錄的運算（逗號分隔，例如 CI 的 `gaussQ16,morphGrayGather`：第 2 階已搬的灰階兩族輸入是整頁
+ *    Q16 影像，壓縮後一頁幾十 MB；它們另有 primpages 與同 JVM 的錄放）。
  */
 class NativeDumpTest {
 
@@ -43,9 +50,11 @@ class NativeDumpTest {
     private val primFamilies: Set<String>? = System.getProperty("nightread.nativeDumpPrims")?.takeIf { it.isNotBlank() && it != "true" }
         ?.let { v -> if (v == "false") emptySet() else v.split(',').map { it.trim() }.filter { it.isNotEmpty() }.toSet() }
     private val primPageSpec = System.getProperty("nightread.nativeDumpPrimPages")?.takeIf { it.isNotBlank() }
+    private val callSpec = System.getProperty("nightread.nativeDumpCalls")?.takeIf { it.isNotBlank() }
+    private val callSkip: Set<String> = System.getProperty("nightread.nativeDumpCallSkip").orEmpty().split(',').map { it.trim() }.filter { it.isNotEmpty() }.toSet()
 
     /** [dumpPrims] 錄的族（順序同錄出）；新增一族時兩邊一起改，[dumpPrims] 結尾會檢查每一族都登記過。 */
-    private val knownFamilies = listOf("packbits", "kernel", "morph", "cc", "dist", "maskmisc", "gray", "fimg", "draw", "arrays")
+    private val knownFamilies = listOf("packbits", "kernel", "morph", "cc", "dist", "maskmisc", "gray", "fimg", "draw", "arrays", "bits")
 
     @Test
     fun dump() {
@@ -58,6 +67,7 @@ class NativeDumpTest {
         val t0 = System.nanoTime()
         if (primFamilies?.isEmpty() != true) dumpPrims(File(dir, "prims"))
         primPageSpec?.let { dumpPrimPages(File(dir, "primpages"), it) }
+        callSpec?.let { dumpCalls(File(dir, "calls"), it) }
         val pages = resolvePages()
         val variants = resolveVariants()
         val index = StringBuilder("set\tpage\tw\th\tmanifest\n")
@@ -294,6 +304,44 @@ class NativeDumpTest {
         else -> NativeDump.hash(v)
     }
 
+    // ── 錄放（calls/）────────────────────────────────────────────────────
+
+    /** calls/index.tsv（來源、Cv 回報的呼叫數、錄下的呼叫數、blob 數、壓縮後位元組、運算清單）、calls/<來源>.nrd。 */
+    private fun dumpCalls(dir: File, spec: String) {
+        val unknownSkip = callSkip - CvCallReplay.OPS.toSet()
+        require(unknownSkip.isEmpty()) { "NativeDumpTest：-PnativeDumpCallSkip 有不認得的運算 $unknownSkip（可用 ${CvCallReplay.OPS.joinToString(",")}）" }
+        dir.mkdirs()
+        val index = StringBuilder("source\tcalls\tunique\tblobs\tbytes\tops\n")
+        fun add(name: String, d: NativeCallDump) {
+            check(d.unique > 0) { "NativeDumpTest 錄放：$name 一次呼叫都沒錄到（監聽沒裝上？）" }
+            index.append("$name\t${d.calls}\t${d.unique}\t${d.blobCount}\t${d.blobBytes}\t${d.ops.keys.sorted().joinToString(",")}\n")
+            println("NativeDumpTest 錄放：$name ${d.calls} 次呼叫（不重複 ${d.unique}）、blob ${d.blobCount} 個 ${"%.1f".format(d.blobBytes / 1e6)} MB")
+        }
+        for (item in spec.split(',').map { it.trim() }.filter { it.isNotEmpty() }) {
+            if (item == "random") {
+                val d = NativeCallDump.record(File(dir, "random.nrd"), callSkip) {
+                    for (cls in listOf(MorphPackedTest::class.java, CcStatsRunTest::class.java, SparsePrimitivesTest::class.java, PfShapeHolesTest::class.java)) {
+                        val obj = cls.getDeclaredConstructor().newInstance()
+                        for (m in cls.methods.filter { it.isAnnotationPresent(Test::class.java) }.sortedBy { it.name }) m.invoke(obj)
+                    }
+                }
+                add("random", d)
+                continue
+            }
+            for ((_, name, load) in resolvePages(item)) {
+                val input = load()
+                val d = NativeCallDump.record(File(dir, "$name.nrd"), callSkip) {
+                    for (base in listOf(NightReadParams(), forkBase())) {
+                        NightRead.renderTiers(input, listOf(NightTier.L2.apply(base), NightTier.L3.apply(base)), null) { _, _ -> }
+                    }
+                    NightRead.render(input, NightReadParams())
+                }
+                add(name, d)
+            }
+        }
+        File(dir, "index.tsv").writeText(index.toString())
+    }
+
     // ── 原語 ───────────────────────────────────────────────────────────
 
     private class Fam(dir: File, val name: String) {
@@ -427,6 +475,12 @@ class NativeDumpTest {
             val all = ks + (1..41 step 2).map { "ellipse $it" to Cv.ellipse(it) } +
                 List(40) { val kw = 1 + rnd.nextInt(15); val kh = 1 + rnd.nextInt(15); "隨機 ${kw}x$kh" to Kernel(kw, kh, BooleanArray(kw * kh) { rnd.nextInt(3) == 0 }) }
             for ((d, k) in all) case(f, "kernel", d, { kernel(k) }) { int("ax", k.ax); int("ay", k.ay); i32("runStart", k.runStart); i32("runEnd", k.runEnd) }
+            // 結構元素的產生（階段 3a）：橢圓 −2–201、方核 0–9（負的尺寸只錄 Kotlin 會丟例外的兩種：kh＝0 而 kw < 0 時 Kotlin 給一個
+            // 寬是負的空核，C++ 丟 length_error，呼叫端不會這樣用）
+            for (sz in (-2..201)) case(f, "ellipse", "ellipse $sz", { int("size", sz) }) { Cv.ellipse(sz).let { k -> bools("out", k.data, k.h, k.w) } }
+            for ((kw, kh) in (0..9).flatMap { a -> (0..9).map { a to it } } + listOf(-2 to 3, 3 to -2)) {
+                case(f, "rect", "rect ${kw}x$kh", { i32("args", intArrayOf(kw, kh)) }) { Cv.rect(kw, kh).let { k -> bools("out", k.data, k.h, k.w) } }
+            }
         }
         // 二值形態學（一般版與打包版，階段 3a）
         fam("morph") { f ->
@@ -557,9 +611,10 @@ class NativeDumpTest {
                 val fi = g.toF()
                 for (s in listOf(0.0, 0.7, 1.0, 2.0, 4.0, 5.0)) case(f, "gaussianBlur", "$d / σ$s", { fimg("in", fi); dbl("sigma", s) }) { fimg("out", Cv.gaussianBlur(fi, s)) }
                 for (k in listOf(3, 5, 9)) case(f, "boxBlur", "$d / $k", { fimg("in", fi); int("k", k) }) { fimg("out", Cv.boxBlur(fi, k)) }
-                for ((nw, nh) in listOf(1 to 1, g.w * 2 to g.h, maxOf(1, g.w / 3) to maxOf(1, g.h / 2), g.w + 5 to g.h + 3)) {
+                for ((nw, nh) in listOf(0 to 0, 1 to 1, g.w * 2 to g.h, maxOf(1, g.w / 3) to maxOf(1, g.h / 2), g.w + 5 to g.h + 3, g.w to g.h)) {
                     case(f, "resizeArea", "$d → ${nw}x$nh", { fimg("in", fi); i32("args", intArrayOf(nw, nh)) }) { fimg("out", Cv.resizeArea(fi, nw, nh)) }
                     case(f, "resizeBilinear", "$d → ${nw}x$nh", { fimg("in", fi); i32("args", intArrayOf(nw, nh)) }) { fimg("out", Cv.resizeBilinear(fi, nw, nh)) }
+                    case(f, "resizeAreaOf", "$d → ${nw}x$nh", { fimg("in", fi); i32("args", intArrayOf(nw, nh)) }) { fimg("out", Cv.resizeAreaOf(fi.w, fi.h, nw, nh) { fi.data[it] }) }
                 }
             }
         }
@@ -609,6 +664,57 @@ class NativeDumpTest {
                 val b = if (t % 5 == 0) 0.0 else (rnd.nextDouble() - 0.5) * 1e4
                 val c = if (t % 7 == 0) a else (rnd.nextDouble() - 0.5) * 1e4
                 case(f, "eigh2", "#$t", { f64("in", doubleArrayOf(a, b, c)) }) { f64("out", Cv.eigh2(a, b, c)) }
+            }
+        }
+        // 位元的底層小工具（階段 3a）：打包格式的取反、解包、侵蝕、游程標號（含末字超出寬度的雜位元）、一列的游程、區間有沒有 1、
+        // reflect101、Ring 的整頁位元集合
+        fam("bits") { f ->
+            val rb = SplittableRandom(31L)
+            for ((d, m) in ms) {
+                val p = Cv.packBits(m)
+                val dirty = LongArray(p.size) { rb.nextLong() }
+                case(f, "packBitsNot", d, { mask("in", m) }) { i64("out", Cv.packBitsNot(m)) }
+                case(f, "ring.packBits", d, { mask("in", m) }) { i64("out", Ring.packBits(m)) }
+                for ((pd, a) in listOf("乾淨" to p, "末字有雜位元" to dirty)) {
+                    val ins: Rec.() -> Unit = { i64("in", a); i32("size", intArrayOf(m.w, m.h)) }
+                    case(f, "unpackBits", "$d / $pd", ins) { mask("out", Cv.unpackBits(a, m.w, m.h)) }
+                    case(f, "unpackBitsNot", "$d / $pd", ins) { mask("out", Cv.unpackBitsNot(a, m.w, m.h)) }
+                    case(f, "notBitsInPlace", "$d / $pd", ins) { i64("out", a.copyOf().also { Cv.notBitsInPlace(it, m.w, m.h) }) }
+                    for (k in listOf(Cv.ellipse(3), Cv.rect(1, 5), Kernel(9, 3, BooleanArray(27) { it % 9 <= 2 }))) {
+                        case(f, "erodeBits", "$d / $pd / ${k.w}x${k.h}", { i64("in", a); i32("size", intArrayOf(m.w, m.h)); kernel(k) }) { i64("out", Cv.erodeBits(a, m.w, m.h, k)) }
+                    }
+                    for (conn in listOf(4, 8)) case(f, "ccRunsBits", "$d / $pd / $conn", { i64("in", a); i32("size", intArrayOf(m.w, m.h)); int("connectivity", conn) }) {
+                        val c = Cv.ccRunsBits(a, m.w, m.h, conn)
+                        int("n", c.n); i32("rs", c.rs); i32("re", c.re); i32("rowFirst", c.rowFirst); i32("lab", c.lab)
+                        i64("fg", longArrayOf(c.fg)); i32("bg", intArrayOf(c.bgLeft, c.bgTop, c.bgRight, c.bgBottom))
+                    }
+                }
+            }
+            for (t in 0 until 400) {
+                val nw = 1 + rb.nextInt(5)
+                val off = rb.nextInt(3)
+                val bits = LongArray(off + nw) {
+                    when (rb.nextInt(4)) { 0 -> 0L; 1 -> -1L; 2 -> rb.nextLong(); else -> rb.nextLong() and rb.nextLong() and rb.nextLong() }
+                }
+                case(f, "bitRuns", "#$t nw=$nw", { i64("in", bits); i32("args", intArrayOf(off, nw)) }) {
+                    val cap = (64 * nw + 1) / 2 + 1
+                    val rs = IntArray(cap)
+                    val re = IntArray(cap)
+                    val cnt = Cv.bitRuns(bits, off, nw, rs, re)
+                    i32("outRs", rs.copyOf(cnt)); i32("outRe", re.copyOf(cnt))
+                }
+                val ss = IntArray(16) { rb.nextInt(64 * nw + 1) }
+                val es = IntArray(16) { rb.nextInt(64 * nw + 1) }
+                case(f, "anyBits", "#$t", { i64("in", bits); i32("args", intArrayOf(off)); i32("s", ss); i32("e", es) }) {
+                    i32("out", IntArray(16) { if (Cv.anyBits(bits, off, ss[it], es[it])) 1 else 0 })
+                }
+                val idx = IntArray(16) { rb.nextInt(64 * bits.size) }
+                case(f, "ring.has", "#$t", { i64("in", bits); i32("idx", idx) }) { i32("out", IntArray(16) { if (Ring.has(bits, idx[it])) 1 else 0 }) }
+                case(f, "ring.set", "#$t", { i64("in", bits); i32("idx", idx) }) { i64("out", bits.copyOf().also { b -> for (i in idx) Ring.set(b, i) }) }
+            }
+            for (n in 1..70) {
+                val xs = IntArray(601) { it - 300 }
+                case(f, "reflect101", "n=$n", { i32("in", xs); int("n", n) }) { i32("out", IntArray(xs.size) { Cv.reflect101(xs[it], n) }) }
             }
         }
         check(ran == knownFamilies) { "NativeDumpTest：knownFamilies 與實際錄的族不一致：$ran" }
