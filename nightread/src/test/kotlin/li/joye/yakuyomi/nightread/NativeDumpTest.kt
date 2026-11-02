@@ -10,12 +10,13 @@ import javax.imageio.ImageIO
 
 /**
  * 錄出器（cpp-eval 計畫階段 1）：用 Kotlin 版跑一遍，把「之後 C++ 要逐位元重現的東西」寫到磁碟，給後面各階段的 C++ 移植重放、
- * 逐位元比——不必等上游模組搬完，就能拿真頁資料驗下游。三樣：
+ * 逐位元比——不必等上游模組搬完，就能拿真頁資料驗下游。四樣：
  *  1. **原語的隨機與邊界案例**（prims/）：Cv 的形態學、連通元件、距離、灰階濾波、縮放、繪圖、陣列原語，輸入與輸出原樣（或
  *     Kotlin 丟的例外）。尺寸刻意跨過 64 位元字的邊界（63／64／65／127／129…）、含 1×1、1×N、全空、全滿、只有邊框。
  *  2. **頁級 manifest**（pages/）：每頁的輸入摘要、各跑法用的參數摘要、每種跑法每個成分（分析的中間遮罩、結果遮罩、產品兩檔
  *     成品、diag、除錯回呼序列）的摘要。C++ 之後算出同一個成分就比同一列。
  *  3. **指定項目的原始資料**：頁輸入（NRIN）、攤平參數、任意成分的原始陣列（-PnativeDumpRaw 選）。
+ *  4. **真頁的原語步驟表**（primpages/，[NightPrimWorkload]）：頁輸入加每一步的參數與輸出摘要，nr_dump_check 照表重算。
  * 格式見 [NativeDump.README]（每份錄出也會寫一份 README.txt）；C++ 端讀取與重放在 native/test/dump_check.cpp（nr_dump_check）。
  *
  * **平常不跑**：沒給 `-PnativeDump=<目錄>` 就略過（Gradle 組 `dump`，fast 組不含它）。其他開關（都可省略）：
@@ -25,6 +26,7 @@ import javax.imageio.ImageIO
  *  - `-PnativeDumpRaw=`：預設 `input,params`；另可列成分名（`跑法.成分`，`*` 萬用；例如 `analysis.a.frame,tiers:def.*`），`none`＝都不要。
  *  - `-PnativeDumpPrims=`：`false`＝不錄原語；逗號分隔的族名＝只錄那幾族（packbits、kernel、morph、cc、dist、maskmisc、gray、
  *    fimg、draw、arrays）；預設全錄。
+ *  - `-PnativeDumpPrimPages=`：要跑原語步驟表的頁（寫法同 -PnativeDumpPages；預設不跑）。
  */
 class NativeDumpTest {
 
@@ -40,6 +42,7 @@ class NativeDumpTest {
      */
     private val primFamilies: Set<String>? = System.getProperty("nightread.nativeDumpPrims")?.takeIf { it.isNotBlank() && it != "true" }
         ?.let { v -> if (v == "false") emptySet() else v.split(',').map { it.trim() }.filter { it.isNotEmpty() }.toSet() }
+    private val primPageSpec = System.getProperty("nightread.nativeDumpPrimPages")?.takeIf { it.isNotBlank() }
 
     /** [dumpPrims] 錄的族（順序同錄出）；新增一族時兩邊一起改，[dumpPrims] 結尾會檢查每一族都登記過。 */
     private val knownFamilies = listOf("packbits", "kernel", "morph", "cc", "dist", "maskmisc", "gray", "fimg", "draw", "arrays")
@@ -54,6 +57,7 @@ class NativeDumpTest {
         File(dir, "README.txt").writeText(NativeDump.README + "\n")
         val t0 = System.nanoTime()
         if (primFamilies?.isEmpty() != true) dumpPrims(File(dir, "prims"))
+        primPageSpec?.let { dumpPrimPages(File(dir, "primpages"), it) }
         val pages = resolvePages()
         val variants = resolveVariants()
         val index = StringBuilder("set\tpage\tw\th\tmanifest\n")
@@ -79,9 +83,9 @@ class NativeDumpTest {
 
     private val fixturePages = listOf("ch34_010", "ch34_011", "ch34_015", "demo01", "demo02", "demo04", "demo05", "demo06", "syn_more", "syn_v4")
 
-    private fun resolvePages(): List<PageSrc> {
+    private fun resolvePages(spec: String = pageSpec): List<PageSrc> {
         val out = ArrayList<PageSrc>()
-        for (item in pageSpec.split(',').map { it.trim() }.filter { it.isNotEmpty() }) {
+        for (item in spec.split(',').map { it.trim() }.filter { it.isNotEmpty() }) {
             when {
                 item == "fixtures" -> fixturePages.forEach { p -> out += PageSrc("fixtures", p) { fixtureInput(p) } }
                 item in fixturePages -> out += PageSrc("fixtures", item) { fixtureInput(item) }
@@ -254,6 +258,42 @@ class NativeDumpTest {
         "stickerAccept" to r.stickerAccept, "stickerPromoted" to r.stickerPromoted, "sep" to r.sep,
     )
 
+    // ── 真頁的原語步驟表 ────────────────────────────────────────────────
+
+    /** primpages/index.tsv（頁名、寬、高）、primpages/<頁>/input.bin（NRIN）、primpages/<頁>/steps.nrd（每步的參數與 Kotlin 輸出的摘要）。 */
+    private fun dumpPrimPages(dir: File, spec: String) {
+        val index = StringBuilder("page\tw\th\tsteps\n")
+        for ((_, name, load) in resolvePages(spec)) {
+            val input = load()
+            val pdir = File(dir, name)
+            pdir.mkdirs()
+            NativeDump.writeNrin(input, File(pdir, "input.bin"))
+            val regs = NightPrimWorkload.Regs(input.gray, input.seg, input.charMask)
+            var n = 0
+            NativeDump.Writer(File(pdir, "steps.nrd")).use { w ->
+                for (st in NightPrimWorkload.program(input.gray.w, input.gray.h)) {
+                    val isPrep = NightPrimWorkload.runPrep(st, regs)
+                    val value: Any = if (isPrep) regs.map.getValue(st.out!!) else NightPrimWorkload.runKotlin(st, regs)
+                    if (!isPrep) st.out?.let { regs.map[it] = value }
+                    val r = Rec().str("id", st.id).str("op", st.op).str("in", st.inp).str("out", st.out ?: "").i32("args", st.args).dbl("sigma", st.sigma)
+                    st.kernel?.let { r.bools("kernel", it.data, it.h, it.w) }
+                    r.str("hash", primHash(value))
+                    w.write(r)
+                    n++
+                }
+            }
+            index.append("$name\t${input.gray.w}\t${input.gray.h}\t$n\n")
+        }
+        File(dir, "index.tsv").writeText(index.toString())
+    }
+
+    /** 步驟輸出的摘要：遮罩、影像同成分摘要；CC、CcRuns＝陣列串成 List（nr_dump_check 的 hashCc／hashRuns 同一種編碼）。 */
+    private fun primHash(v: Any): String = when (v) {
+        is CC -> NativeDump.hash(listOf(intArrayOf(v.n), v.labels, v.left, v.top, v.width, v.height, v.area))
+        is NightNativePrims.CcRunsResult -> NativeDump.hash(listOf(intArrayOf(v.n, v.bgLeft, v.bgTop, v.bgRight, v.bgBottom), longArrayOf(v.fg), v.rs, v.re, v.rowFirst, v.lab))
+        else -> NativeDump.hash(v)
+    }
+
     // ── 原語 ───────────────────────────────────────────────────────────
 
     private class Fam(dir: File, val name: String) {
@@ -276,7 +316,7 @@ class NativeDumpTest {
         f.w.write(r)
     }
 
-    private val sizes = listOf(1 to 1, 1 to 9, 9 to 1, 2 to 2, 3 to 5, 63 to 3, 64 to 5, 65 to 4, 127 to 2, 129 to 3, 37 to 41, 96 to 80)
+    private val sizes = listOf(1 to 1, 1 to 9, 9 to 1, 2 to 2, 3 to 5, 63 to 3, 64 to 5, 65 to 4, 127 to 2, 128 to 3, 129 to 3, 37 to 41, 96 to 80)
 
     private fun masks(): List<Pair<String, Mask>> {
         val rnd = SplittableRandom(20261012L)
@@ -286,7 +326,7 @@ class NativeDumpTest {
             out += "${w}x${h} 全滿" to Mask(w, h, BooleanArray(w * h) { true })
             for (d in listOf(0.03, 0.3, 0.7)) out += "${w}x${h} 隨機 $d" to Mask(w, h, BooleanArray(w * h) { rnd.nextDouble() < d })
         }
-        for ((w, h) in listOf(37 to 41, 96 to 80, 129 to 3, 65 to 66)) {
+        for ((w, h) in listOf(37 to 41, 96 to 80, 129 to 3, 65 to 66, 128 to 9, 63 to 9, 64 to 9, 127 to 9)) {
             out += "${w}x${h} 只有邊框" to Mask(w, h, BooleanArray(w * h) { val x = it % w; val y = it / w; x == 0 || y == 0 || x == w - 1 || y == h - 1 })
             out += "${w}x${h} 四角各一點" to Mask(w, h, BooleanArray(w * h) { val x = it % w; val y = it / w; (x == 0 || x == w - 1) && (y == 0 || y == h - 1) })
             out += "${w}x${h} 棋盤" to Mask(w, h, BooleanArray(w * h) { ((it % w) + (it / w)) % 2 == 0 })
@@ -314,7 +354,7 @@ class NativeDumpTest {
     private fun grays(): List<Pair<String, Gray>> {
         val rnd = SplittableRandom(7L)
         val out = ArrayList<Pair<String, Gray>>()
-        for ((w, h) in listOf(1 to 1, 1 to 9, 9 to 1, 3 to 5, 64 to 5, 65 to 4, 37 to 41, 96 to 80)) {
+        for ((w, h) in listOf(1 to 1, 1 to 9, 9 to 1, 3 to 5, 63 to 4, 64 to 5, 65 to 4, 127 to 3, 128 to 3, 129 to 3, 37 to 41, 96 to 80)) {
             out += "${w}x${h} 隨機" to Gray(w, h, IntArray(w * h) { rnd.nextInt(256) })
             out += "${w}x${h} 0" to Gray(w, h)
             out += "${w}x${h} 255" to Gray(w, h, IntArray(w * h) { 255 })
@@ -341,8 +381,20 @@ class NativeDumpTest {
         out += "rect 1x5" to Cv.rect(1, 5)
         out += "rect 7x3" to Cv.rect(7, 3)
         out += "隨機 4x6" to Kernel(4, 6, BooleanArray(24) { rnd.nextInt(3) != 0 })
+        // 寬核、整段在錨點同一側（PackedRuns 的兩個平移方向）、遠離錨點（跨過一個字）、空核
+        out += "rect 65x1" to Cv.rect(65, 1)
+        out += "rect 129x3" to Cv.rect(129, 3)
+        out += "右側單邊 9x3" to Kernel(9, 3, BooleanArray(27) { it % 9 >= 6 })
+        out += "左側單邊 9x3" to Kernel(9, 3, BooleanArray(27) { it % 9 <= 2 })
+        out += "遠右 141x1" to Kernel(141, 1, BooleanArray(141) { it >= 135 })
+        out += "遠左 141x1" to Kernel(141, 1, BooleanArray(141) { it <= 5 })
+        out += "空核 5x5" to Kernel(5, 5, BooleanArray(25))
+        out += "上下同寬異位 7x5" to sameWidthOffsetKernel()
         return out
     }
+
+    /** 上下對稱的兩列同寬、偏移不同：morphGrayGather 不能把它們併成一趟。 */
+    private fun sameWidthOffsetKernel() = Kernel(7, 5, BooleanArray(35) { val x = it % 7; val y = it / 7; if (y == 0) x <= 2 else if (y == 4) x >= 4 else y == 2 })
 
     private fun Rec.kernel(k: Kernel) = bools("kernel", k.data, k.h, k.w)
 
@@ -385,6 +437,8 @@ class NativeDumpTest {
                 case(f, "open", "$d / $kd", ins) { mask("out", Cv.open(m, k)) }
                 case(f, "close", "$d / $kd", ins) { mask("out", Cv.close(m, k)) }
                 case(f, "dilatePacked", "$d / $kd", ins) { mask("out", Cv.dilatePacked(m, k)) }
+                // 打包格式的原樣輸出（末字超出寬度的位元要是 0；解包之後就看不出來了）
+                case(f, "dilateBits", "$d / $kd", { i64("in", Cv.packBits(m)); i32("size", intArrayOf(m.w, m.h)); kernel(k) }) { i64("out", Cv.dilateBits(Cv.packBits(m), m.w, m.h, k)) }
                 case(f, "erodePacked", "$d / $kd", ins) { mask("out", Cv.erodePacked(m, k)) }
                 case(f, "openPacked", "$d / $kd", ins) { mask("out", Cv.openPacked(m, k)) }
                 case(f, "closePacked", "$d / $kd", ins) { mask("out", Cv.closePacked(m, k)) }
@@ -415,6 +469,12 @@ class NativeDumpTest {
         }
         // 距離（階段 3a）
         fam("dist") { f ->
+            // 距離平方超過 2²⁴ 的細長條：Float 開始捨入，運算順序、相等時選哪條拋物線才會影響結果
+            val rd = SplittableRandom(4242L)
+            for ((w, h) in listOf(20011 to 2, 2 to 20011, 9001 to 3, 40001 to 1, 1 to 40001)) for (per in listOf(1000, 200, 12)) {
+                val m = Mask(w, h, BooleanArray(w * h) { rd.nextInt(per) != 0 })
+                case(f, "distanceL2", "${w}x$h 細長 1/$per 是背景", { mask("in", m) }) { fimg("out", Cv.distanceL2(m)) }
+            }
             for ((d, m) in ms) {
                 case(f, "distanceL2", d, { mask("in", m) }) { fimg("out", Cv.distanceL2(m)) }
                 case(f, "distanceSq", d, { mask("in", m) }) { i32("out", Cv.distanceSq(m), m.h, m.w) }
@@ -448,9 +508,27 @@ class NativeDumpTest {
                 }
             }
         }
-        // 灰階形態學與濾波（階段 3b）
+        // 灰階形態學與濾波（階段 3b；gaussQ16、morphGrayGather 第 2 階就先搬了）
         fam("gray") { f ->
-            val gk = listOf(3, 5, 11).map { Cv.ellipse(it) } + Cv.rect(5, 3)
+            val gk = listOf(3, 5, 11).map { Cv.ellipse(it) } + Cv.rect(5, 3) + Cv.rect(65, 1) +
+                Kernel(9, 3, BooleanArray(27) { it % 9 >= 6 }) + Kernel(9, 3, BooleanArray(27) { it % 9 <= 2 }) +
+                Kernel(141, 1, BooleanArray(141) { it >= 135 }) + Kernel(5, 5, BooleanArray(25)) +
+                Kernel(7, 5, BooleanArray(35) { val x = it % 7; val y = it / 7; if (y == 0) x <= 2 else if (y == 4) x >= 3 else y == 2 }) +
+                sameWidthOffsetKernel()
+            // 非 8 位元的值：gaussQ16 的輸出接形態學（值遠超過 255）、負值、會讓高斯環繞的值
+            val wide = gs.filter { it.first.contains("隨機") }.flatMap { (d, g) ->
+                listOf(
+                    "$d ×65536" to Gray(g.w, g.h, IntArray(g.data.size) { g.data[it] * 65536 }),
+                    "$d 負值" to Gray(g.w, g.h, IntArray(g.data.size) { g.data[it] * 257 - 40000 }),
+                    "$d 任意 Int" to Gray(g.w, g.h, IntArray(g.data.size) { rnd.nextInt() }),
+                )
+            }
+            for ((d, g) in wide) {
+                for (k in gk) for ((op, mx) in listOf("morphGrayGather.max" to true, "morphGrayGather.min" to false)) {
+                    case(f, op, "$d / ${k.w}x${k.h}", { gray("in", g); kernel(k) }) { gray("out", Cv.morphGrayGather(g, k, mx)) }
+                }
+                for (s in listOf(0.7, 2.0, 5.0)) case(f, "gaussQ16", "$d / σ$s", { gray("in", g); dbl("sigma", s) }) { gray("out", Cv.gaussQ16(g, s)) }
+            }
             for ((d, g) in gs) {
                 for (k in gk) {
                     val ins: Rec.() -> Unit = { gray("in", g); kernel(k) }
@@ -462,7 +540,7 @@ class NativeDumpTest {
                 }
                 // 1、偶數：呼叫端不會給，記下 Kotlin 的行為（丟例外或照算）當邊界規格
                 for (ks in listOf(1, 3, 4, 5, 7)) case(f, "medianBlur8", "$d / $ks", { gray("in", g); int("ksize", ks) }) { gray("out", Cv.medianBlur8(g, ks)) }
-                for (s in listOf(0.7, 1.0, 1.5, 2.0, 2.5, 4.0)) case(f, "gaussQ16", "$d / σ$s", { gray("in", g); dbl("sigma", s) }) { gray("out", Cv.gaussQ16(g, s)) }
+                for (s in listOf(0.0, 0.3, 0.7, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 10.0)) case(f, "gaussQ16", "$d / σ$s", { gray("in", g); dbl("sigma", s) }) { gray("out", Cv.gaussQ16(g, s)) }
                 for ((lo, hi) in listOf(15 to 40, 10 to 25, 50 to 150)) {
                     case(f, "canny", "$d / $lo,$hi", { gray("in", g); i32("args", intArrayOf(0, lo, hi)) }) { mask("out", Cv.canny(g.data, g.w, g.h, 0, lo, hi)) }
                 }

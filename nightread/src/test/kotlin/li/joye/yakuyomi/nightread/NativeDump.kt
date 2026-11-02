@@ -285,6 +285,9 @@ internal object NativeDump {
         |pages/<set>/<頁>/input.bin（＋input.inp.bin）   有選 input 時：頁輸入（NRIN）。
         |pages/<set>/<頁>/params.nrd                     有選 params 時：每種跑法用的參數（攤平：ints、doubles、schema）。
         |pages/<set>/<頁>/raw.nrd                        有選其他原始資料時：每筆＝name（跑法.成分）、kind、data。
+        |primpages/index.tsv  跑了原語步驟表（NightPrimWorkload）的頁（頁名、寬、高、步數）。
+        |primpages/<頁>/input.bin、steps.nrd
+        |                     頁輸入（NRIN）與每一步：id、op、in、out、args、sigma、kernel（有才有）、hash（Kotlin 輸出的摘要）。
         |
         |NRD 容器（小端）：魔數 "NRD1"，接著一筆筆紀錄到檔尾。紀錄＝u32 欄位數，每個欄位＝u16 名稱長、名稱（UTF-8）、u8 型別、
         |u8 維數、維數×i32 維度、資料（元素數＝維度乘積）。型別：1 u8、2 i32、3 i64、4 f32（原始位元）、5 f64（原始位元）、
