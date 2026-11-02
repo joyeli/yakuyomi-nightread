@@ -14,15 +14,15 @@ import java.util.zip.Deflater
  * nr_dump_check 在主機、qemu-aarch64、ASan／UBSan 下重放（同 JVM 的版本是 [CvCallReplay]）。
  *
  * 一筆紀錄是 `blob`（一份輸入）或 `call`（一次呼叫），依出現順序：
- *  - blob：`blob`＝編號（i32，從 0 連續）、`type`（mask／kernel／longs／ints／floats／fimg／gray）、`dims`（i32；影像與核是 [高, 寬]，
- *    陣列是 [長度]）、`raw`（i64，解壓後的位元組數）、`z`（u8，zlib 壓縮的資料）。資料：mask＝Ring.packBits 的整頁位元（i64 小端，
- *    (n+63)/64 個）、kernel＝每格一個位元組 0／1、longs／ints／floats／fimg／gray＝小端原樣（浮點是原始位元）。同內容只存一次。
- *  - call：`op`（[Cv.tapped] 的運算名）、依序每個參數一個欄位——`ref`（i32，blob 編號）、`int`（i32）、`dbl`（f64）、`bool`（i32 0／1）、
- *    `null`（長度 0 的 i32）——最後 `hash`＝Kotlin 結果的成分摘要（[NativeDump.hash]；CC 與 CcRuns 用原語步驟表的串法）。
- *    同一個運算、同一份輸入的呼叫只錄第一次。
+ *  - blob：`blob`＝編號（i32，從 0 連續）、`type`（mask／kernel／longs／ints／floats／doubles／fimg／gray）、`dims`（i32；影像與核是
+ *    [高, 寬]，陣列是 [長度]）、`raw`（i64，解壓後的位元組數）、`z`（u8，zlib 壓縮的資料）。資料：mask＝Ring.packBits 的整頁位元（i64 小端，
+ *    (n+63)/64 個）、kernel＝每格一個位元組 0／1、longs／ints／floats／doubles／fimg／gray＝小端原樣（浮點是原始位元）。同內容只存一次。
+ *  - call：`op`（[Cv.tapped] 的運算名；逐點的 gaussAt、medianRows 經 [CallBatcher] 併成 "gaussAt[]"、"medianRows[]"）、依序每個參數一個
+ *    欄位——`ref`（i32，blob 編號）、`int`（i32）、`dbl`（f64）、`bool`（i32 0／1）、`null`（長度 0 的 i32）——最後 `hash`＝Kotlin 結果的
+ *    成分摘要（[NativeDump.hash]；CC 與 CcRuns 用原語步驟表的串法）。同一個運算、同一份輸入的呼叫只錄第一次。
  * 寫入是同步的（頁內並行時多條執行緒會同時報）；監聽裡不再呼叫 Cv（自己打包遮罩），免得報回自己。
  */
-internal class NativeCallDump(file: File, private val skip: Set<String> = emptySet()) : Closeable {
+internal class NativeCallDump(file: File) : Closeable {
 
     private val w = NativeDump.Writer(file)
     private val blobs = HashMap<String, Int>()
@@ -30,9 +30,9 @@ internal class NativeCallDump(file: File, private val skip: Set<String> = emptyS
     private val deflater = Deflater(6)
     private val buf = ByteArray(1 shl 16)
 
-    /** Cv 回報的呼叫次數（含重複）、錄下的（不重複）呼叫數、blob 數、壓縮後的 blob 位元組數。 */
-    var calls = 0L
-        private set
+    /** Cv 回報的呼叫次數（含重複；逐點的每一點各算一次）、錄下的（不重複）紀錄數、blob 數、壓縮後的 blob 位元組數。 */
+    private val reported = java.util.concurrent.atomic.AtomicLong()
+    val calls: Long get() = reported.get()
     var unique = 0
         private set
     val blobCount: Int get() = blobs.size
@@ -61,6 +61,7 @@ internal class NativeCallDump(file: File, private val skip: Set<String> = emptyS
         is LongArray -> Triple("longs", intArrayOf(a.size), le(a.size * 8).also { it.asLongBuffer().put(a) }.array())
         is IntArray -> Triple("ints", intArrayOf(a.size), le(a.size * 4).also { it.asIntBuffer().put(a) }.array())
         is FloatArray -> Triple("floats", intArrayOf(a.size), le(a.size * 4).also { b -> for (x in a) b.putInt(x.toRawBits()) }.array())
+        is DoubleArray -> Triple("doubles", intArrayOf(a.size), le(a.size * 8).also { b -> for (x in a) b.putLong(x.toRawBits()) }.array())
         is FImg -> Triple("fimg", intArrayOf(a.h, a.w), le(a.data.size * 4).also { b -> for (x in a.data) b.putInt(x.toRawBits()) }.array())
         is Gray -> Triple("gray", intArrayOf(a.h, a.w), le(a.data.size * 4).also { it.asIntBuffer().put(a.data) }.array())
         else -> null
@@ -103,8 +104,6 @@ internal class NativeCallDump(file: File, private val skip: Set<String> = emptyS
 
     @Synchronized
     fun record(op: String, args: Array<Any?>, result: Any?) {
-        if (op in skip) return
-        calls++
         val parts = ArrayList<Pair<String, Any?>>(args.size)
         val key = StringBuilder(op)
         for (a in args) {
@@ -141,15 +140,22 @@ internal class NativeCallDump(file: File, private val skip: Set<String> = emptyS
     companion object {
         private val inTap = ThreadLocal.withInitial { false }
 
-        /** 裝上監聽、跑 [body]、把每一次呼叫（[skip] 裡的運算除外）錄進 [file]。回傳錄出器（已關閉）給 index 用。 */
+        /**
+         * 裝上監聽、跑 [body]、把每一次呼叫（[skip] 裡的運算除外；名字是 Cv 回報的、併批之前的）錄進 [file]。回傳錄出器（已關閉）給
+         * index 用。
+         */
         fun <T> record(file: File, skip: Set<String> = emptySet(), body: () -> T): NativeCallDump {
-            val d = NativeCallDump(file, skip)
+            val d = NativeCallDump(file)
+            val batcher = CallBatcher { op, args, r -> d.record(op, args, r) }
             check(Cv.tap == null) { "Cv.tap 已經有人裝了" }
             Cv.tap = Cv.CallTap { op, args, r ->
                 if (inTap.get() == true) return@CallTap
                 inTap.set(true)
                 try {
-                    d.record(op, args, r)
+                    if (op !in skip) {
+                        d.reported.incrementAndGet()
+                        batcher.call(op, args, r)
+                    }
                 } finally {
                     inTap.set(false)
                 }
@@ -158,7 +164,11 @@ internal class NativeCallDump(file: File, private val skip: Set<String> = emptyS
                 body()
             } finally {
                 Cv.tap = null
-                d.close()
+                try {
+                    batcher.flushAll()
+                } finally {
+                    d.close()
+                }
             }
             return d
         }

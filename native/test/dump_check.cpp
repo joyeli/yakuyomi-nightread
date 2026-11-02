@@ -37,6 +37,7 @@
 #include "../core/bits.h"
 #include "../core/params_gen.h"
 #include "../core/prims.h"
+#include "../core/tables.h"
 #include "../core/types.h"
 #include "nightread/nr.h"
 #include "../core/jmath.h"
@@ -205,9 +206,187 @@ bool portedOp(const std::string& fam, const std::string& op) {
     if (fam == "cc") return op == "ccStats" || op == "ccRuns";
     if (fam == "dist") return true;    // distanceL2（第 2 階）、distanceSq、distanceChamfer、chamfer5Padded（第 3a 階）
     if (fam == "maskmisc") return true;
-    if (fam == "gray") return op == "gaussQ16" || op == "morphGrayGather.max" || op == "morphGrayGather.min" || op == "resizeNearestGray";
-    if (fam == "fimg") return op == "resizeArea" || op == "resizeBilinear" || op == "resizeAreaOf";
-    if (fam == "draw") return op == "polygonArea";
+    // 第 3b 階起，gray、fimg、draw、arrays、sparse 全部都搬了
+    if (fam == "gray" || fam == "fimg" || fam == "draw" || fam == "arrays" || fam == "sparse") return true;
+    return false;
+}
+
+bool sameDoubles(const nrd::Entry* e, const double* v, size_t n) {
+    if (e == nullptr || e->type != nrd::F64 || e->count() != n) return false;
+    for (size_t i = 0; i < n; i++) if (static_cast<uint64_t>(e->i64At(i)) != nr::jm::dbits(v[i])) return false;
+    return true;
+}
+
+double dblOf(const nrd::Entry* e) {
+    if (e == nullptr || e->type != nrd::F64 || e->count() != 1) throw std::runtime_error("缺 f64 純量");
+    return nr::jm::dfrom(static_cast<uint64_t>(e->i64At(0)));
+}
+
+int32_t intOf(const nrd::Entry* e) {
+    if (e == nullptr || e->type != nrd::I32 || e->count() != 1) throw std::runtime_error("缺 i32 純量");
+    return e->i32At(0);
+}
+
+std::vector<int32_t> intsOf(const nrd::Entry* e) {
+    if (e == nullptr || e->type != nrd::I32) throw std::runtime_error("缺 i32 陣列");
+    return e->vec<int32_t>();
+}
+
+/** gaussQ16Sparse 交給 sink 的列串成 Cv.SparseRec 的格式（同 nr_gray_jni.cpp 的 RecSink）。 */
+class RecSink final : public nr::prims::RowSink {
+public:
+    std::vector<int32_t> out;
+    void row(int32_t y, const int32_t* v, const int32_t* rs, const int32_t* re, int32_t n) override {
+        out.push_back(y);
+        out.push_back(n);
+        for (int32_t q = 0; q < n; q++) { out.push_back(rs[q]); out.push_back(re[q]); }
+        for (int32_t q = 0; q < n; q++) for (int32_t x = rs[q]; x < re[q]; x++) out.push_back(v[x]);
+    }
+};
+
+/** Cv.gaussQ16Sparse，來源 ksize 0＝GrayRows、否則 MedianRows（ksize < 0：Kotlin 建來源時丟）。 */
+std::vector<int32_t> sparseRun(int32_t w, int32_t h, const std::vector<int32_t>& k, const std::vector<uint64_t>& need, int32_t ny0, int32_t nrows,
+                               const nr::ImgI32& src, int32_t ksize) {
+    RecSink sink;
+    if (ksize == 0) {
+        nr::prims::GrayRows rows(src);
+        nr::prims::gaussQ16Sparse(w, h, k.data(), static_cast<int32_t>(k.size()), need.data(), need.size(), ny0, nrows, rows, sink);
+    } else {
+        nr::prims::MedianRows rows(src, ksize);
+        nr::prims::gaussQ16Sparse(w, h, k.data(), static_cast<int32_t>(k.size()), need.data(), need.size(), ny0, nrows, rows, sink);
+    }
+    return sink.out;
+}
+
+/** MedianRows(g, ksize).fill 連續多次（spec＝每次 r、n、rs、re；同 nr_gray_jni.cpp 的 nMedianRows），回各段的值。 */
+std::vector<int32_t> medianRowsRun(const nr::ImgI32& g, int32_t ksize, const std::vector<int32_t>& spec) {
+    nr::prims::MedianRows rows(g, ksize);
+    nr::Buf<int32_t> dst(static_cast<size_t>(g.w));
+    std::vector<int32_t> out;
+    for (size_t p = 0; p < spec.size();) {
+        if (p + 2 > spec.size() || spec[p + 1] < 0 || p + 2 + 2 * static_cast<size_t>(spec[p + 1]) > spec.size()) throw std::runtime_error("medianRows 的 spec 格式");
+        const int32_t r = spec[p];
+        const int32_t n = spec[p + 1];
+        const int32_t* rs = spec.data() + p + 2;
+        const int32_t* re = rs + n;
+        rows.fill(r, rs, re, n, dst.data(), dst.size());
+        for (int32_t q = 0; q < n; q++) for (int32_t x = rs[q]; x < re[q]; x++) out.push_back(dst[static_cast<size_t>(x)]);
+        p += 2 + 2 * static_cast<size_t>(n);
+    }
+    return out;
+}
+
+/** 第 3b 階的運算（replayOp 先問這裡；回 false＝不是這一階的）。 */
+bool replayOp3b(const std::string& fam, const std::string& op, const nrd::Record& r, const std::string& where) {
+    namespace P = nr::prims;
+    const bool threw = r.find("throws") != nullptr;
+    auto checkMask = [&](const nr::Mask& m) { if (!threw && !sameMask(r.find("out"), m)) failf(where); };
+    auto checkGray = [&](const nr::ImgI32& g) { if (!threw && !sameI32Img(r.find("out"), g)) failf(where); };
+    auto checkInts = [&](const std::vector<int32_t>& v) { if (!threw && !sameInts(r.find("out"), v.data(), v.size())) failf(where); };
+    if (fam == "gray") {
+        if (op == "dilateGray" || op == "erodeGray" || op == "dilateGrayI" || op == "erodeGrayI" || op == "blackhat") {
+            const nr::ImgI32 g = grayOf(*r.find("in"));
+            const nr::Kernel k = kernelOf(*r.find("kernel"));
+            checkGray(op == "dilateGray" ? P::dilateGray(g, k) : op == "erodeGray" ? P::erodeGray(g, k) : op == "dilateGrayI" ? P::dilateGrayI(g, k)
+                      : op == "erodeGrayI" ? P::erodeGrayI(g, k) : P::blackhat(g, k));
+            return true;
+        }
+        if (op == "medianBlur8") { checkGray(P::medianBlur8(grayOf(*r.find("in")), intOf(r.find("ksize")))); return true; }
+        if (op == "canny") {
+            const nr::ImgI32 g = grayOf(*r.find("in"));
+            const std::vector<int32_t> a = intsOf(r.find("args"));
+            checkMask(P::canny(g.data.data(), g.data.size(), g.w, g.h, a.at(0), a.at(1), a.at(2)));
+            return true;
+        }
+        return false;
+    }
+    if (fam == "fimg") {
+        if (op == "gaussianBlur") {
+            const nr::ImgF32 o = P::gaussianBlur(fimgOf(*r.find("in")), dblOf(r.find("sigma")));
+            if (!threw && !sameF32Img(r.find("out"), o)) failf(where);
+            return true;
+        }
+        if (op == "boxBlur") {
+            const nr::ImgF32 o = P::boxBlur(fimgOf(*r.find("in")), intOf(r.find("k")));
+            if (!threw && !sameF32Img(r.find("out"), o)) failf(where);
+            return true;
+        }
+        return false;
+    }
+    if (fam == "draw") {
+        if (op == "line") {
+            nr::Mask m(intOf(r.find("w")), intOf(r.find("h")));
+            const std::vector<int32_t> a = intsOf(r.find("args"));
+            P::line(m, a.at(0), a.at(1), a.at(2), a.at(3), a.at(4));
+            checkMask(m);
+            return true;
+        }
+        if (op == "fillPoly") {
+            nr::Mask m(intOf(r.find("w")), intOf(r.find("h")));
+            const std::vector<int32_t> xs = intsOf(r.find("xs")), ys = intsOf(r.find("ys"));
+            P::fillPoly(m, xs.data(), static_cast<int32_t>(xs.size()), ys.data(), static_cast<int32_t>(ys.size()));
+            checkMask(m);
+            return true;
+        }
+        return false;
+    }
+    if (fam == "arrays") {
+        if (op == "maxFilterWrapRows") {
+            const nrd::Entry* in = r.find("in");
+            const std::vector<int32_t> sv = intsOf(in), a = intsOf(r.find("args"));
+            const nr::ImgI32 o = P::maxFilterWrapRows(sv.data(), sv.size(), in->dims.at(0), in->dims.at(1), a.at(0), a.at(1));
+            if (!threw && !sameInts(r.find("out"), o.data.data(), o.data.size())) failf(where);
+            return true;
+        }
+        if (op == "npArgsort") {
+            const std::vector<int32_t> v = intsOf(r.find("in"));
+            std::vector<int32_t> ts(v.size());
+            nr::jm::npArgsort(v.data(), static_cast<int32_t>(v.size()), ts.data());
+            checkInts(ts);
+            return true;
+        }
+        if (op == "npSum") {
+            const std::vector<double> v = r.find("in")->vec<double>();
+            const double sum = nr::jm::npSum(v.data(), static_cast<int64_t>(v.size()));
+            if (!threw && !sameDouble(r.find("out"), sum)) failf(where);
+            return true;
+        }
+        if (op == "eigh2") {
+            const std::vector<double> v = r.find("in")->vec<double>();
+            double o[6];
+            nr::jm::eigh2(v.at(0), v.at(1), v.at(2), o);
+            if (!threw && !sameDoubles(r.find("out"), o, 6)) failf(where);
+            return true;
+        }
+        return false;
+    }
+    if (fam == "sparse") {
+        if (op == "gaussAt") {
+            const nr::ImgI32 g = grayOf(*r.find("in"));
+            const std::vector<int32_t> k = intsOf(r.find("k")), xs = intsOf(r.find("xs")), ys = intsOf(r.find("ys"));
+            if (xs.size() != ys.size()) throw std::runtime_error("gaussAt：xs、ys 長度不同");
+            std::vector<int32_t> v(xs.size());
+            for (size_t i = 0; i < xs.size(); i++) v[i] = P::gaussAt(g, k.data(), static_cast<int32_t>(k.size()), xs[i], ys[i]);
+            checkInts(v);
+            return true;
+        }
+        if (op == "gaussQ16Sparse") {
+            const std::vector<int32_t> k = intsOf(r.find("k")), a = intsOf(r.find("args"));
+            const std::vector<uint64_t> need = r.find("need")->vec<uint64_t>();
+            checkInts(sparseRun(intOf(r.find("w")), intOf(r.find("h")), k, need, a.at(0), a.at(1), grayOf(*r.find("src")), a.at(2)));
+            return true;
+        }
+        if (op == "medianRows") {
+            const std::vector<int32_t> rs = intsOf(r.find("rs")), re = intsOf(r.find("re"));
+            if (rs.size() != re.size()) throw std::runtime_error("medianRows：rs、re 長度不同");
+            std::vector<int32_t> spec = {intOf(r.find("r")), static_cast<int32_t>(rs.size())};
+            spec.insert(spec.end(), rs.begin(), rs.end());
+            spec.insert(spec.end(), re.begin(), re.end());
+            checkInts(medianRowsRun(grayOf(*r.find("in")), intOf(r.find("ksize")), spec));
+            return true;
+        }
+        return false;
+    }
     return false;
 }
 
@@ -359,6 +538,7 @@ bool replayOp3a(const std::string& fam, const std::string& op, const nrd::Record
 }
 
 void replayOp(const std::string& fam, const std::string& op, const nrd::Record& r, const std::string& where) {
+    if (replayOp3b(fam, op, r, where)) return;
     if (replayOp3a(fam, op, r, where)) return;
     if (fam == "packbits") {
         const nr::Mask m = maskOf(*r.find("in"));
@@ -430,9 +610,11 @@ void replayOp(const std::string& fam, const std::string& op, const nrd::Record& 
     } else if (op == "gaussQ16") {
         const nr::ImgI32 g = nr::prims::gaussQ16(grayOf(*r.find("in")), static_cast<double>(nr::jm::dfrom(static_cast<uint64_t>(r.find("sigma")->i64At(0)))));
         if (r.find("throws") == nullptr && !sameI32Img(r.find("out"), g)) failf(where);
-    } else {   // morphGrayGather.max／.min
+    } else if (op == "morphGrayGather.max" || op == "morphGrayGather.min") {
         const nr::ImgI32 g = nr::prims::morphGrayGather(grayOf(*r.find("in")), kernelOf(*r.find("kernel")), op == "morphGrayGather.max");
         if (r.find("throws") == nullptr && !sameI32Img(r.find("out"), g)) failf(where);
+    } else {
+        failf(where + "：portedOp 說搬了，卻沒有重放的程式");
     }
 }
 
@@ -754,6 +936,19 @@ std::string hashDouble(double v) {
     return s.hex16();
 }
 
+std::string hashInt(int32_t v) {
+    nrt::Sha256 s;
+    s.byte('i'); s.i32(v);
+    return s.hex16();
+}
+
+std::string hashDoubles(const double* v, size_t n) {
+    nrt::Sha256 s;
+    s.byte('D'); s.i32(static_cast<int32_t>(n));
+    for (size_t i = 0; i < n; i++) s.i64(static_cast<int64_t>(nr::jm::dbits(v[i])));
+    return s.hex16();
+}
+
 struct Blob {
     std::string type;
     std::vector<int32_t> dims;
@@ -899,6 +1094,81 @@ std::string replayCall(const std::string& op, const std::vector<CallArg>& a, con
     if (op == "morphGrayGather") {
         if (a.size() < 3 || a[2].kind != 'b') throw std::runtime_error("morphGrayGather 的 wantMax 參數");
         return hashImgI(P::morphGrayGather(blobGray(blob(0)), K(1), a[2].i != 0));
+    }
+    // ── 第 3b 階 ──
+    auto D = [&](size_t k) -> double {
+        if (k >= a.size() || a[k].kind != 'd') throw std::runtime_error("參數 " + std::to_string(k) + " 不是 double");
+        return a[k].d;
+    };
+    auto G = [&](size_t k) { return blobGray(blob(k)); };
+    auto Is = [&](size_t k) { return blobArray<int32_t>(blob(k), "ints"); };
+    if (op == "dilateGray") return hashImgI(P::dilateGray(G(0), K(1)));
+    if (op == "erodeGray") return hashImgI(P::erodeGray(G(0), K(1)));
+    if (op == "dilateGrayI") return hashImgI(P::dilateGrayI(G(0), K(1)));
+    if (op == "erodeGrayI") return hashImgI(P::erodeGrayI(G(0), K(1)));
+    if (op == "blackhat") return hashImgI(P::blackhat(G(0), K(1)));
+    if (op == "gaussianBlur") return hashImgF(P::gaussianBlur(blobFImg(blob(0)), D(1)));
+    if (op == "boxBlur") return hashImgF(P::boxBlur(blobFImg(blob(0)), I(1)));
+    if (op == "line") { nr::Mask m = M(0); P::line(m, I(1), I(2), I(3), I(4), I(5)); return hm(m); }
+    if (op == "fillPoly") {
+        nr::Mask m = M(0);
+        const std::vector<int32_t> xs = Is(1), ys = Is(2);
+        P::fillPoly(m, xs.data(), static_cast<int32_t>(xs.size()), ys.data(), static_cast<int32_t>(ys.size()));
+        return hm(m);
+    }
+    if (op == "maxFilterWrapRows") {
+        const std::vector<int32_t> sv = Is(0);
+        const nr::ImgI32 o = P::maxFilterWrapRows(sv.data(), sv.size(), I(1), I(2), I(3), I(4));
+        return hashIntsArr(o.data.data(), o.data.size());
+    }
+    if (op == "gaussW") { const std::vector<int32_t> k = nr::tables::gaussW(D(0)); return hashIntsArr(k.data(), k.size()); }
+    if (op == "npArgsort") {
+        const std::vector<int32_t> v = Is(0);
+        std::vector<int32_t> ts(v.size());
+        nr::jm::npArgsort(v.data(), static_cast<int32_t>(v.size()), ts.data());
+        return hashIntsArr(ts.data(), ts.size());
+    }
+    if (op == "npSum") {
+        const std::vector<double> v = blobArray<double>(blob(0), "doubles");
+        const int32_t off = I(1), n = I(2);
+        if (n <= 0) return hashDouble(0.0);
+        if (off < 0 || static_cast<int64_t>(off) + n > static_cast<int64_t>(v.size())) throw std::runtime_error("npSum：範圍越界");
+        return hashDouble(nr::jm::npSum(v.data() + off, n));
+    }
+    if (op == "eigh2") { double o[6]; nr::jm::eigh2(D(0), D(1), D(2), o); return hashDoubles(o, 6); }
+    if (op == "gaussQ16Sparse") {
+        if (a.size() < 8 || a[6].kind != 'r') throw std::runtime_error("gaussQ16Sparse：來源不是灰階頁面（Kotlin 的來源不是 GrayRows／MedianRows）");
+        const std::vector<uint64_t> need = L(3);
+        const std::vector<int32_t> o = sparseRun(I(0), I(1), Is(2), need, I(4), I(5), G(6), I(7));
+        return hashIntsArr(o.data(), o.size());
+    }
+    if (op == "medianRows") {
+        const std::vector<int32_t> rs = Is(3), re = Is(4);
+        if (rs.size() != re.size()) throw std::runtime_error("medianRows：rs、re 長度不同");
+        std::vector<int32_t> spec = {I(2), static_cast<int32_t>(rs.size())};
+        spec.insert(spec.end(), rs.begin(), rs.end());
+        spec.insert(spec.end(), re.begin(), re.end());
+        const std::vector<int32_t> o = medianRowsRun(G(0), I(1), spec);
+        return hashIntsArr(o.data(), o.size());
+    }
+    if (op == "medianRows[]") { const std::vector<int32_t> o = medianRowsRun(G(0), I(1), Is(2)); return hashIntsArr(o.data(), o.size()); }
+    if (op == "medianBlur8") return hashImgI(P::medianBlur8(G(0), I(1)));
+    if (op == "canny") {
+        const std::vector<int32_t> src = Is(0);
+        return hm(P::canny(src.data(), src.size(), I(1), I(2), I(3), I(4), I(5)));
+    }
+    if (op == "gaussAt") {
+        const nr::ImgI32 g = G(0);
+        const std::vector<int32_t> k = Is(1);
+        return hashInt(P::gaussAt(g, k.data(), static_cast<int32_t>(k.size()), I(2), I(3)));
+    }
+    if (op == "gaussAt[]") {
+        const nr::ImgI32 g = G(0);
+        const std::vector<int32_t> k = Is(1), xs = Is(2), ys = Is(3);
+        if (xs.size() != ys.size()) throw std::runtime_error("gaussAt[]：xs、ys 長度不同");
+        std::vector<int32_t> o(xs.size());
+        for (size_t i = 0; i < xs.size(); i++) o[i] = P::gaussAt(g, k.data(), static_cast<int32_t>(k.size()), xs[i], ys[i]);
+        return hashIntsArr(o.data(), o.size());
     }
     throw std::runtime_error("不認得的運算 " + op);
 }

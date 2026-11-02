@@ -27,13 +27,14 @@ import javax.imageio.ImageIO
  *  - `-PnativeDumpVariants=`：預設 `analysis,tiers:def,tiers:fork,plain:full,plain:L2,plain:MORE`；`all`＝再加五檔的 plain／diag。
  *  - `-PnativeDumpRaw=`：預設 `input,params`；另可列成分名（`跑法.成分`，`*` 萬用；例如 `analysis.a.frame,tiers:def.*`），`none`＝都不要。
  *  - `-PnativeDumpPrims=`：`false`＝不錄原語；逗號分隔的族名＝只錄那幾族（packbits、kernel、morph、cc、dist、maskmisc、gray、
- *    fimg、draw、arrays、bits）；預設全錄。
+ *    fimg、draw、arrays、sparse、bits）；預設全錄。
  *  - `-PnativeDumpPrimPages=`：要跑原語步驟表的頁（寫法同 -PnativeDumpPages；預設不跑）。
  *  - `-PnativeDumpCalls=`：錄放的來源（逗號分隔；預設不錄）：頁（寫法同 -PnativeDumpPages：`fixtures`＝CI 語料的 10 頁，每頁跑產品兩檔
  *    （預設與 fork 預設亮度）加完整管線）、`random`＝本來對照參考實作的 Kotlin 隨機測試（MorphPackedTest、CcStatsRunTest、
- *    SparsePrimitivesTest、PfShapeHolesTest）與對 cv2 fixture 的 CvParityTest 在監聽下照跑（清單＝CppCvCallReplayTest.REPLAYED_TESTS）。
- *  - `-PnativeDumpCallSkip=`：錄放時不錄的運算（逗號分隔，例如 CI 的 `gaussQ16,morphGrayGather`：第 2 階已搬的灰階兩族輸入是整頁
- *    Q16 影像，壓縮後一頁幾十 MB；它們另有 primpages 與同 JVM 的錄放）。
+ *    SparsePrimitivesTest、PfShapeHolesTest、RowPrimitivesTest、ObjPrimitivesTest、GatherPairTest）與對 cv2 fixture 的 CvParityTest 在監聽下
+ *    照跑（清單＝CppCvCallReplayTest.REPLAYED_TESTS）。逐點的 gaussAt、medianRows 併批後錄（[CallBatcher]）。
+ *  - `-PnativeDumpCallSkip=`：錄放時不錄的運算（逗號分隔，用併批前的名字；例如 CI 的 `gaussQ16,morphGrayGather,canny,npSum`：前三個的
+ *    輸入是整頁 Q16 影像，壓縮後一頁幾十 MB，npSum 一頁幾千次；它們另有原語族、primpages 與同 JVM 的錄放）。
  */
 class NativeDumpTest {
 
@@ -54,7 +55,7 @@ class NativeDumpTest {
     private val callSkip: Set<String> = System.getProperty("nightread.nativeDumpCallSkip").orEmpty().split(',').map { it.trim() }.filter { it.isNotEmpty() }.toSet()
 
     /** [dumpPrims] 錄的族（順序同錄出）；新增一族時兩邊一起改，[dumpPrims] 結尾會檢查每一族都登記過。 */
-    private val knownFamilies = listOf("packbits", "kernel", "morph", "cc", "dist", "maskmisc", "gray", "fimg", "draw", "arrays", "bits")
+    private val knownFamilies = listOf("packbits", "kernel", "morph", "cc", "dist", "maskmisc", "gray", "fimg", "draw", "arrays", "sparse", "bits")
 
     @Test
     fun dump() {
@@ -446,6 +447,13 @@ class NativeDumpTest {
 
     private fun Rec.kernel(k: Kernel) = bools("kernel", k.data, k.h, k.w)
 
+    /** [Cv.gaussQ16Sparse] 交給 sink 的列（[Cv.SparseRec] 的格式）。 */
+    private fun sparseOut(w: Int, h: Int, k: IntArray, need: LongArray, ny0: Int, nrows: Int, src: Cv.RowSrc): IntArray {
+        val rec = Cv.SparseRec()
+        Cv.gaussQ16Sparse(w, h, k, need, ny0, nrows, src) { y, v, rs, re, n -> rec.add(y, v, rs, re, n) }
+        return rec.toArray()
+    }
+
     private fun dumpPrims(dir: File) {
         dir.mkdirs()
         val index = StringBuilder("family\trecords\tthrows\tbytes\n")
@@ -581,6 +589,11 @@ class NativeDumpTest {
                 for (k in gk) for ((op, mx) in listOf("morphGrayGather.max" to true, "morphGrayGather.min" to false)) {
                     case(f, op, "$d / ${k.w}x${k.h}", { gray("in", g); kernel(k) }) { gray("out", Cv.morphGrayGather(g, k, mx)) }
                 }
+                for (k in gk.take(5)) {
+                    case(f, "dilateGrayI", "$d / ${k.w}x${k.h}", { gray("in", g); kernel(k) }) { gray("out", Cv.dilateGrayI(g, k)) }
+                    case(f, "erodeGrayI", "$d / ${k.w}x${k.h}", { gray("in", g); kernel(k) }) { gray("out", Cv.erodeGrayI(g, k)) }
+                    case(f, "blackhat", "$d / ${k.w}x${k.h}", { gray("in", g); kernel(k) }) { gray("out", Cv.blackhat(g, k)) }
+                }
                 for (s in listOf(0.7, 2.0, 5.0)) case(f, "gaussQ16", "$d / σ$s", { gray("in", g); dbl("sigma", s) }) { gray("out", Cv.gaussQ16(g, s)) }
             }
             for ((d, g) in gs) {
@@ -588,6 +601,8 @@ class NativeDumpTest {
                     val ins: Rec.() -> Unit = { gray("in", g); kernel(k) }
                     case(f, "dilateGray", "$d / ${k.w}x${k.h}", ins) { gray("out", Cv.dilateGray(g, k)) }
                     case(f, "erodeGray", "$d / ${k.w}x${k.h}", ins) { gray("out", Cv.erodeGray(g, k)) }
+                    case(f, "dilateGrayI", "$d / ${k.w}x${k.h}", ins) { gray("out", Cv.dilateGrayI(g, k)) }
+                    case(f, "erodeGrayI", "$d / ${k.w}x${k.h}", ins) { gray("out", Cv.erodeGrayI(g, k)) }
                     case(f, "blackhat", "$d / ${k.w}x${k.h}", ins) { gray("out", Cv.blackhat(g, k)) }
                     case(f, "morphGrayGather.max", "$d / ${k.w}x${k.h}", ins) { gray("out", Cv.morphGrayGather(g, k, true)) }
                     case(f, "morphGrayGather.min", "$d / ${k.w}x${k.h}", ins) { gray("out", Cv.morphGrayGather(g, k, false)) }
@@ -610,7 +625,11 @@ class NativeDumpTest {
             for ((d, g) in gs) {
                 val fi = g.toF()
                 for (s in listOf(0.0, 0.7, 1.0, 2.0, 4.0, 5.0)) case(f, "gaussianBlur", "$d / σ$s", { fimg("in", fi); dbl("sigma", s) }) { fimg("out", Cv.gaussianBlur(fi, s)) }
-                for (k in listOf(3, 5, 9)) case(f, "boxBlur", "$d / $k", { fimg("in", fi); int("k", k) }) { fimg("out", Cv.boxBlur(fi, k)) }
+                for (k in listOf(0, 1, 3, 5, 9, 15)) case(f, "boxBlur", "$d / $k", { fimg("in", fi); int("k", k) }) { fimg("out", Cv.boxBlur(fi, k)) }
+                // 非整數的浮點輸入（FMA 會改變捨入的那種：gray.toF() 的乘積多半是精確的）
+                val fr = FImg(fi.w, fi.h, FloatArray(fi.data.size) { (rnd.nextDouble() * 255.0).toFloat() })
+                for (s in listOf(0.7, 2.0)) case(f, "gaussianBlur", "$d 亂數浮點 / σ$s", { fimg("in", fr); dbl("sigma", s) }) { fimg("out", Cv.gaussianBlur(fr, s)) }
+                case(f, "boxBlur", "$d 亂數浮點 / 15", { fimg("in", fr); int("k", 15) }) { fimg("out", Cv.boxBlur(fr, 15)) }
                 for ((nw, nh) in listOf(0 to 0, 1 to 1, g.w * 2 to g.h, maxOf(1, g.w / 3) to maxOf(1, g.h / 2), g.w + 5 to g.h + 3, g.w to g.h)) {
                     case(f, "resizeArea", "$d → ${nw}x$nh", { fimg("in", fi); i32("args", intArrayOf(nw, nh)) }) { fimg("out", Cv.resizeArea(fi, nw, nh)) }
                     case(f, "resizeBilinear", "$d → ${nw}x$nh", { fimg("in", fi); i32("args", intArrayOf(nw, nh)) }) { fimg("out", Cv.resizeBilinear(fi, nw, nh)) }
@@ -626,8 +645,21 @@ class NativeDumpTest {
                     val y0 = rnd.nextInt(-h, 2 * h + 1)
                     val x1 = rnd.nextInt(-w, 2 * w + 1)
                     val y1 = rnd.nextInt(-h, 2 * h + 1)
-                    val th = 1 + t % 7
+                    val th = if (t % 9 == 8) 17 else t % 8 - 1   // -1、0、1（細線）…6、17
                     case(f, "line", "${w}x$h #$t", { int("w", w); int("h", h); i32("args", intArrayOf(x0, y0, x1, y1, th)) }) {
+                        val m = Mask(w, h); Cv.line(m, x0, y0, x1, y1, th); mask("out", m)
+                    }
+                }
+                // 端點遠在影像外（clipLine 的浮點裁切）
+                repeat(20) { t ->
+                    val th = if (t % 3 == 0) 1 else 1 + 2 * (t % 5)
+                    // 粗線的 FillConvexPoly 從 ymin 逐列走到 ymax（頁外的列也走）：很遠的端點只給細線，粗線最遠 2000
+                    val far = if (th <= 1) (if (t % 2 == 0) 100_000 else 1 shl 20) else 2000
+                    val x0 = rnd.nextInt(-far, far)
+                    val y0 = rnd.nextInt(-far, far)
+                    val x1 = rnd.nextInt(-far, far)
+                    val y1 = rnd.nextInt(-far, far)
+                    case(f, "line", "${w}x$h 遠 #$t", { int("w", w); int("h", h); i32("args", intArrayOf(x0, y0, x1, y1, th)) }) {
                         val m = Mask(w, h); Cv.line(m, x0, y0, x1, y1, th); mask("out", m)
                     }
                 }
@@ -664,6 +696,62 @@ class NativeDumpTest {
                 val b = if (t % 5 == 0) 0.0 else (rnd.nextDouble() - 0.5) * 1e4
                 val c = if (t % 7 == 0) a else (rnd.nextDouble() - 0.5) * 1e4
                 case(f, "eigh2", "#$t", { f64("in", doubleArrayOf(a, b, c)) }) { f64("out", Cv.eigh2(a, b, c)) }
+            }
+        }
+        // 整數高斯的單點與取樣版、中值來源（階段 3b）：每種尺寸 × σ，取樣點與 need 隨機
+        fam("sparse") { f ->
+            for ((d, g) in gs) {
+                val w = g.w
+                val h = g.h
+                for (sigma in listOf(0.3, 1.0, 2.5)) {
+                    val k = Cv.gaussW(sigma)
+                    val np = if (w * h <= 400) w * h else 400
+                    val xs = IntArray(np) { if (w * h <= 400) it % w else rnd.nextInt(w) }
+                    val ys = IntArray(np) { if (w * h <= 400) it / w else rnd.nextInt(h) }
+                    case(f, "gaussAt", "$d / σ$sigma", { gray("in", g); i32("k", k); i32("xs", xs); i32("ys", ys) }) {
+                        i32("out", IntArray(np) { Cv.gaussAt(g, k, xs[it], ys[it]) })
+                    }
+                    if (sigma < 0.5) continue   // 取樣版只比 σ1、σ2.5（筆數；σ0.3 的單點上面比過了）
+                    for (dens in listOf(0.02, 1.0)) for ((ny0, nrows) in listOf(0 to h, h / 3 to maxOf(1, h / 2), h - 1 to 1)) {
+                        val nm = Mask(w, nrows, BooleanArray(w * nrows) { rnd.nextDouble() < dens })
+                        val need = Cv.packBits(nm)
+                        for (ksz in listOf(0, 7)) {
+                            val tag = "$d / σ$sigma 密度 $dens 列 $ny0+$nrows / 來源 ${if (ksz == 0) "灰階" else "中值 $ksz"}"
+                            case(f, "gaussQ16Sparse", tag, {
+                                int("w", w); int("h", h); i32("k", k); i64("need", need); i32("args", intArrayOf(ny0, nrows, ksz)); gray("src", g)
+                            }) { i32("out", sparseOut(w, h, k, need, ny0, nrows, if (ksz == 0) Cv.GrayRows(g) else Cv.MedianRows(g, ksz))) }
+                        }
+                    }
+                }
+                // MedianRows.fill 直接呼叫（ksize 0、偶數、負的：Kotlin 丟例外的規格）
+                for (ksz in listOf(1, 3, 5, 7, 0, 4, -1)) repeat(3) { t ->
+                    val r = rnd.nextInt(h)
+                    val cuts = (0 until 4).map { rnd.nextInt(w + 1) }.sorted()
+                    val rs = intArrayOf(cuts[0], cuts[2])
+                    val re = intArrayOf(cuts[1], cuts[3])
+                    case(f, "medianRows", "$d / $ksz #$t", { gray("in", g); int("ksize", ksz); int("r", r); i32("rs", rs); i32("re", re) }) {
+                        val dst = IntArray(w)
+                        Cv.MedianRows(g, ksz).fill(r, rs, re, rs.size, dst)
+                        var tot = 0
+                        for (q in rs.indices) tot += re[q] - rs[q]
+                        val v = IntArray(tot)
+                        var o = 0
+                        for (q in rs.indices) for (x in rs[q] until re[q]) v[o++] = dst[x]
+                        i32("out", v)
+                    }
+                }
+            }
+            // 單點落在影像外（Kotlin 越界丟例外）、偶數長的核
+            val g = gs.first { it.second.w == 37 }.second
+            for ((x, y) in listOf(-1 to 0, 37 to 5, 5 to -40, 5 to 41, -1000 to 3)) {
+                case(f, "gaussAt", "37x41 外 ($x, $y)", { gray("in", g); i32("k", Cv.gaussW(1.0)); i32("xs", intArrayOf(x)); i32("ys", intArrayOf(y)) }) {
+                    i32("out", intArrayOf(Cv.gaussAt(g, Cv.gaussW(1.0), x, y)))
+                }
+            }
+            for (k in listOf(intArrayOf(1, 2), intArrayOf(0, 0), IntArray(0), intArrayOf(65536))) {
+                case(f, "gaussAt", "37x41 核 ${k.toList()}", { gray("in", g); i32("k", k); i32("xs", intArrayOf(3, 20)); i32("ys", intArrayOf(4, 40)) }) {
+                    i32("out", intArrayOf(Cv.gaussAt(g, k, 3, 4), Cv.gaussAt(g, k, 20, 40)))
+                }
             }
         }
         // 位元的底層小工具（階段 3a）：打包格式的取反、解包、侵蝕、游程標號（含末字超出寬度的雜位元）、一列的游程、區間有沒有 1、
