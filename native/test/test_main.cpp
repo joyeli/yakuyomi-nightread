@@ -7,6 +7,7 @@
 // （CppJmathParityTest 等）與 golden_check（arm64 用）。
 #include <pthread.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -14,6 +15,7 @@
 #include <thread>
 #include <vector>
 
+#include "../core/bits.h"
 #include "../core/convert.h"
 #include "../core/jmath.h"
 #include "../core/params_gen.h"
@@ -794,6 +796,369 @@ void testPrimsConcurrent() {
     CHECK(bad.load() == 0);
 }
 
+// ── 第 3a 階：二值原語對照逐像素的參考算法（逐位元對 Kotlin 的比對在 CppBinParityTest、CppCvCallReplayTest、nr_dump_check）─────
+
+/**
+ * 核是不是 n×1 的實心直線（Cv.lineKernel 回負值的那種）。Kotlin 的兩條路徑垂直方向的取樣相反：一般核（dilatePacked）輸出列 y 看來源列
+ * y − (ky − ay)、線核（lineMorph）看 y + (ky − ay)；奇數高的核兩者相同，偶數高的差一列。C++ 兩條都照抄，這裡的參考跟著分。
+ */
+bool verticalLine(const nr::Kernel& k) {
+    if (k.w != 1 || (k.h == 1 && k.runStart[0] == 0 && k.runEnd[0] == 1)) return false;
+    for (int32_t y = 0; y < k.h; y++) if (k.runStart[y] != 0 || k.runEnd[y] != 1) return false;
+    return k.h > 0;
+}
+
+/** 參考：二值膨脹（核每列的 run；影像外當 0）。 */
+nr::Mask refDilate(const nr::Mask& m, const nr::Kernel& k, bool packedPath = false) {
+    const int32_t sgn = !packedPath && verticalLine(k) ? 1 : -1;
+    const int32_t w = m.w, h = m.h;
+    nr::Mask out(w, h);
+    for (int32_t y = 0; y < h; y++) for (int32_t x = 0; x < w; x++) {
+        uint8_t v = 0;
+        for (int32_t ky = 0; !v && ky < k.h; ky++) {
+            if (k.runEnd[ky] <= k.runStart[ky]) continue;
+            const int32_t sy = y + sgn * (ky - k.ay);
+            if (sy < 0 || sy >= h) continue;
+            for (int32_t o = k.runStart[ky] - k.ax; o <= k.runEnd[ky] - 1 - k.ax; o++) {
+                const int32_t sx = x + o;
+                if (sx >= 0 && sx < w && m.data[static_cast<size_t>(sy) * w + sx]) { v = 1; break; }
+            }
+        }
+        out.data[static_cast<size_t>(y) * w + x] = v;
+    }
+    return out;
+}
+
+/** 參考：二值侵蝕＝窗內全是 1（影像外當前景）。 */
+nr::Mask refErode(const nr::Mask& m, const nr::Kernel& k, bool packedPath = false) {
+    const int32_t sgn = !packedPath && verticalLine(k) ? 1 : -1;
+    const int32_t w = m.w, h = m.h;
+    nr::Mask out(w, h);
+    for (int32_t y = 0; y < h; y++) for (int32_t x = 0; x < w; x++) {
+        uint8_t v = 1;
+        for (int32_t ky = 0; v && ky < k.h; ky++) {
+            if (k.runEnd[ky] <= k.runStart[ky]) continue;
+            const int32_t sy = y + sgn * (ky - k.ay);
+            if (sy < 0 || sy >= h) continue;
+            for (int32_t o = k.runStart[ky] - k.ax; o <= k.runEnd[ky] - 1 - k.ax; o++) {
+                const int32_t sx = x + o;
+                if (sx >= 0 && sx < w && !m.data[static_cast<size_t>(sy) * w + sx]) { v = 0; break; }
+            }
+        }
+        out.data[static_cast<size_t>(y) * w + x] = v;
+    }
+    return out;
+}
+
+/** memcmp，但 0 長度時不碰指標（空的 Buf 是 nullptr，memcmp(nullptr, …, 0) 在 UBSan 下算未定義行為）。 */
+bool sameBytes(const void* a, const void* b, size_t n) { return n == 0 || std::memcmp(a, b, n) == 0; }
+
+bool sameMaskData(const nr::Mask& a, const nr::Mask& b) {
+    return a.w == b.w && a.h == b.h && sameBytes(a.data.data(), b.data.data(), a.data.size());
+}
+
+nr::Kernel solid(int32_t w, int32_t h) {
+    std::vector<uint8_t> d(static_cast<size_t>(w) * h, 1);
+    return nr::Kernel(w, h, d.data());
+}
+
+void testBinMorph() {
+    std::vector<nr::Kernel> ks = testKernels();
+    ks.push_back(solid(1, 1));
+    ks.push_back(solid(2, 1));
+    ks.push_back(solid(1, 2));
+    ks.push_back(solid(1, 66));
+    ks.push_back(solid(130, 1));
+    uint64_t seed = 301;
+    for (int32_t w : {1, 2, 63, 64, 65, 127, 128, 129}) for (int32_t h : {1, 2, 3, 7, 65}) for (uint32_t d : {0U, 40U, 512U, 1000U, 1024U}) {
+        const nr::Mask m = randomMask(w, h, seed++, d);
+        for (const nr::Kernel& k : ks) {
+            const nr::Mask di = refDilate(m, k), er = refErode(m, k);
+            const nr::Mask dp = refDilate(m, k, true), ep = refErode(m, k, true);   // 打包路徑（一般核的取樣）
+            CHECK(sameMaskData(nr::prims::dilate(m, k), di));
+            CHECK(sameMaskData(nr::prims::erode(m, k), er));
+            CHECK(sameMaskData(nr::prims::open(m, k), refDilate(er, k)));
+            CHECK(sameMaskData(nr::prims::close(m, k), refErode(di, k)));
+            CHECK(sameMaskData(nr::prims::erodePacked(m, k), ep));
+            CHECK(sameMaskData(nr::prims::openPacked(m, k), refDilate(ep, k, true)));
+            CHECK(sameMaskData(nr::prims::closePacked(m, k), refErode(dp, k, true)));
+            CHECK(sameMaskData(nr::unpackBits(nr::prims::erodeBits(nr::packBits(m), k)), ep));
+        }
+        CHECK(sameMaskData(nr::prims::dilate(m, ks[0], 3), refDilate(refDilate(refDilate(m, ks[0]), ks[0]), ks[0])));
+        CHECK(sameMaskData(nr::prims::dilate(m, ks[0], 0), m));
+        for (int32_t kw : {1, 2, 3, 7, 66}) for (int32_t kh : {1, 2, 5}) {
+            CHECK(sameMaskData(nr::prims::dilateRectSep(m, kw, kh), refDilate(refDilate(m, solid(kw, 1)), solid(1, kh))));
+        }
+        for (int32_t n : {0, 1, 2, 3, 9}) {
+            const nr::Kernel hk = solid(n <= 1 ? 1 : n, 1), vk = solid(1, n <= 1 ? 1 : n);
+            const nr::Mask want = n <= 1 ? refDilate(m, solid(1, 1)) : refErode(refErode(refDilate(refDilate(m, hk), vk), hk), vk);
+            CHECK(sameMaskData(nr::prims::closeRectSep(m, n), want));
+        }
+    }
+    // 寬 0、高 > 0：取反與閉運算丟（Kotlin 越界）、一般核的膨脹不丟
+    const nr::Mask e(0, 4);
+    bool threw = false;
+    try { nr::prims::closeRectSep(e, 3); } catch (const std::invalid_argument&) { threw = true; }
+    CHECK(threw);
+    threw = false;
+    try { nr::prims::open(e, solid(3, 1)); } catch (const std::invalid_argument&) { threw = true; }
+    CHECK(threw);
+    CHECK(nr::prims::dilate(e, solid(3, 1)).h == 4);
+}
+
+void testBinBits() {
+    uint64_t seed = 401;
+    for (int32_t w : {1, 2, 63, 64, 65, 127, 128, 129}) for (int32_t h : {1, 3, 9}) for (uint32_t d : {0U, 300U, 1024U}) {
+        const nr::Mask m = randomMask(w, h, seed++, d);
+        const nr::PackedBits p = nr::packBits(m);
+        nr::PackedBits q = nr::packBitsNot(m);
+        // ¬ 打包＝打包 ¬；末字超出寬度的位元是 0
+        nr::Mask inv(w, h);
+        for (size_t i = 0; i < inv.data.size(); i++) inv.data[i] = m.data[i] ? 0 : 1;
+        const nr::PackedBits pi = nr::packBits(inv);
+        CHECK(sameBytes(q.words.data(), pi.words.data(), q.words.size() * 8));
+        CHECK(sameMaskData(nr::unpackBitsNot(p), inv));
+        nr::notBitsInPlace(q);
+        CHECK(sameBytes(q.words.data(), p.words.data(), q.words.size() * 8));
+        // 整頁位元集合
+        const nr::FlatBits f = nr::packFlat(m);
+        CHECK(f.n == static_cast<int64_t>(m.data.size()) && f.words.size() == (m.data.size() + 63) / 64);
+        bool ok = true;
+        for (size_t i = 0; i < m.data.size(); i++) if (nr::hasBit(f.words.data(), static_cast<int64_t>(i)) != (m.data[i] != 0)) ok = false;
+        CHECK(ok);
+        CHECK(!nr::hasBit(nullptr, 3));
+        // 游程：照字讀、跨字的段接起來
+        const size_t cap = static_cast<size_t>((64 * p.nw + 1) / 2 + 1);
+        std::vector<int32_t> rs(cap), re(cap);
+        for (int32_t y = 0; y < h; y++) {
+            const int32_t cnt = nr::bitRuns(p.words.data(), static_cast<int64_t>(y) * p.nw, p.nw, rs.data(), re.data());
+            std::vector<uint8_t> got(static_cast<size_t>(w), 0);
+            bool okr = true;
+            for (int32_t q2 = 0; q2 < cnt; q2++) {
+                if (!(rs[q2] < re[q2]) || (q2 > 0 && !(re[q2 - 1] < rs[q2]))) okr = false;
+                for (int32_t x = rs[q2]; x < re[q2]; x++) got[x] = 1;
+            }
+            CHECK(okr && sameBytes(got.data(), m.data.data() + static_cast<size_t>(y) * w, static_cast<size_t>(w)));
+            for (int32_t s = 0; s <= w; s += 1 + w / 17) for (int32_t e2 = 0; e2 <= w; e2 += 1 + w / 13) {
+                bool want = false;
+                for (int32_t x = s; x < e2; x++) if (m.data[static_cast<size_t>(y) * w + x]) want = true;
+                CHECK(nr::anyBits(p.words.data(), static_cast<int64_t>(y) * p.nw, s, e2) == want);
+            }
+        }
+        // ccRunsBits＝ccRuns（背景外接框除外）
+        for (int32_t conn : {4, 8}) {
+            const nr::CcRuns a = nr::prims::ccRuns(m, conn);
+            const nr::CcRuns b = nr::prims::ccRunsBits(p, conn);
+            CHECK(a.n == b.n && a.fg == b.fg && a.rs.size() == b.rs.size() && b.bgLeft == 0 && b.bgBottom == 0);
+            CHECK(sameBytes(a.rs.data(), b.rs.data(), a.rs.size() * 4) && sameBytes(a.lab.data(), b.lab.data(), a.lab.size() * 4));
+        }
+    }
+    for (int32_t n = 1; n < 9; n++) for (int32_t i = -40; i < 40; i++) {
+        const int32_t r = nr::reflect101(i, n);
+        CHECK(r >= 0 && r < n);
+    }
+    CHECK(nr::reflect101(-1, 5) == 1 && nr::reflect101(5, 5) == 3 && nr::reflect101(9, 5) == 1 && nr::reflect101(7, 1) == 0);
+    bool threw = false;
+    nr::PackedBits zero(0, 2);
+    try { nr::notBitsInPlace(zero); } catch (const std::invalid_argument&) { threw = true; }
+    CHECK(threw);
+}
+
+void testBinDistanceAndMisc() {
+    uint64_t seed = 501;
+    for (int32_t w : {1, 2, 63, 64, 65, 129}) for (int32_t h : {1, 3, 7, 65}) for (uint32_t d : {50U, 600U, 1000U, 1024U}) {
+        const nr::Mask m = randomMask(w, h, seed++, d);
+        const size_t n = m.data.size();
+        // distanceSq：暴力最近背景
+        const nr::ImgI32 dq = nr::prims::distanceSq(m);
+        bool anyBg = false;
+        for (size_t i = 0; i < n; i++) if (!m.data[i]) anyBg = true;
+        bool ok = true;
+        for (int32_t y = 0; y < h; y++) for (int32_t x = 0; x < w; x++) {
+            const int32_t got = dq.data[static_cast<size_t>(y) * w + x];
+            if (!m.data[static_cast<size_t>(y) * w + x]) { if (got != 0) ok = false; continue; }
+            if (!anyBg) { if (got != nr::prims::kDistSqInf) ok = false; continue; }
+            int64_t best = INT64_MAX;
+            for (int32_t yy = 0; yy < h; yy++) for (int32_t xx = 0; xx < w; xx++) {
+                if (m.data[static_cast<size_t>(yy) * w + xx]) continue;
+                const int64_t dd = static_cast<int64_t>(x - xx) * (x - xx) + static_cast<int64_t>(y - yy) * (y - yy);
+                if (dd < best) best = dd;
+            }
+            if (got != best) ok = false;
+        }
+        CHECK(ok);
+        // chamfer5Padded 與 distanceChamfer(5) 是同一張表（t < 2²⁴ 時 float(t)·2⁻¹⁶ 精確）
+        const nr::ImgI32 cp = nr::prims::chamfer5Padded(m);
+        const nr::ImgF32 c5 = nr::prims::distanceChamfer(m, 5);
+        bool same = cp.w == w + 4 && cp.h == h + 4;
+        for (int32_t y = 0; same && y < h; y++) for (int32_t x = 0; x < w; x++) {
+            const int32_t t = cp.data[static_cast<size_t>(y + 2) * cp.w + x + 2];
+            if (t < (1 << 24) && static_cast<float>(t) * (1.0f / 65536.0f) != c5.data[static_cast<size_t>(y) * w + x]) same = false;
+        }
+        CHECK(!anyBg || same);
+        // 補洞：從外圍 4 連通到不了的背景
+        const nr::Mask ho = nr::prims::holes(m);
+        std::vector<uint8_t> reach(n, 0);
+        std::vector<int32_t> st;
+        for (int32_t y = 0; y < h; y++) for (int32_t x = 0; x < w; x++) {
+            if ((x == 0 || y == 0 || x == w - 1 || y == h - 1) && !m.data[static_cast<size_t>(y) * w + x]) {
+                reach[static_cast<size_t>(y) * w + x] = 1;
+                st.push_back(y * w + x);
+            }
+        }
+        while (!st.empty()) {
+            const int32_t i = st.back();
+            st.pop_back();
+            const int32_t x = i % w, y = i / w;
+            const int32_t nb[4][2] = {{x - 1, y}, {x + 1, y}, {x, y - 1}, {x, y + 1}};
+            for (const auto& q : nb) {
+                if (q[0] < 0 || q[1] < 0 || q[0] >= w || q[1] >= h) continue;
+                const size_t j = static_cast<size_t>(q[1]) * w + q[0];
+                if (!m.data[j] && !reach[j]) { reach[j] = 1; st.push_back(static_cast<int32_t>(j)); }
+            }
+        }
+        ok = true;
+        for (size_t i = 0; i < n; i++) if (ho.data[i] != ((!m.data[i] && !reach[i]) ? 1 : 0)) ok = false;
+        CHECK(ok);
+        // 二值中值：多數決、BORDER_REPLICATE
+        for (int32_t r : {1, 3, 4, 5}) {
+            const nr::Mask md = nr::prims::medianBlurMask(m, r);
+            const int32_t rad = r / 2, need = (r * r) / 2 + 1;
+            ok = true;
+            for (int32_t y = 0; y < h; y++) for (int32_t x = 0; x < w; x++) {
+                int32_t c = 0;
+                for (int32_t dy = 0; dy < r; dy++) for (int32_t dx = 0; dx < r; dx++) {
+                    const int32_t sy = std::min(std::max(y + dy - rad, 0), h - 1), sx = std::min(std::max(x + dx - rad, 0), w - 1);
+                    c += m.data[static_cast<size_t>(sy) * w + sx];
+                }
+                if (md.data[static_cast<size_t>(y) * w + x] != (c >= need ? 1 : 0)) ok = false;
+            }
+            CHECK(ok);
+        }
+        // 測地：BFS 與迭代兩種算法同值
+        nr::Mask sd(w, h);
+        for (size_t i = 0; i < n; i += 1 + n / 3) sd.data[i] = 1;
+        for (int32_t iters : {1, 4, 13}) for (int32_t step : {1, 2, 5}) {
+            CHECK(sameMaskData(nr::prims::geodesicGrow(sd, m, iters, step, 1), nr::prims::geodesicGrow(sd, m, iters, step, 0)));
+        }
+        // 最近鄰縮放：放大兩倍＝每格複製
+        const nr::Mask up = nr::prims::resizeNearest(m, 2 * w, 2 * h);
+        ok = true;
+        for (int32_t y = 0; y < 2 * h; y++) for (int32_t x = 0; x < 2 * w; x++) {
+            if (up.data[static_cast<size_t>(y) * 2 * w + x] != m.data[static_cast<size_t>(y / 2) * w + x / 2]) ok = false;
+        }
+        CHECK(ok);
+    }
+    // 輪廓長（cv2 的閉合折線長）：單點 0、3 px 橫線 4、a×b 實心方塊 2(a−1)+2(b−1)、方框外加內圈
+    auto len = [](int32_t w, int32_t h, std::initializer_list<std::pair<int32_t, int32_t>> px) {
+        nr::Mask m(w, h);
+        for (const auto& p : px) m.data[static_cast<size_t>(p.second) * w + p.first] = 1;
+        return nr::prims::totalContourLength(m);
+    };
+    CHECK(len(5, 5, {{2, 2}}) == 0.0);
+    CHECK(len(5, 5, {{1, 2}, {2, 2}, {3, 2}}) == 4.0);
+    {
+        nr::Mask m(9, 7);
+        for (int32_t y = 1; y <= 4; y++) for (int32_t x = 2; x <= 7; x++) m.data[static_cast<size_t>(y) * 9 + x] = 1;
+        CHECK(nr::prims::totalContourLength(m) == 2.0 * 5 + 2.0 * 3);
+    }
+    CHECK(len(3, 3, {{0, 0}, {1, 1}, {2, 2}}) == 4 * 1.4142135623730951);
+    // 多邊形面積
+    const float xs[4] = {0, 4, 4, 0}, ys[4] = {0, 0, 3, 3};
+    CHECK(nr::prims::polygonArea(xs, ys, 4) == 12.0);
+    CHECK(nr::prims::polygonArea(xs, ys, 0) == 0.0);
+    // 結構元素：橢圓對稱、含錨點、方核全 1
+    for (int32_t s = 1; s < 60; s++) {
+        const nr::Kernel k = nr::prims::ellipse(s);
+        bool sym = k.w == s && k.h == s && k.data[static_cast<size_t>(k.ay) * s + k.ax] == 1;
+        for (int32_t y = 0; y < s; y++) for (int32_t x = 0; x < s; x++) if (k.data[static_cast<size_t>(y) * s + x] != k.data[static_cast<size_t>(y) * s + (s - 1 - x)] && s % 2 == 1) sym = false;
+        CHECK(sym);
+    }
+    CHECK(nr::prims::ellipse(0).w == 0);
+    const nr::Kernel r = nr::prims::rect(3, 2);
+    CHECK(r.data.size() == 6 && r.data[5] == 1 && r.runEnd[1] == 3);
+    // 面積縮小：整數倍縮小＝區塊平均
+    nr::ImgF32 f(6, 4);
+    for (size_t i = 0; i < f.data.size(); i++) f.data[i] = static_cast<float>(i % 7);
+    const nr::ImgF32 a = nr::prims::resizeArea(f, 3, 2);
+    bool okA = true;
+    for (int32_t y = 0; y < 2; y++) for (int32_t x = 0; x < 3; x++) {
+        double s = 0;
+        for (int32_t dy = 0; dy < 2; dy++) for (int32_t dx = 0; dx < 2; dx++) s += f.data[static_cast<size_t>(2 * y + dy) * 6 + 2 * x + dx];
+        if (a.data[static_cast<size_t>(y) * 3 + x] != static_cast<float>(s / 4)) okA = false;
+    }
+    CHECK(okA);
+    // Kotlin 會丟例外的輸入
+    bool threw = false;
+    try { nr::prims::distanceChamfer(nr::Mask(3, 3), 4); } catch (const std::invalid_argument&) { threw = true; }
+    CHECK(threw);
+    threw = false;
+    try { nr::prims::resizeBilinear(nr::ImgF32(0, 3), 2, 2); } catch (const std::invalid_argument&) { threw = true; }
+    CHECK(threw);
+    threw = false;
+    try { nr::prims::resizeNearest(nr::Mask(0, 3), 2, 2); } catch (const std::out_of_range&) { threw = true; }
+    CHECK(threw);
+    threw = false;
+    try { nr::prims::medianBlurMask(nr::Mask(5, 5), -1); } catch (const std::exception&) { threw = true; }
+    CHECK(threw);
+    threw = false;
+    try { nr::prims::ellipse(-3); } catch (const std::length_error&) { threw = true; }
+    CHECK(threw);
+}
+
+/** 第 3a 階原語在真頁尺寸上：256 KB 堆疊的執行緒跑得完、記憶體帳歸零。 */
+void testBinBudgetAndStack() {
+    const int32_t W = 1351, H = 1920;
+    const nr::ImgI32 g = fakePage(W, H, 7);
+    const nr::Mask m = thresh(g, 200);
+    const nr::Kernel e = nr::prims::ellipse(13);
+    const nr::Kernel line = solid(41, 1);
+    nr::Budget b;
+    {
+        const nr::Mask o1 = nr::prims::erode(m, e, 1, &b);
+        const nr::Mask o2 = nr::prims::close(m, line, &b);
+        const nr::Mask o3 = nr::prims::openPacked(m, e, &b);
+        const nr::Mask o4 = nr::prims::closeRectSep(m, 9, &b);
+        const nr::CcRuns r = nr::prims::ccRunsBits(nr::packBits(m), 8, &b);
+        const nr::ImgI32 d = nr::prims::distanceSq(m, &b);
+        const nr::ImgF32 c = nr::prims::distanceChamfer(m, 5, &b);
+        const nr::ImgI32 cp = nr::prims::chamfer5Padded(m, &b);
+        const nr::Mask ho = nr::prims::holes(m, &b);
+        const double len = nr::prims::totalContourLength(m, &b);
+        nr::Mask sd(W, H);
+        sd.data[static_cast<size_t>(H / 2) * W + W / 2] = 1;
+        const nr::Mask gg = nr::prims::geodesicGrow(sd, m, 300, 5, -1, &b);
+        const nr::Mask gi = nr::prims::geodesicGrow(sd, m, 30, 5, 0, &b);
+        const nr::Mask md = nr::prims::medianBlurMask(m, 5, &b);
+        const nr::Mask rn = nr::prims::resizeNearest(m, W / 2, H / 2, &b);
+        CHECK(b.cur.load() > 0 && len > 0 && r.n > 1 && o1.h == H && o2.h == H && o3.h == H && o4.h == H && d.h == H && c.h == H &&
+              cp.h == H + 4 && ho.h == H && gg.h == H && gi.h == H && md.h == H && rn.h == H / 2);
+    }
+    CHECK(b.cur.load() == 0);
+}
+
+/** 多條執行緒同時用同一份唯讀輸入（TSan 建置抓資料競爭）。 */
+void testBinConcurrent() {
+    const nr::ImgI32 g = fakePage(257, 96, 13);
+    const nr::Mask m = thresh(g, 200);
+    const nr::Kernel e = nr::prims::ellipse(7);
+    const nr::Mask w1 = nr::prims::close(m, e);
+    const nr::ImgI32 w2 = nr::prims::distanceSq(m);
+    const nr::Mask w3 = nr::prims::holes(m);
+    std::atomic<int> bad{0};
+    std::vector<std::thread> ts;
+    for (int t = 0; t < 8; t++) {
+        ts.emplace_back([&] {
+            for (int i = 0; i < 3; i++) {
+                if (!sameMaskData(nr::prims::close(m, e), w1) || !sameMaskData(nr::prims::holes(m), w3) ||
+                    std::memcmp(nr::prims::distanceSq(m).data.data(), w2.data.data(), w2.data.size() * 4) != 0) bad++;
+            }
+        });
+    }
+    for (auto& t : ts) t.join();
+    CHECK(bad.load() == 0);
+}
+
 void* runAll(void*) {
     testRounding();
     testBigDecimal();
@@ -813,6 +1178,11 @@ void* runAll(void*) {
     testPrimsMorph();
     testPrimsBudgetAndStack();
     testPrimsConcurrent();
+    testBinMorph();
+    testBinBits();
+    testBinDistanceAndMisc();
+    testBinBudgetAndStack();
+    testBinConcurrent();
     return nullptr;
 }
 

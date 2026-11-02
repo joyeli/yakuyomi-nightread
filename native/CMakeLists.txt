@@ -50,7 +50,8 @@ target_compile_options(nightread_fdlibm PRIVATE ${NR_BITEXACT_FLAGS} -w
 
 # ── 核心 ─────────────────────────────────────────────────────────────────
 add_library(nightread_core STATIC
-  core/jmath.cpp core/types.cpp core/tables.cpp core/convert.cpp core/page.cpp core/params.cpp core/prims.cpp
+  core/jmath.cpp core/types.cpp core/bits.cpp core/tables.cpp core/convert.cpp core/page.cpp core/params.cpp core/prims.cpp
+  core/prims_mask.cpp
   $<TARGET_OBJECTS:nightread_fdlibm>)
 target_include_directories(nightread_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 set_target_properties(nightread_core PROPERTIES
@@ -85,7 +86,7 @@ else()
 endif()
 
 if(NR_HAVE_JNI)
-  add_library(nightread_jni OBJECT jni/nr_jni.cpp jni/nr_prims_jni.cpp)
+  add_library(nightread_jni OBJECT jni/nr_jni.cpp jni/nr_prims_jni.cpp jni/nr_bin_jni.cpp)
   set_target_properties(nightread_jni PROPERTIES
     POSITION_INDEPENDENT_CODE ON CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF
     CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)

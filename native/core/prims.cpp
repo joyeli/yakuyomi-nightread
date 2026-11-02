@@ -1,5 +1,8 @@
-// 夜讀 C++ 核心：第一批影像原語。移植自 nightread/src/main/kotlin/li/joye/yakuyomi/nightread/Cv.kt @ dd91b14：
-//   dilatePacked、dilateBits、PackedRuns、ccStats、ccRuns、distanceL2（edt1d）、gaussQ16（reflect101）、morphGrayGather。
+// 夜讀 C++ 核心：影像原語（打包形態學、連通元件、距離、整數高斯、灰階形態學）。移植自
+// nightread/src/main/kotlin/li/joye/yakuyomi/nightread/Cv.kt：
+//   第 2 階 @ dd91b14：dilatePacked、dilateBits、PackedRuns、ccStats、ccRuns、distanceL2（edt1d）、gaussQ16、morphGrayGather。
+//   第 3a 階 @ a951b7c：dilate、erode、open、close（lineKernel、lineMorph、lineOrBits、rowsOrBits）、erodePacked、openPacked、closePacked、
+//   erodeBits、dilateRectSep、closeRectSep、ccRunsBits、distanceSq、distanceChamfer、chamfer5Padded。
 // 逐步照抄 Kotlin 的算法與順序（含 ccRuns 陣列的容量、PackedRuns 的就地增長），沒有另外改寫；瘦身與加速留給之後的階段，要先證明逐位元相同。
 // 有號整數溢位照 Java 環繞（-fwrapv）；浮點乘加不合成（-ffp-contract=off）。
 #include "prims.h"
@@ -8,6 +11,8 @@
 #include <stdexcept>
 #include <utility>
 
+#include "bits.h"
+#include "jmath.h"
 #include "tables.h"
 
 namespace nr {
@@ -30,17 +35,6 @@ void growI32(Buf<int32_t>& a, size_t cap, Budget* b) {
     Buf<int32_t> n(cap, b);
     copyN(n.data(), a.data(), a.size());
     a = std::move(n);
-}
-
-/** Cv.reflect101（BORDER_REFLECT_101）；前置條件 n ≥ 1。 */
-inline int32_t reflect101(int32_t i, int32_t n) {
-    if (n == 1) return 0;
-    int32_t x = i;
-    while (x < 0 || x >= n) {
-        if (x < 0) x = -x;
-        if (x >= n) x = 2 * (n - 1) - x;
-    }
-    return x;
 }
 
 // ── 打包列的水平區間 OR（Cv.PackedRuns）──────────────────────────────────────
@@ -669,6 +663,464 @@ ImgI32 morphGrayGather(const ImgI32& g, const Kernel& k, bool wantMax, Budget* b
         copyN(od + static_cast<size_t>(y) * w, cur, static_cast<size_t>(w));
     }
     return outImg;
+}
+
+// ── 第 3a 階：二值形態學 ──────────────────────────────────────────────────
+
+namespace {
+
+PackedBits copyBits(const PackedBits& a, Budget* b) {
+    PackedBits out(a.w, a.h, b);
+    copyN(out.words.data(), a.words.data(), a.words.size());
+    return out;
+}
+
+Mask copyMask(const Mask& m, Budget* b) {
+    Mask out(m.w, m.h, b);
+    copyN(out.data.data(), m.data.data(), m.data.size());
+    return out;
+}
+
+/** Cv.lineKernel：核是不是單一實心的 1×n（回 n）或 n×1（回 -n）；都不是回 0。 */
+int32_t lineKernel(const Kernel& k) {
+    if (k.h == 1 && k.runStart[0] == 0 && k.runEnd[0] == k.w) return k.w;
+    if (k.w == 1) {
+        for (int32_t y = 0; y < k.h; y++) if (k.runStart[y] != 0 || k.runEnd[y] != 1) return 0;
+        return -k.h;
+    }
+    return 0;
+}
+
+/** Cv.rowsOrBits：打包位元的垂直窗 OR，out 列 y＝OR 來源列 [y − a, y + b]（影像外 0）。 */
+PackedBits rowsOrBits(const PackedBits& src, int32_t a, int32_t b, Budget* bud) {
+    const int64_t nw = src.nw, h = src.h;
+    PackedBits downB = copyBits(src, bud);   // OR 列 [y, y + b]
+    uint64_t* down = downB.words.data();
+    int32_t ext = 0;
+    while (ext < b) {
+        const int32_t s = imin(b - ext, ext + 1);
+        const int64_t sh = s * nw;
+        const int64_t lim = (h - s) * nw;
+        for (int64_t i = 0; i < lim; i++) down[i] |= down[i + sh];   // 由上往下：讀的列在寫的列下面、還沒改
+        ext += s;
+    }
+    if (a == 0) return downB;
+    PackedBits upB = copyBits(src, bud);     // OR 列 [y − a, y]
+    uint64_t* up = upB.words.data();
+    ext = 0;
+    while (ext < a) {
+        const int32_t s = imin(a - ext, ext + 1);
+        const int64_t sh = s * nw;
+        for (int64_t i = h * nw - 1; i >= sh; i--) up[i] |= up[i - sh];   // 由下往上
+        ext += s;
+    }
+    const size_t n = downB.words.size();
+    for (size_t i = 0; i < n; i++) down[i] |= up[i];
+    return downB;
+}
+
+/** Cv.lineOrBits：打包位元的線窗 OR（窗＝[x − anchor, x + len − 1 − anchor]，水平或垂直；影像外 0）。回傳新的緩衝。 */
+PackedBits lineOrBits(const PackedBits& src, int32_t len, bool horizontal, int32_t anchor, Budget* bud) {
+    const int32_t a = anchor;
+    const int32_t b = len - 1 - anchor;
+    if (!horizontal) return rowsOrBits(src, a, b, bud);
+    PackedRuns runs(src.words.data(), src.words.size(), src.nw, src.h, src.w, bud);
+    const uint64_t* r = runs.rangeOr(-a, b);
+    PackedBits out(src.w, src.h, bud);
+    copyN(out.words.data(), r, out.words.size());
+    return out;
+}
+
+/** Cv.lineMorph：1×n／n×1 實心核的膨脹（窗內有 1）／侵蝕（窗內有 0；影像外當前景）＝¬膨脹(¬m)。 */
+Mask lineMorph(const Mask& m, int32_t len, bool horizontal, int32_t anchor, bool dilate, Budget* b) {
+    const PackedBits src = dilate ? packBits(m, b) : packBitsNot(m, b);
+    const PackedBits r = lineOrBits(src, len, horizontal, anchor, b);
+    return dilate ? unpackBits(r, b) : unpackBitsNot(r, b);
+}
+
+/** dilate／erode 共用：iterations 次（≤ 0 回複本）。 */
+template <class Op>
+Mask iterate(const Mask& m, int32_t iterations, Budget* b, Op&& op) {
+    if (iterations <= 0) return copyMask(m, b);
+    Mask cur = op(m);
+    for (int32_t it = 1; it < iterations; it++) {
+        Mask next = op(cur);
+        cur = std::move(next);
+    }
+    return cur;
+}
+
+}  // namespace
+
+Mask dilate(const Mask& m, const Kernel& k, int32_t iterations, Budget* b) {
+    const int32_t line = lineKernel(k);
+    return iterate(m, iterations, b, [&](const Mask& cur) {
+        if (line > 0) return lineMorph(cur, line, true, k.ax, true, b);
+        if (line < 0) return lineMorph(cur, -line, false, k.ay, true, b);
+        return dilatePacked(cur, k, b);
+    });
+}
+
+Mask erode(const Mask& m, const Kernel& k, int32_t iterations, Budget* b) {
+    const int32_t line = lineKernel(k);
+    return iterate(m, iterations, b, [&](const Mask& cur) {
+        if (line > 0) return lineMorph(cur, line, true, k.ax, false, b);
+        if (line < 0) return lineMorph(cur, -line, false, k.ay, false, b);
+        return erodePacked(cur, k, b);
+    });
+}
+
+Mask open(const Mask& m, const Kernel& k, Budget* b) {
+    const int32_t line = lineKernel(k);
+    if (line == 0) return openPacked(m, k, b);
+    // 線核：侵蝕＝¬膨脹(¬m)，中間結果留在打包格式
+    const bool hor = line > 0;
+    const int32_t len = hor ? line : -line;
+    const int32_t an = hor ? k.ax : k.ay;
+    PackedBits e = lineOrBits(packBitsNot(m, b), len, hor, an, b);
+    notBitsInPlace(e);
+    return unpackBits(lineOrBits(e, len, hor, an, b), b);
+}
+
+Mask close(const Mask& m, const Kernel& k, Budget* b) {
+    const int32_t line = lineKernel(k);
+    if (line == 0) return closePacked(m, k, b);
+    const bool hor = line > 0;
+    const int32_t len = hor ? line : -line;
+    const int32_t an = hor ? k.ax : k.ay;
+    PackedBits d = lineOrBits(packBits(m, b), len, hor, an, b);
+    notBitsInPlace(d);
+    return unpackBitsNot(lineOrBits(d, len, hor, an, b), b);
+}
+
+PackedBits erodeBits(const PackedBits& src, const Kernel& k, Budget* b) {
+    PackedBits inv = copyBits(src, b);
+    notBitsInPlace(inv);
+    PackedBits d = dilateBits(inv, k, b);
+    notBitsInPlace(d);
+    return d;
+}
+
+Mask erodePacked(const Mask& m, const Kernel& k, Budget* b) {
+    return unpackBitsNot(dilateBits(packBitsNot(m, b), k, b), b);
+}
+
+Mask closePacked(const Mask& m, const Kernel& k, Budget* b) {
+    return unpackBits(erodeBits(dilateBits(packBits(m, b), k, b), k, b), b);
+}
+
+Mask openPacked(const Mask& m, const Kernel& k, Budget* b) {
+    return unpackBits(dilateBits(erodeBits(packBits(m, b), k, b), k, b), b);
+}
+
+Mask dilateRectSep(const Mask& m, int32_t kw, int32_t kh, Budget* b) {
+    PackedBits bits = packBits(m, b);
+    if (kw > 1) bits = lineOrBits(bits, kw, true, kw / 2, b);
+    if (kh > 1) bits = lineOrBits(bits, kh, false, kh / 2, b);
+    return unpackBits(bits, b);
+}
+
+Mask closeRectSep(const Mask& m, int32_t n, Budget* b) {
+    if (n <= 1) return copyMask(m, b);
+    PackedBits bits = lineOrBits(lineOrBits(packBits(m, b), n, true, n / 2, b), n, false, n / 2, b);
+    notBitsInPlace(bits);
+    bits = lineOrBits(lineOrBits(bits, n, true, n / 2, b), n, false, n / 2, b);
+    return unpackBitsNot(bits, b);
+}
+
+// ── 第 3a 階：列打包輸入的游程標號 ──────────────────────────────────────────
+
+CcRuns ccRunsBits(const PackedBits& bits, int32_t connectivity, Budget* b) {
+    const int32_t h = bits.h, nw = bits.nw;
+    const int32_t adj = connectivity == 8 ? 1 : 0;
+    const size_t cap0 = static_cast<size_t>(imax(64, h * 2));
+    CcRuns out;
+    out.rs = Buf<int32_t>(cap0, b);
+    out.re = Buf<int32_t>(cap0, b);
+    Buf<int32_t> parent(cap0, b);
+    out.rowFirst = Buf<int32_t>(static_cast<size_t>(h) + 1, b);
+    const size_t capT = static_cast<size_t>((64 * nw + 1) / 2 + 1);
+    Buf<int32_t> ts(capT, b), te(capT, b);
+    int32_t* rs = out.rs.data();
+    int32_t* re = out.re.data();
+    int32_t* par = parent.data();
+    int32_t* rowFirst = out.rowFirst.data();
+    const uint64_t* words = bits.words.data();
+    int32_t nr = 0;
+    int64_t fg = 0;
+    for (int32_t y = 0; y < h; y++) {
+        rowFirst[y] = nr;
+        const int32_t p0 = y > 0 ? rowFirst[y - 1] : 0;
+        const int32_t p1 = nr;
+        int32_t pj = p0;
+        const int32_t cnt = bitRuns(words, static_cast<int64_t>(y) * nw, nw, ts.data(), te.data());
+        for (int32_t q = 0; q < cnt; q++) {
+            const int32_t s = ts[q];
+            const int32_t e = te[q] - 1;
+            if (static_cast<size_t>(nr) == out.rs.size()) {
+                const size_t cap = out.rs.size() * 2;
+                growI32(out.rs, cap, b);
+                growI32(out.re, cap, b);
+                growI32(parent, cap, b);
+                rs = out.rs.data();
+                re = out.re.data();
+                par = parent.data();
+            }
+            rs[nr] = s;
+            re[nr] = e;
+            par[nr] = nr;
+            while (pj < p1 && re[pj] < s - adj) pj++;
+            int32_t k = pj;
+            while (k < p1 && rs[k] <= e + adj) {
+                int32_t ra = nr;
+                while (par[ra] != ra) { par[ra] = par[par[ra]]; ra = par[ra]; }
+                int32_t rb = k;
+                while (par[rb] != rb) { par[rb] = par[par[rb]]; rb = par[rb]; }
+                if (ra != rb) {
+                    if (ra < rb) par[rb] = ra;
+                    else par[ra] = rb;
+                }
+                k++;
+            }
+            fg += e - s + 1;
+            nr++;
+        }
+    }
+    rowFirst[h] = nr;
+    Buf<int32_t> remap(static_cast<size_t>(nr), b);
+    out.lab = Buf<int32_t>(static_cast<size_t>(nr), b);
+    int32_t n = 1;
+    for (int32_t r = 0; r < nr; r++) {
+        int32_t root = r;
+        while (par[root] != root) root = par[root];
+        if (remap[root] == 0) { remap[root] = n; n++; }
+        par[r] = root;
+        out.lab[r] = remap[root];
+    }
+    out.n = n;
+    out.fg = fg;
+    out.bgLeft = 0;
+    out.bgTop = 0;
+    out.bgRight = 0;
+    out.bgBottom = 0;
+    return out;
+}
+
+// ── 第 3a 階：距離 ────────────────────────────────────────────────────────
+
+ImgI32 distanceSq(const Mask& m, Budget* b) {
+    const int32_t w = m.w, h = m.h;
+    const uint8_t* md = m.data.data();
+    const size_t sw = static_cast<size_t>(w);
+    Buf<int32_t> gB(pixelCount(w, h), b);   // 直向距離（px），沒有＝-1
+    Buf<int32_t> colB(sw, b);
+    int32_t* g = gB.data();
+    int32_t* col = colB.data();
+    for (int32_t x = 0; x < w; x++) col[x] = -1;
+    for (int32_t y = 0; y < h; y++) {
+        const size_t base = static_cast<size_t>(y) * w;
+        for (int32_t x = 0; x < w; x++) {
+            if (!md[base + x]) col[x] = 0;
+            else if (col[x] >= 0) col[x]++;
+            g[base + x] = col[x];
+        }
+    }
+    for (int32_t x = 0; x < w; x++) col[x] = -1;
+    for (int32_t y = h - 1; y >= 0; y--) {
+        const size_t base = static_cast<size_t>(y) * w;
+        for (int32_t x = 0; x < w; x++) {
+            if (!md[base + x]) col[x] = 0;
+            else if (col[x] >= 0) col[x]++;
+            const int32_t c = col[x];
+            if (c >= 0 && (g[base + x] < 0 || c < g[base + x])) g[base + x] = c;
+        }
+    }
+    ImgI32 outImg(w, h, b);
+    int32_t* out = outImg.data.data();
+    Buf<int32_t> vB(sw, b);
+    Buf<int64_t> znB(sw + 1, b), zdB(sw + 1, b), fxB(sw, b);   // 交點 z[k] = zn[k] / zd[k]（zd > 0）；zd = 0 表示 ±∞（看 zn 的號）
+    int32_t* v = vB.data();
+    int64_t* zn = znB.data();
+    int64_t* zd = zdB.data();
+    int64_t* fx = fxB.data();
+    for (int32_t y = 0; y < h; y++) {
+        const size_t base = static_cast<size_t>(y) * w;
+        int32_t k = -1;
+        for (int32_t q = 0; q < w; q++) {
+            const int32_t gq = g[base + q];
+            if (gq < 0) continue;
+            const int64_t fq = static_cast<int64_t>(gq) * gq + static_cast<int64_t>(q) * q;
+            fx[q] = fq;
+            if (k < 0) {
+                k = 0; v[0] = q; zn[0] = -1; zd[0] = 0; zn[1] = 1; zd[1] = 0;
+                continue;
+            }
+            int64_t sn, sd;
+            for (;;) {
+                const int32_t p = v[k];
+                sn = fq - fx[p];
+                sd = 2LL * (q - p);
+                // s ≤ z[k]？z[k] = -∞ 時永遠否
+                const bool le = zd[k] == 0 ? zn[k] > 0 : sn * zd[k] <= zn[k] * sd;
+                if (le && k > 0) k--;
+                else if (le) { k--; break; }
+                else break;
+            }
+            k++;
+            v[k] = q;
+            zn[k] = sn; zd[k] = sd;
+            if (k == 0) { zn[0] = -1; zd[0] = 0; }
+            zn[k + 1] = 1; zd[k + 1] = 0;
+        }
+        if (k < 0) {
+            for (int32_t x = 0; x < w; x++) out[base + x] = md[base + x] ? kDistSqInf : 0;
+            continue;
+        }
+        int32_t j = 0;
+        for (int32_t x = 0; x < w; x++) {
+            // z[j+1] < x：z = +∞ 時永遠否
+            while (zd[j + 1] != 0 && zn[j + 1] < static_cast<int64_t>(x) * zd[j + 1]) j++;
+            const int32_t p = v[j];
+            const int64_t dx = static_cast<int64_t>(x - p);
+            const int64_t d2 = dx * dx + fx[p] - static_cast<int64_t>(p) * p;
+            out[base + x] = d2 < kDistSqSat ? static_cast<int32_t>(d2) : static_cast<int32_t>(kDistSqSat);
+        }
+    }
+    return outImg;
+}
+
+ImgF32 distanceChamfer(const Mask& m, int32_t maskSize, Budget* b) {
+    if (maskSize != 3 && maskSize != 5) throw std::invalid_argument("distanceChamfer: maskSize must be 3 or 5");
+    const int32_t w = m.w, h = m.h;
+    const int32_t border = maskSize == 3 ? 1 : 2;
+    auto fix = [](float v) -> int64_t { return jm::d2l(jm::rint(static_cast<double>(v) * 65536.0)); };
+    int64_t hv, diag, lng;
+    if (maskSize == 3) { hv = fix(0.955f); diag = fix(1.3693f); lng = 0; }
+    else { hv = fix(1.0f); diag = fix(1.4f); lng = fix(2.1969f); }
+    const int64_t distMax = 0xFFFFFFFFLL - (maskSize == 3 ? diag : lng);
+    const float scale = 1.0f / 65536.0f;
+    const int64_t sw = static_cast<int64_t>(w) + 2 * border;
+    const int64_t sh = static_cast<int64_t>(h) + 2 * border;
+    Buf<int64_t> tB(static_cast<size_t>(sw * sh), b);
+    int64_t* t = tB.data();
+    const uint8_t* md = m.data.data();
+    for (int32_t bi = 0; bi < border; bi++) {
+        for (int64_t x = 0; x < sw; x++) { t[bi * sw + x] = distMax; t[(sh - 1 - bi) * sw + x] = distMax; }
+    }
+    // 前向
+    for (int32_t y = 0; y < h; y++) {
+        const int64_t row = (y + border) * sw + border;
+        for (int32_t bj = 0; bj < border; bj++) { t[row - bj - 1] = distMax; t[row + w + bj] = distMax; }
+        const size_t src = static_cast<size_t>(y) * w;
+        for (int32_t x = 0; x < w; x++) {
+            const int64_t j = row + x;
+            if (!md[src + x]) { t[j] = 0; continue; }
+            int64_t t0, c;
+            if (maskSize == 3) {
+                t0 = t[j - sw - 1] + diag;
+                c = t[j - sw] + hv; if (t0 > c) t0 = c;
+                c = t[j - sw + 1] + diag; if (t0 > c) t0 = c;
+                c = t[j - 1] + hv; if (t0 > c) t0 = c;
+            } else {
+                t0 = t[j - sw * 2 - 1] + lng;
+                c = t[j - sw * 2 + 1] + lng; if (t0 > c) t0 = c;
+                c = t[j - sw - 2] + lng; if (t0 > c) t0 = c;
+                c = t[j - sw - 1] + diag; if (t0 > c) t0 = c;
+                c = t[j - sw] + hv; if (t0 > c) t0 = c;
+                c = t[j - sw + 1] + diag; if (t0 > c) t0 = c;
+                c = t[j - sw + 2] + lng; if (t0 > c) t0 = c;
+                c = t[j - 1] + hv; if (t0 > c) t0 = c;
+            }
+            t[j] = t0 > distMax ? distMax : t0;
+        }
+    }
+    // 後向
+    ImgF32 outImg(w, h, b);
+    float* out = outImg.data.data();
+    for (int32_t y = h - 1; y >= 0; y--) {
+        const int64_t row = (y + border) * sw + border;
+        for (int32_t x = w - 1; x >= 0; x--) {
+            const int64_t j = row + x;
+            int64_t t0 = t[j];
+            if (t0 > hv) {
+                int64_t c;
+                if (maskSize == 3) {
+                    c = t[j + sw + 1] + diag; if (t0 > c) t0 = c;
+                    c = t[j + sw] + hv; if (t0 > c) t0 = c;
+                    c = t[j + sw - 1] + diag; if (t0 > c) t0 = c;
+                    c = t[j + 1] + hv; if (t0 > c) t0 = c;
+                } else {
+                    c = t[j + sw * 2 + 1] + lng; if (t0 > c) t0 = c;
+                    c = t[j + sw * 2 - 1] + lng; if (t0 > c) t0 = c;
+                    c = t[j + sw + 2] + lng; if (t0 > c) t0 = c;
+                    c = t[j + sw + 1] + diag; if (t0 > c) t0 = c;
+                    c = t[j + sw] + hv; if (t0 > c) t0 = c;
+                    c = t[j + sw - 1] + diag; if (t0 > c) t0 = c;
+                    c = t[j + sw - 2] + lng; if (t0 > c) t0 = c;
+                    c = t[j + 1] + hv; if (t0 > c) t0 = c;
+                }
+                t[j] = t0;
+            }
+            out[static_cast<size_t>(y) * w + x] = jm::l2f(t0) * scale;
+        }
+    }
+    return outImg;
+}
+
+ImgI32 chamfer5Padded(const Mask& m, Budget* b) {
+    const int32_t w = m.w, h = m.h;
+    const int32_t border = 2;
+    const int32_t hv = jm::d2i(jm::rint(1.0 * 65536));
+    const int32_t diag = jm::d2i(jm::rint(static_cast<double>(1.4f) * 65536));
+    const int32_t lng = jm::d2i(jm::rint(static_cast<double>(2.1969f) * 65536));
+    const int32_t inf = INT32_MAX / 2;
+    const int32_t sw = w + 2 * border;
+    const int32_t sh = h + 2 * border;
+    ImgI32 tImg(sw, sh, b);
+    int32_t* t = tImg.data.data();
+    const uint8_t* md = m.data.data();
+    for (int32_t bi = 0; bi < border; bi++) {
+        for (int32_t x = 0; x < sw; x++) { t[static_cast<size_t>(bi) * sw + x] = inf; t[static_cast<size_t>(sh - 1 - bi) * sw + x] = inf; }
+    }
+    for (int32_t y = 0; y < h; y++) {
+        const int64_t row = static_cast<int64_t>(y + border) * sw + border;
+        for (int32_t bj = 0; bj < border; bj++) { t[row - bj - 1] = inf; t[row + w + bj] = inf; }
+        const size_t src = static_cast<size_t>(y) * w;
+        for (int32_t x = 0; x < w; x++) {
+            const int64_t j = row + x;
+            if (!md[src + x]) { t[j] = 0; continue; }
+            const int64_t s2 = 2LL * sw;
+            int32_t t0 = t[j - s2 - 1] + lng;
+            int32_t c = t[j - s2 + 1] + lng; if (t0 > c) t0 = c;
+            c = t[j - sw - 2] + lng; if (t0 > c) t0 = c;
+            c = t[j - sw - 1] + diag; if (t0 > c) t0 = c;
+            c = t[j - sw] + hv; if (t0 > c) t0 = c;
+            c = t[j - sw + 1] + diag; if (t0 > c) t0 = c;
+            c = t[j - sw + 2] + lng; if (t0 > c) t0 = c;
+            c = t[j - 1] + hv; if (t0 > c) t0 = c;
+            t[j] = t0 > inf ? inf : t0;
+        }
+    }
+    for (int32_t y = h - 1; y >= 0; y--) {
+        const int64_t row = static_cast<int64_t>(y + border) * sw + border;
+        for (int32_t x = w - 1; x >= 0; x--) {
+            const int64_t j = row + x;
+            int32_t t0 = t[j];
+            if (t0 > hv) {
+                const int64_t s2 = 2LL * sw;
+                int32_t c = t[j + s2 + 1] + lng; if (t0 > c) t0 = c;
+                c = t[j + s2 - 1] + lng; if (t0 > c) t0 = c;
+                c = t[j + sw + 2] + lng; if (t0 > c) t0 = c;
+                c = t[j + sw + 1] + diag; if (t0 > c) t0 = c;
+                c = t[j + sw] + hv; if (t0 > c) t0 = c;
+                c = t[j + sw - 1] + diag; if (t0 > c) t0 = c;
+                c = t[j + sw - 2] + lng; if (t0 > c) t0 = c;
+                c = t[j + 1] + hv; if (t0 > c) t0 = c;
+                t[j] = t0;
+            }
+        }
+    }
+    return tImg;
 }
 
 }  // namespace prims
