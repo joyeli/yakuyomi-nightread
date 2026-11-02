@@ -99,6 +99,11 @@
 ＝`31f2ed4d…`、數值核心與 5 族熱原語逐位元相同、5 族合計 C++ 至少是 ART 的 1.5 倍）；之後逐模組搬、分開／合併模式換 C++、
 放行與溫度、加速、換預設。
 
+**第 2 階的原語（2026-11-02）**：`native/core/prims.*` 照 `Cv.kt` 逐步搬了 `dilatePacked`／`dilateBits`（含 `PackedRuns`）、`ccRuns`／`ccStats`、
+`distanceL2`、`gaussQ16`、`morphGrayGather`，產品還是 Kotlin，輸出不變、規則版本仍是 4；C++ ABI 升到 2（多了 `NightNativePrims` 的 JNI）。
+手機探針的合計倍數用 `NightPrimWorkload` 的權重：一頁產品兩檔實際的呼叫次數（掛計數器量 6 頁的中位數），不是單次呼叫平均。
+唯一不照字面抄的一處是 `distanceL2` 的開平方：C++ 直接用 float 的 sqrt，Kotlin 是 double 的 sqrt 再轉 float；53 ≥ 2·24＋2，兩者數學上相同，測試也逐值比過。
+
 ## ★★ 平台數學函式改 `StrictMath`：輸出不變、不升版本（2026-10-12，C++ 移植第 1 階段）
 
 **做法**：函式庫裡最後 6 處走平台 `Math` 的超越函數改成 `StrictMath`：`BgObjects.lineOffsets` 的 sin、cos，`textLut` 與 `inkLut`
