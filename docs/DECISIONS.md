@@ -123,6 +123,41 @@ chamfer、縮放、補洞、輪廓長、多邊形面積、測地、二值中值�
 - `CvParityTest`（對 cv2 fixture 的逐位元與容差比對）也在監聽下由 C++ 重算（`CppCvCallReplayTest.cvParityFixturesReplayed`，
   並加進錄放來源 `random`）：計畫第 3a 階的第一條自動驗收。
 
+**第 3b 階的原語（2026-11-03）**：`Cv.kt` 的灰階、濾波、繪圖、numpy 相容部分照逐步搬進 `native/core/prims_gray.cpp`、`prims_draw.cpp`。
+計畫寫的行號（:575-737、1147-1250、1656-2143、2221-2865、2921-3038）是第 3a 階加監聽之前的版本，對到 d48c5d3 是 :600-762（灰階形態學）、
+:1172-1275（高斯／方框）、:1683-2160（繪圖）、:2248-2891（numpy 相容到 Canny）、:2948-3065（morphGrayGather，第 2 階已搬）；其中
+npArgsort、npSum、eigh2 第 1 階就在 `jmath`、gaussW 與 gaussianKernel 在 `tables`、gaussQ16 第 2 階、bitRuns 第 3a 階。這一階新搬的：
+灰階形態學（dilateGray／erodeGray 與不限 8 位元的 I 版：morphGray、slidingExtreme、partialExtreme）、blackhat、sepFilter（gaussianBlur、
+boxBlur）、cv2.line（clipLine、LineIterator、Line2、FillConvexPoly、實心圓）、cv2.fillPoly、maxFilterWrapRows、gaussQ16Sparse 與它的來源
+（GrayRows、MedianRows）、medianBlur8、canny。產品還是 Kotlin，輸出不變（摘要仍是 `31f2ed4d…`）、規則版本仍是 4；C++ ABI 升到 4（多了
+`NightNativeGray` 的 12 個 JNI）。
+- **BgObjects.gaussAt 搬到底層**：效果線（EffectLines）用背景物件的 gaussAt、背景物件又用效果線的場，兩個模組互相依賴。gaussAt 只用到
+  Cv 的東西，所以 Kotlin 搬成 `Cv.gaussAt`（算法一字不改，EffectLines 改呼叫它）、C++ 放在 `prims`（最底層），之後搬效果線與背景物件時
+  兩邊各自依賴底層、不必互相依賴。
+- **錄放**：`Cv.tap` 擴大到 Cv 的全部公開原語（細粒度的 reflect101、anyBits、bitRuns 與 Ring.set／has 照舊不報）。就地改輸入的 line、
+  fillPoly 報呼叫前的複本與改好的輸入；gaussQ16Sparse 把來源換成資料（GrayRows／MedianRows 改成具名類別），結果是交給 sink 的列串成的
+  `Cv.SparseRec`；MedianRows 每填一列也報一次。npSum 拆成回報一次的外層與遞迴的本體；gaussAt、npSum 在 tap 之外不裝箱。
+  逐點的 gaussAt（CI 語料一頁 144–9,964 次）與 medianRows（0–2,476 次）每次的輸入都是整頁灰階：錄放（同 JVM 與錄到磁碟）先把同一條
+  執行緒上連續、同一份輸入的併成一批（`gaussAt[]`、`medianRows[]`）再重算／存檔。CI 語料 10 頁的產品兩檔與完整管線 258,625 次呼叫、
+  Kotlin 隨機測試（加了 RowPrimitivesTest、ObjPrimitivesTest、GatherPairTest）118,332 次、CvParityTest 3,285 次，C++ 全部相同。
+- **錄到磁碟的錄放不錄 canny、npSum**（同第 3a 階不錄 gaussQ16、morphGrayGather）：canny 的輸入是整頁 Q16（CI 語料錄下來 129 MB）、npSum
+  一頁幾千次（24 MB）。它們每一次呼叫都在同 JVM 的錄放裡比過，原語族（gray、arrays）也錄了隨機與邊界案例給 qemu 與 sanitizer 重放。
+  CI 的錄出合計約 307 MB（第 3a 階 223 MB）。
+- **FMA**：可分離濾波（gaussianBlur、boxBlur）是這一階唯一有浮點乘加的地方，而且**輸入是 0／1 也會受影響**（橫向的乘積精確，直向乘的卻是
+  橫向算出的浮點和；原本以為 0／1 的 restoreBlur 與墨密度不受影響，Math.fma 版的 Kotlin 一比就不對）。CppGrayParityTest 拿 Math.fma 版的
+  Kotlin 對照：60 組隨機可分離濾波全部會不同（74,200 個像素），fixture 頁上產品的三個濾波步驟各有 6,325–408,193 個像素會不同；C++ 全部與
+  不合成的 Kotlin 相同。手機探針的步驟表（`NightGrayWorkload`）把這三步標成 fmaSensitive，測試逐步核對標記。繪圖的 dx·dx＋dy·dy 在頁面
+  座標下是精確整數，不受影響。
+- **照抄的 Kotlin 行為**：partialExtreme 在視窗整個落在影像外時回界內段的端點**座標**（含錨點的核不會走到）；gaussAt、hline、
+  LineIterator 的陣列索引照 Kotlin 的 Int 算（y·w＋x 會環繞），欄超出頁寬但平坦索引還在頁內時照讀（讀到相鄰列），越界才丟；Kotlin
+  停不下來的 reflect101(i, 0)（gaussAt、gaussQ16Sparse 在頁高或頁寬 0 時）C++ 丟例外；canny 的負尺寸 C++ 丟例外（Kotlin 寬 0 時給一個
+  負高的空遮罩）。這些產品都不會遇到。
+- 手機探針用 `NightGrayWorkload`（同 `NightBinWorkload` 的用法，權重＝一頁產品兩檔實際的呼叫次數，2026-11-03 數 6 頁的中位數）；
+  第 3b 階的關卡是手機上「全部相同」。桌面 HotSpot 的合計倍數兩次量到 1.40、1.18（只是參考；第 2 階的經驗是手機 ART 的倍數高得多）。
+- **產品的 .so 也帶這批 JNI**（同第 2、3a 階）：nightread 的 JNI 物件連進產品唯一的 `libyakuyomi_ncnn.so`，多 12 個 `NightNativeGray`
+  入口；arm64 Release 去符號後，只含夜讀的匯出探針 .so 從 321,488 變 387,344 位元組（多 65,856，含 prims_gray／prims_draw 本身）。
+  第 9 階產品改走整頁的 C++ 入口時，連同第 2、3a 階的逐原語 JNI 一起改成只給測試與探針。
+
 ## ★★ 平台數學函式改 `StrictMath`：輸出不變、不升版本（2026-10-12，C++ 移植第 1 階段）
 
 **做法**：函式庫裡最後 6 處走平台 `Math` 的超越函數改成 `StrictMath`：`BgObjects.lineOffsets` 的 sin、cos，`textLut` 與 `inkLut`
